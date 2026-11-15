@@ -87,7 +87,11 @@ jobs:
       - name: Release
         env:
           GH_TOKEN: ${{ github.token }}
-        # twill.zip, the name PortMaster installs it under.
+        # The notes are the tag's message. The checkout above fetches the tagged commit without the tag
+        # itself, so fetch the tag. twill.zip is the name PortMaster installs it under.
         run: |
+          git fetch --force origin "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
+          git tag -l --format='%(contents)' "$GITHUB_REF_NAME" > notes.md
+          test -s notes.md || { echo "The tag has no message: use git tag -a"; exit 1; }
           gh release create "$GITHUB_REF_NAME" twill.zip \
-            --title "Twill Studio ${GITHUB_REF_NAME#v}" --notes-from-tag --verify-tag
+            --title "Twill Studio ${GITHUB_REF_NAME#v}" --notes-file notes.md --verify-tag

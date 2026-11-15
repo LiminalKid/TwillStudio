@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-"""Draws the Twill Studio wordmark (Docs/images/wordmark-{light,dark}.svg): a large "Twill" with a
-small "studio" after it and the dot of the i in the app's blue, in the app's font (Inter) turned into outlines so no font is needed to show
-it. Colours are the app's theme colours. Needs fontTools (pip install fonttools).
+"""Draws the Twill Studio wordmark (Docs/images/wordmark-{light,dark}.svg): "Twill" in Jacquard 24, a
+pixel blackletter, with the dot of its i in the app's blue, then a small "studio" in Jersey 15, a pixel
+sans on the same grid. Both are turned into outlines, so no font is needed to show it. Fonts:
+third_party/fonts/ (SIL Open Font License). Colours are the app's theme colours. Needs fontTools
+(pip install fonttools).
 
     python3 tools/make-wordmark.py
 """
@@ -13,7 +15,9 @@ from fontTools.pens.boundsPen import BoundsPen
 from fontTools.pens.recordingPen import RecordingPen, DecomposingRecordingPen
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-FONTS = os.path.join(ROOT, "third_party", "fonts", "inter")
+FONTS = os.path.join(ROOT, "third_party", "fonts")
+BIG_FONT = os.path.join(FONTS, "jacquard24", "Jacquard24-Regular.ttf")
+SMALL_FONT = os.path.join(FONTS, "jersey15", "Jersey15-Regular.ttf")
 OUT = os.path.join(ROOT, "Docs", "images")
 
 THEMES = {  # text, secondary text, note (the accent): src/app/Theme.h
@@ -22,9 +26,9 @@ THEMES = {  # text, secondary text, note (the accent): src/app/Theme.h
 }
 
 BIG = 120          # "Twill" size, px
-SMALL = 0.30       # "studio" size, relative to BIG
-TRACK_BIG = -0.02  # letter spacing, em
-TRACK_SMALL = 0.06
+SMALL = 0.34       # "studio" size, relative to BIG
+TRACK_BIG = 0.0    # letter spacing, em
+TRACK_SMALL = 0.04
 GAP = 0.10         # between the words, em of BIG
 PAD = 8
 
@@ -69,10 +73,10 @@ def word(path, text, size, track, x, baseline, dot=False):
 def main():
     os.makedirs(OUT, exist_ok=True)
     base = BIG
-    big, dot, big_w, (left, top, _, bottom) = word(os.path.join(FONTS, "Inter-SemiBold.ttf"), "Twill",
+    big, dot, big_w, (left, top, _, bottom) = word(BIG_FONT, "Twill",
                                                    BIG, TRACK_BIG, 0, base, dot=True)
     sx = big_w + GAP * BIG
-    small, _, _, (_, _, right, _) = word(os.path.join(FONTS, "Inter-Regular.ttf"), "studio",
+    small, _, _, (_, _, right, _) = word(SMALL_FONT, "studio",
                                          BIG * SMALL, TRACK_SMALL, sx, base)
     x0, y0 = left - PAD, top - PAD
     width, height = right + PAD - x0, bottom + PAD - y0
