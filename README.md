@@ -1,7 +1,8 @@
-# Twill Studio
+# TWILL Studio
 
-A portable groovebox with Plaits and sample instruments, edited in a piano roll (called Fluorescent
-until 2026-11-14). The design is in [Docs/DESIGN.md](Docs/DESIGN.md).
+Twill is a portable groovebox with built-in synthesizer and sample instrument support. Songs are edited using a piano roll. It is being designed and coded on a TrimUI Brick Pro, but the goal is for it to work on any similar device via the PortMaster standard.
+
+The design for this synth is in the [Docs/DESIGN.md](Docs/DESIGN.md) file.
 
 Status: milestones M0 to M5 are done: arrangement, piano roll, sound, mixer; macro-oscillator and
 sampler instruments with modulators, automation lanes and parameter locks; send effects; project
