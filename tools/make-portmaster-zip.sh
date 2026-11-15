@@ -27,7 +27,8 @@ cp "$BIN" "$GAME/twill.aarch64"  # already stripped (the toolchain links with -s
 chmod 755 "$GAME/twill.aarch64"
 
 L="$GAME/licenses"
-cp "$PKG/license-source/LICENSE-twillstudio.txt" "$L/"
+cp "$ROOT/LICENSE" "$L/LICENSE-twillstudio.txt"  # GPL-3.0
+cp "$ROOT/assets/factory/LICENSE" "$L/LICENSE-factory-kit.txt"  # CC0
 cp "$ROOT/third_party/eurorack/LICENSE" "$L/LICENSE-plaits-clouds.txt"
 cp "$ROOT/third_party/eurorack/stmlib/LICENSE" "$L/LICENSE-stmlib.txt"
 cp "$ROOT/third_party/fonts/inter/LICENSE.txt" "$L/LICENSE-inter-font.txt"

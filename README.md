@@ -33,7 +33,8 @@ Escape = Menu (Escape + Return quits).
 
 Then update the game lists in EmulationStation and start Twill Studio from Ports. Menu + Start
 quits. The project autosaves to `autosave.twill` next to the app; saved projects go to `projects/`,
-WAV renders to `renders/`, and the app's own sounds to `samples/Factory/`.
+WAV renders to `renders/`, and the factory drum kit (built into the app from `assets/factory/`) to
+`samples/Factory/`.
 
 For PortMaster, `tools/make-portmaster-zip.sh` packages that build as `build/portmaster/twill.zip`
 (drop it in PortMaster's autoinstall folder).
@@ -60,6 +61,15 @@ On a device: copy `build/knulli/twill_tests` and `tests/golden/` over and run it
 - `twill_macro_lab bench [frames]`: cost per voice for each engine, as a share of one core.
 
 Both run over SSH on a handheld: copy them from `build/knulli/` to the device's `/tmp`.
+
+## License
+
+Twill Studio is free software: you can redistribute it and/or modify it under the terms of the GNU
+General Public License, version 3 or (at your option) any later version, in `LICENSE`. It comes with
+no warranty.
+
+The factory kit's samples (`assets/factory/`) are dedicated to the public domain under CC0 1.0: use
+them in anything, with or without credit. Music you make with Twill Studio is yours.
 
 ## Third-party code
 

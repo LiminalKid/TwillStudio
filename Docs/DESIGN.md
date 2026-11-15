@@ -187,6 +187,11 @@ fixed-size arrays with the UI. Instead:
   Mono tracks get legato and glide, as on the M8.
 - *As built:* in a kit, Voices counts per drum (per note): drums never cut each other off, even at
   one voice, while a drum hit again cuts off its own last hit. The row reads "Voices per drum".
+- *As built (2026-11-15):* **kit drums are one-shots.** A drum plays to the end of its sample however
+  short its note: the note's end (or a live key's release) doesn't release it. It stops early when its
+  choke group cuts it, when it is stolen (at one voice per drum, by its own next hit) or at Stop. The
+  ADSR still shapes every hit through its attack, decay and sustain. Single and slice modes still end
+  at the note's end.
 - *As built:* on a one-voice macro track every note retriggers, including a note that starts
   exactly where the last one ended. A note with **glide** slurs into the next pitch with no
   retrigger. **Voices: Legato** (one step below 1; stored as 0) slurs every overlapping or touching
@@ -263,9 +268,20 @@ plus 4 **modulator** slots.
   apart; each cut sits just before the attack at a zero crossing. Each onset keeps a strength (how
   far it stands above its surroundings, favouring loud hits) for the cap.
   Slice n plays on root + n as before, and the waveform shows the cuts.
-- **Factory sounds:** on first launch the app renders sixteen sounds of its own from the macro
-  oscillator (kicks, snares, hats, toms, rim, noise, bell, particles, zap, and pluck, keys and pad
-  at C3) into `samples/Factory/`, and a kit fills with them in one step. No third-party samples.
+- **Factory kit (2026-11-15):** 22 drum samples recorded for the app from an analog drum machine
+  (kicks, snares, claps, hats, toms, cymbals, cowbell, FM percussion), in `assets/factory/` as 16-bit
+  48 kHz mono WAVs named by note ("36 Kick.wav"). They're built into the binary
+  (`cmake/embed.cmake`) and written to `samples/Factory/` on first launch, so no package carries a
+  sample folder. `load_factory_kit()` lays them out in General MIDI order from note 36 with levels,
+  hats in choke group 1, and the open hat as the long hat take with a slot decay (the ride is the
+  same take in full); "Load the factory kit" and new songs use it. The snare has a light EQ (less
+  166/211 Hz body, more top) and Clap 2 is a snare made into a clap (layered attacks). No
+  third-party samples. Until 2026-11-15 the factory sounds were rendered from the macro oscillator.
+- **New songs** start with the factory kit on track 1 ("Drums", one voice per drum) and macro
+  oscillators on tracks 2–8 (virtual analog, wavetable, formant, plucked string, string machine,
+  two-op FM, analog + filter). The demo song (100 BPM, C minor) is the same kit with a four-bar
+  groove, under bass, chords, lead, pluck and pad. The UI tests drive a fixed copy of the earlier
+  demo, so the demo can change without touching them.
 
 #### MIDI Out
 

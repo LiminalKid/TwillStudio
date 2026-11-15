@@ -69,7 +69,8 @@ std::unique_ptr<Snapshot> build_snapshot(const Project& p, int max_tracks, uint6
     st.sampler.slices = sm.slices;
     st.sampler.slice_transients = sm.slice_transients;
     for (int k = 0; k < kKitSlots; ++k)
-      st.sampler.kit[k] = SnapSampler::Slot{sm.kit[k].tune, sm.kit[k].level, sm.kit[k].pan, sm.kit[k].choke};
+      st.sampler.kit[k] = SnapSampler::Slot{sm.kit[k].tune, sm.kit[k].level, sm.kit[k].pan, sm.kit[k].choke,
+                                           sm.kit[k].decay};
     if (samples && t.instrument == InstrumentType::Sampler) {
       if (!sm.sample.empty()) st.sample = samples(sm.sample);
       if (st.sample && sm.mode == SamplerMode::Slice && sm.slice_transients)

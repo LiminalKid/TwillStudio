@@ -1,6 +1,9 @@
 #include "app/DemoSong.h"
 
 #include <initializer_list>
+#include <utility>
+
+#include "app/FactorySounds.h"
 
 namespace twill {
 
@@ -47,16 +50,18 @@ struct Builder {
 Project make_demo_song() {
   Project p;
   p.name = "Demo";
-  p.tempo = 112;
+  p.tempo = 100;
   p.key = 0;
   p.scale = ScaleType::Minor;
   p.loop_start = 0;
   p.loop_end = 8 * BAR;
   Builder b{p};
 
-  int kick = b.track("Kick", 21, 1, 0.9f);
-  int snare = b.track("Snare", 22, 1, 0.6f, 0.1f);
-  int hat = b.track("Hats", 23, 1, 0.35f, 0.25f);
+  Track drum_track = factory_kit_track();
+  drum_track.level = 0.7f;
+  drum_track.colour = 0;
+  p.tracks.push_back(drum_track);
+  const int drums = 0;
   int bass = b.track("Bass", 8, 1, 0.7f);
   int chords = b.track("Chords", 13, 3, 0.35f, -0.2f);
   int lead = b.track("Lead", 11, 1, 0.45f, 0.15f);
@@ -65,15 +70,30 @@ Project make_demo_song() {
   p.tracks[size_t(bass)].macro.decay = 0.35f;
   p.tracks[size_t(pad)].macro.timbre = 0.3f;
 
-  Clip& k = b.clip(kick, BAR, 0, 8 * BAR);
-  for (Tick t : {Tick(0), Q, 2 * Q, 3 * Q, 3 * Q + 2 * S}) Builder::note(k, t, 36, S, t % Q ? 80 : 110);
-
-  Clip& sn = b.clip(snare, BAR, 2 * BAR, 6 * BAR);
-  Builder::note(sn, Q, 55, S);
-  Builder::note(sn, 3 * Q, 55, S);
-
-  Clip& h = b.clip(hat, BAR, 0, 8 * BAR);
-  for (int i = 0; i < 8; ++i) Builder::note(h, i * 2 * S, 72, S, i % 2 ? 70 : 105);
+  // Drums on the factory kit (General MIDI notes): a four-bar groove, looped. Kick on 1, the "a"
+  // of 2 and the "and" of 3; snare on 2 and 4 with a clap on the 4 of every other bar; eighth-note
+  // hats accented on the beat, a pedal hat and an open hat; a crash on the downbeat and a tom fill
+  // to end the fourth bar.
+  enum { Kick = 36, Snare = 38, Clap = 39, TomLow = 41, Hat = 42, Pedal = 44, TomMid = 45, Open = 46,
+         TomHigh = 48, Crash = 49 };
+  Clip& dr = b.clip(drums, 4 * BAR, 0, 8 * BAR);
+  for (int bar = 0; bar < 4; ++bar) {
+    const Tick o = bar * BAR;
+    const bool fill = bar == 3;
+    for (int st : {0, 7, 10}) Builder::note(dr, o + st * S, Kick, S, st ? 95 : 115);
+    Builder::note(dr, o + 4 * S, Snare, S, 105);
+    Builder::note(dr, o + 12 * S, Snare, S, 105);
+    if (bar % 2) Builder::note(dr, o + 12 * S, Clap, S, 80);
+    for (int st = 0; st < 16; st += 2) {
+      if (fill && st >= 12) break;
+      if (st == 14) Builder::note(dr, o + st * S, Open, S, 85);  // cut by the next bar's first hat
+      else Builder::note(dr, o + st * S, Hat, S, st % 4 ? 70 : 100);
+    }
+    Builder::note(dr, o + 3 * S, Pedal, S, 55);
+  }
+  Builder::note(dr, 0, Crash, S, 90);
+  for (auto [st, pitch] : {std::pair{12, TomHigh}, {13, TomHigh}, {14, TomMid}, {15, TomLow}})
+    Builder::note(dr, 3 * BAR + Tick(st) * S, pitch, S, st == 12 ? 100 : 90);
 
   // Two bars of bass in C minor, with a slide into the last note.
   Clip& bs = b.clip(bass, 2 * BAR, 0, 8 * BAR);

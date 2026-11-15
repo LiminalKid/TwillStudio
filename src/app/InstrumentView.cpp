@@ -178,10 +178,7 @@ std::vector<InstrumentView::Row> InstrumentView::rows() {
       factory.label = "Load the factory kit";
       factory.value = [] { return std::string("press A"); };
       factory.press = [change, &app] {
-        change([](Track& tr) {
-          const auto& paths = factory_sound_paths();
-          for (int i = 0; i < kKitSlots && i < int(paths.size()); ++i) tr.sampler.kit[i].sample = paths[size_t(i)];
-        });
+        change([](Track& tr) { load_factory_kit(tr.sampler); });
         app.message("Factory kit loaded");
       };
       out.push_back(factory);
@@ -247,6 +244,25 @@ std::vector<InstrumentView::Row> InstrumentView::rows() {
         change([&](Track& tr) { tr.sampler.kit[k].choke = std::max(0, std::min(4, tr.sampler.kit[k].choke + step)); });
       };
       out.push_back(choke);
+      Row decay;
+      decay.label = "Slot decay";
+      decay.value = [&app, track, k] {
+        const float secs = kit_decay_seconds(app.project().tracks[size_t(track)].sampler.kit[k].decay);
+        if (secs <= 0) return std::string("Full");
+        char b[24];
+        if (secs < 1) std::snprintf(b, sizeof b, "%.0f ms", secs * 1000);
+        else std::snprintf(b, sizeof b, "%.1f s", secs);
+        return std::string(b);
+      };
+      decay.fraction = [&app, track, k] { return app.project().tracks[size_t(track)].sampler.kit[k].decay; };
+      decay.adjust = [change, k](int step, bool coarse) {
+        change([&](Track& tr) {
+          float& v = tr.sampler.kit[k].decay;
+          v = std::max(0.0f, std::min(1.0f, v + step * (coarse ? 0.1f : 0.02f)));
+        });
+      };
+      decay.reset = [change, k] { change([k](Track& tr) { tr.sampler.kit[k].decay = 1; }); };
+      out.push_back(decay);
     }
     for (ParamId id : {kParamAttack, kParamDecayTime, kParamSustain, kParamRelease}) out.push_back(param_row(id));
   }

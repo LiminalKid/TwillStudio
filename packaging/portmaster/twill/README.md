@@ -6,6 +6,8 @@ Songs autosave as you work and are saved to `ports/twill/projects`. Put your own
 
 Tested on the TrimUI Brick Pro and the Anbernic RG28XX (KNULLI).
 
+Twill Studio is free software under the GPL-3.0; its source is at [github.com/LiminalKid/TwillStudio](https://github.com/LiminalKid/TwillStudio). The factory drum kit is public domain (CC0), so its sounds can go in any music.
+
 ## Controls
 
 | Button | Action |

@@ -30,6 +30,7 @@ struct SnapSampler {
   struct Slot {
     float tune = 0, level = 1, pan = 0;
     int choke = 0;
+    float decay = 1;
   } kit[kKitSlots];
   void set(ParamId id, float value);  // for parameter locks
 };

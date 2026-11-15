@@ -280,7 +280,7 @@ twill::Project rich_project() {
   p.tracks[1].sampler.sample = "samples/loop.wav";
   p.tracks[1].sampler.loop = twill::LoopMode::PingPong;
   p.tracks[1].sampler.slice_transients = true;
-  p.tracks[1].sampler.kit[3] = twill::KitSlot{"/abs/snare.aif", -2, 0.5f, 0.25f, 2};
+  p.tracks[1].sampler.kit[3] = twill::KitSlot{"/abs/snare.aif", -2, 0.5f, 0.25f, 2, 0.4f};
   p.tracks[1].tone.filter = twill::FilterType::BandPass;
   p.tracks[1].tone.cutoff = 0.4f;
   p.tracks[0].send_reverb = 0.6f;
@@ -869,6 +869,55 @@ void test_kit_voices_per_drum() {
   CHECK_MSG(again < 1.2f * one, "kick then kick %.3f", again);
 }
 
+void test_kit_one_shot() {
+  // Kit drums play to the end of the sample: a very short note with the shortest release still
+  // sounds after the note has ended. Voices per drum still decide whether hits of the same drum
+  // overlap, and Single mode still stops at the note's end.
+  auto s = std::make_shared<twill::SampleData>();
+  s->frames = 48000;  // one second at a constant level
+  s->data.assign(96000, 0.1f);
+  SamplerFixture f(s);
+  twill::Track& t = f.p.tracks[0];
+  t.sampler.mode = twill::SamplerMode::Kit;
+  t.sampler.kit[0].sample = "test.wav";
+  t.voices = 4;
+  t.level = 1;
+  t.tone.attack = 0;
+  t.tone.sustain = 1;
+  t.tone.release = 0;
+  auto at = [](const std::vector<float>& o, double seconds) { return std::fabs(o[2 * size_t(seconds * 48000)]); };
+  f.p.clips[0].notes = {note_at(0, twill::kKitFirstNote, Q / 16)};
+  std::vector<float> out = f.render(1.2f);
+  const float early = at(out, 0.02), late = at(out, 0.8), after = at(out, 1.1);
+  CHECK_MSG(late > 0.9f * early, "kit drum at 0.02 s %.3f, at 0.8 s %.3f", early, late);
+  CHECK_MSG(after == 0, "after the sample ends %.3f", after);
+  // At one voice per drum, a second hit still replaces the first.
+  t.voices = 1;
+  f.p.clips[0].notes = {note_at(0, twill::kKitFirstNote, Q / 16), note_at(Q / 2, twill::kKitFirstNote, Q / 16)};
+  out = f.render(1.2f);
+  const float again = at(out, 0.5);  // well after the second hit (0.25 s at the fixture's tempo)
+  CHECK_MSG(again < 1.2f * early, "hit twice %.3f, once %.3f", again, early);
+  // At more, they overlap.
+  t.voices = 4;
+  out = f.render(1.2f);
+  CHECK_MSG(at(out, 0.5) > 1.8f * early, "hit twice at 4 voices %.3f, once %.3f", at(out, 0.5), early);
+  // A slot's decay fades the hit out: at 0.5 (about 300 ms to -60 dB) it's quieter at 0.1 s, gone by
+  // 0.5 s, and the full sample still plays when it's back at 1.
+  t.sampler.kit[0].decay = 0.5f;
+  CHECK(twill::kit_decay_seconds(0.5f) > 0.25f && twill::kit_decay_seconds(0.5f) < 0.4f);
+  CHECK(twill::kit_decay_seconds(1) == 0);
+  f.p.clips[0].notes = {note_at(0, twill::kKitFirstNote, Q / 16)};
+  out = f.render(1.2f);
+  CHECK_MSG(at(out, 0.1) < 0.5f * early && at(out, 0.1) > 0.05f * early, "decay 0.5 at 0.1 s %.4f", at(out, 0.1));
+  CHECK_MSG(at(out, 0.5) == 0, "decay 0.5 at 0.5 s %.4f", at(out, 0.5));
+  t.sampler.kit[0].decay = 1;
+  t.sampler.mode = twill::SamplerMode::Single;
+  t.sampler.sample = "test.wav";
+  f.p.clips[0].notes = {note_at(0, 60, Q / 16)};
+  out = f.render(1.2f);
+  CHECK_MSG(at(out, 0.8) < 0.01f * early, "single mode after the note %.3f", at(out, 0.8));
+}
+
 void test_sampler_loop_sustains() {
   // A 0.1 s sample, looped, under a 1 s note keeps sounding; unlooped it stops.
   std::string err;
@@ -1333,12 +1382,124 @@ void test_live_notes() {
 
 // --- UI: scripted button presses on the null platform (design §10) ------------------------
 
+// The song the UI tests drive: the demo song as it was until 2026-11-15 (Kick, Snare and Hats
+// tracks, then Bass, Chords, Lead, Pluck and Pad), kept fixed so the tests don't depend on the demo.
+namespace ui_test_song {
+using namespace twill;
+namespace {
+
+constexpr Tick Q = kTicksPerQuarter, S = Q / 4, BAR = 4 * Q;
+
+struct Builder {
+  Project& p;
+
+  int track(const char* name, int engine, int voices, float level, float pan = 0) {
+    Track t;
+    t.name = name;
+    t.macro.engine = engine;
+    t.voices = voices;
+    t.level = level;
+    t.pan = pan;
+    t.colour = uint32_t(p.tracks.size() % 8);
+    p.tracks.push_back(t);
+    return int(p.tracks.size()) - 1;
+  }
+
+  // A clip on `track`, placed at `at` for `placed` ticks (looping the clip if longer).
+  Clip& clip(int track, Tick length, Tick at, Tick placed) {
+    Clip& c = p.add_clip(track, length);
+    p.tracks[size_t(track)].arrangement.push_back(Placement{at, c.id, 0, placed});
+    return c;
+  }
+
+  static void note(Clip& c, Tick start, int pitch, Tick length, int velocity = 100, bool glide = false) {
+    Note n;
+    n.id = c.next_note_id++;
+    n.start = start;
+    n.pitch = uint8_t(pitch);
+    n.length = length;
+    n.velocity = uint8_t(velocity);
+    n.glide = glide;
+    c.notes.push_back(n);
+  }
+};
+
+}  // namespace
+
+Project make() {
+  Project p;
+  p.name = "Demo";  // the tests rename it to "Eemo"
+  p.tempo = 112;
+  p.key = 0;
+  p.scale = ScaleType::Minor;
+  p.loop_start = 0;
+  p.loop_end = 8 * BAR;
+  Builder b{p};
+
+  int kick = b.track("Kick", 21, 1, 0.9f);
+  int snare = b.track("Snare", 22, 1, 0.6f, 0.1f);
+  int hat = b.track("Hats", 23, 1, 0.35f, 0.25f);
+  int bass = b.track("Bass", 8, 1, 0.7f);
+  int chords = b.track("Chords", 13, 3, 0.35f, -0.2f);
+  int lead = b.track("Lead", 11, 1, 0.45f, 0.15f);
+  int pluck = b.track("Pluck", 19, 3, 0.35f, -0.35f);
+  int pad = b.track("Pad", 6, 3, 0.25f, 0.3f);
+  p.tracks[size_t(bass)].macro.decay = 0.35f;
+  p.tracks[size_t(pad)].macro.timbre = 0.3f;
+
+  Clip& k = b.clip(kick, BAR, 0, 8 * BAR);
+  for (Tick t : {Tick(0), Q, 2 * Q, 3 * Q, 3 * Q + 2 * S}) Builder::note(k, t, 36, S, t % Q ? 80 : 110);
+
+  Clip& sn = b.clip(snare, BAR, 2 * BAR, 6 * BAR);
+  Builder::note(sn, Q, 55, S);
+  Builder::note(sn, 3 * Q, 55, S);
+
+  Clip& h = b.clip(hat, BAR, 0, 8 * BAR);
+  for (int i = 0; i < 8; ++i) Builder::note(h, i * 2 * S, 72, S, i % 2 ? 70 : 105);
+
+  // Two bars of bass in C minor, with a slide into the last note.
+  Clip& bs = b.clip(bass, 2 * BAR, 0, 8 * BAR);
+  const int line[][3] = {{0, 36, 3}, {3, 36, 1}, {6, 48, 2}, {10, 46, 2}, {12, 43, 4},
+                         {16, 32, 3}, {19, 32, 1}, {22, 44, 2}, {26, 46, 2}, {28, 43, 2}, {30, 46, 2}};
+  for (const auto& n : line) Builder::note(bs, n[0] * S, n[1], n[2] * S, 100, n[0] == 30);
+
+  // Cm7, Abmaj7, Ebmaj7, Bb: one chord per bar.
+  Clip& ch = b.clip(chords, 4 * BAR, 0, 8 * BAR);
+  const int chord_notes[4][3] = {{60, 63, 67}, {60, 63, 68}, {62, 67, 70}, {62, 65, 70}};
+  for (int bar = 0; bar < 4; ++bar)
+    for (int pitch : chord_notes[bar]) {
+      Builder::note(ch, bar * BAR, pitch, 2 * Q + S, 90);
+      Builder::note(ch, bar * BAR + 3 * Q, pitch, Q - S, 70);
+    }
+
+  Clip& ld = b.clip(lead, 4 * BAR, 4 * BAR, 4 * BAR);
+  const int melody[][3] = {{0, 72, 6}, {6, 75, 2}, {8, 79, 8}, {16, 77, 4}, {20, 75, 4},
+                           {24, 74, 8}, {32, 72, 6}, {38, 70, 2}, {40, 67, 8}, {48, 70, 8},
+                           {56, 72, 8}};
+  for (const auto& n : melody) Builder::note(ld, n[0] * S, n[1], n[2] * S, 100, n[0] == 6 || n[0] == 38);
+
+  Clip& pl = b.clip(pluck, BAR, 2 * BAR, 6 * BAR);
+  const int arp[] = {72, 79, 75, 79, 84, 79, 75, 79};
+  for (int i = 0; i < 8; ++i) Builder::note(pl, i * 2 * S, arp[i], S, i % 4 ? 75 : 100);
+
+  Clip& pd = b.clip(pad, 4 * BAR, 0, 8 * BAR);
+  for (int bar = 0; bar < 4; ++bar)
+    for (int pitch : chord_notes[bar]) Builder::note(pd, bar * BAR, pitch - 12, BAR - S, 80);
+
+  for (Clip& c : p.clips) c.sort();
+  return p;
+}
+
+}  // namespace ui_test_song
+
 struct UiDriver {
   twill::NullPlatform platform;
   twill::App app{platform};
   twill::Canvas canvas;
   UiDriver() {
     canvas.resize(1024, 768);
+    // Start on the fixed test song, as if it had been autosaved.
+    platform.write_file(twill::App::kAutosaveName, twill::save_project(ui_test_song::make()));
     app.start();
     step(0);
   }
@@ -1576,17 +1737,17 @@ void test_ui_browser_up_a_folder() {
   ui.tap(twill::kDown);  // mode
   ui.tap(twill::kDown);  // sample
   ui.tap(twill::kA);     // the browser, in samples/: [Up a folder], Factory/ (selected)
-  ui.tap(twill::kA);     // into Factory/: [Up a folder], 01 Kick.wav (selected), ...
+  ui.tap(twill::kA);     // into Factory/: [Up a folder], 36 Kick.wav (selected), ...
   ui.tap(twill::kUp);    // "Up a folder"
   ui.tap(twill::kA);     // back in samples/, Factory/ selected
   ui.tap(twill::kA);     // into Factory/ again
-  ui.tap(twill::kA);     // pick 01 Kick
-  CHECK(ui.app.project().tracks[0].sampler.sample == "samples/Factory/01 Kick.wav");
+  ui.tap(twill::kA);     // pick 36 Kick
+  CHECK(ui.app.project().tracks[0].sampler.sample == "samples/Factory/36 Kick.wav");
 }
 
 void test_ui_sound_view_kit() {
   UiDriver ui;
-  CHECK(ui.platform.files.count("samples/Factory/01 Kick.wav") == 1);  // factory sounds were made
+  CHECK(ui.platform.files.count("samples/Factory/36 Kick.wav") == 1);  // factory sounds were made
   ui.tap(twill::kLeft, twill::kSelect);  // arrangement -> mixer
   ui.tap(twill::kLeft, twill::kSelect);  // -> sound view
   CHECK(ui.app.view() == twill::App::View::Instrument);
@@ -1599,8 +1760,12 @@ void test_ui_sound_view_kit() {
   const twill::Track& t = ui.app.project().tracks[0];
   CHECK(t.instrument == twill::InstrumentType::Sampler);
   CHECK(t.sampler.mode == twill::SamplerMode::Kit);
-  CHECK(t.sampler.kit[0].sample == "samples/Factory/01 Kick.wav");
+  CHECK(t.sampler.kit[0].sample == "samples/Factory/36 Kick.wav");
   CHECK(ui.app.load_sample(t.sampler.kit[0].sample) != nullptr);
+  // With the kit's settings: General MIDI notes, hats in a choke group, the open hat decayed.
+  CHECK(t.sampler.kit[38 - twill::kKitFirstNote].sample == "samples/Factory/38 Snare.wav");
+  CHECK(t.sampler.kit[42 - twill::kKitFirstNote].choke == 1 && t.sampler.kit[46 - twill::kKitFirstNote].choke == 1);
+  CHECK(t.sampler.kit[46 - twill::kKitFirstNote].decay < 1 && t.sampler.kit[51 - twill::kKitFirstNote].decay == 1);
   for (int i = 0; i < 6; ++i) ui.tap(twill::kB, twill::kSelect);  // undo all six changes
   CHECK(ui.app.project().tracks[0].instrument == twill::InstrumentType::Macro);
   CHECK(ui.app.project().tracks[0].sampler.kit[0].sample.empty());
@@ -1611,7 +1776,7 @@ void test_ui_sound_view_kit() {
 void test_ui_unused_samples_freed() {
   UiDriver ui;
   ui.audio = true;
-  const std::string kick = "samples/Factory/01 Kick.wav", snare = "samples/Factory/03 Snare.wav";
+  const std::string kick = "samples/Factory/36 Kick.wav", snare = "samples/Factory/38 Snare.wav";
   twill::Track t = ui.app.project().tracks[0];
   t.instrument = twill::InstrumentType::Sampler;
   t.sampler.sample = kick;
@@ -2096,6 +2261,7 @@ int main(int argc, char** argv) {
       {"sampler_slices_and_kit", test_sampler_slices_and_kit},
       {"sampler_loop_sustains", test_sampler_loop_sustains},
       {"kit_voices_per_drum", test_kit_voices_per_drum},
+      {"kit_one_shot", test_kit_one_shot},
       {"sampler_transient_slices", test_sampler_transient_slices},
       {"filter_darkens", test_filter_darkens},
       {"modulators", test_modulators},

@@ -128,6 +128,9 @@ class Engine {
     float pan = 0;             // kit slot pan
     int choke = 0;
     bool live = false;         // held by a live note: released by live_note(.., 0), not a timer
+    bool one_shot = false;     // a kit drum: plays to the end of its sample, whatever the note length
+    float fade = 1;            // a kit slot's decay: the level now, and its fall per grid block
+    float fade_per_block = 1;
   };
 
   void apply_command(const Command& c);

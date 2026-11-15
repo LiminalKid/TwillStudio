@@ -44,8 +44,17 @@ add_library(twill_core STATIC
   src/gfx/Canvas.cpp
   src/gfx/Font.cpp
   src/gfx/gen/fonts.cpp
+  ${CMAKE_BINARY_DIR}/gen/factory_data.cpp
 )
 target_include_directories(twill_core PUBLIC src)
+# The factory kit's samples (assets/factory/), built into the binary.
+file(GLOB TWILL_FACTORY_FILES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/assets/factory/*.wav)
+add_custom_command(
+  OUTPUT ${CMAKE_BINARY_DIR}/gen/factory_data.cpp
+  COMMAND ${CMAKE_COMMAND} -DDIR=${CMAKE_SOURCE_DIR}/assets/factory -DOUT=${CMAKE_BINARY_DIR}/gen/factory_data.cpp
+          -P ${CMAKE_SOURCE_DIR}/cmake/embed.cmake
+  DEPENDS ${TWILL_FACTORY_FILES} ${CMAKE_SOURCE_DIR}/cmake/embed.cmake
+  COMMENT "Embedding the factory kit")
 # Version.h (version, commit, build date) for the About panel, refreshed at every build.
 set(TWILL_GEN_DIR "${CMAKE_BINARY_DIR}/gen")
 add_custom_target(twill_version

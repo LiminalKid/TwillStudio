@@ -216,6 +216,9 @@ void App::open_about() {
   const AudioInfo ai = p_.audio_info();
   fields.push_back(row("Audio", std::to_string(ai.sample_rate) + " Hz, " + std::to_string(ai.block_frames) + " frames"));
   fields.push_back(row("Screen", std::to_string(size_.w) + " x " + std::to_string(size_.h)));
+  // Free software: the GPL asks an interactive program to say so, and that there's no warranty.
+  fields.push_back(row("License", "GPL-3.0, no warranty"));
+  fields.push_back(row("Factory kit", "CC0, public domain"));
   open_inspector("About Twill Studio", std::move(fields));
 }
 
@@ -334,12 +337,15 @@ void App::new_project() {
   Project p;
   p.name = auto_names_ ? fresh_song_name() : "Untitled";
   p.loop = false;
-  const int engines[8] = {21, 22, 23, 8, 13, 11, 19, 6};
-  const int voices[8] = {1, 1, 1, 1, 3, 1, 3, 3};
-  for (int i = 0; i < 8 && i < p_.max_tracks(); ++i) {
+  // Track 1 is the factory drum kit; the rest are macro oscillators set up for parts: virtual analog
+  // (bass), wavetable, formant, plucked string, string machine, two-op FM, analog + filter.
+  p.tracks.push_back(factory_kit_track());
+  const int engines[7] = {8, 13, 11, 19, 6, 10, 0};
+  const int voices[7] = {1, 3, 1, 3, 3, 3, 1};
+  for (int i = 0; i < 7 && i + 1 < p_.max_tracks(); ++i) {
     Track t;
-    t.name = "Track " + std::to_string(i + 1);
-    t.colour = uint32_t(i);
+    t.name = "Track " + std::to_string(i + 2);
+    t.colour = uint32_t(i + 1);
     t.macro.engine = engines[i];
     t.voices = voices[i];
     p.tracks.push_back(t);

@@ -106,6 +106,9 @@ std::string voices_label(int voices);
 // Conversions shared by the engine and the UI.
 float cutoff_hz(float v);      // 0-1 to 20 Hz - 20 kHz
 float env_seconds(float v);
+// A kit slot's decay: the time a hit takes to fade by 60 dB, 20 ms to about 3.6 s; 0 at 1, which
+// means no fade (the drum plays to the end of its sample).
+float kit_decay_seconds(float v);
 // The master compressor's settings in real units.
 float comp_threshold_db(float v);  // 0 .. -40
 float comp_ratio(float v);         // 1.5 .. 10
@@ -211,8 +214,10 @@ struct KitSlot {
   float level = 1;
   float pan = 0;
   int choke = 0;       // 0: none; slots sharing a group cut each other off
+  float decay = 1;     // 0-1, see kit_decay_seconds(); 1: the whole sample (track chunk version 8)
   bool operator==(const KitSlot& o) const {
-    return sample == o.sample && tune == o.tune && level == o.level && pan == o.pan && choke == o.choke;
+    return sample == o.sample && tune == o.tune && level == o.level && pan == o.pan && choke == o.choke &&
+           decay == o.decay;
   }
 };
 

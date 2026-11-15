@@ -257,7 +257,7 @@ void Engine::apply_command(const Command& c) {
       for (auto& v : voices_)
         if (v->live && v->track == c.track && v->note.pitch == c.pitch && v->gate > 0) {
           v->live = false;
-          release(*v);
+          if (!v->one_shot) release(*v);
         }
       break;
   }
@@ -299,6 +299,8 @@ bool Engine::start_sampler(Voice& v, const SnapTrack& t, const Note& n) {
   const SnapSampler& sm = s.sampler;
   v.pan = 0;
   v.choke = 0;
+  v.fade = 1;
+  v.fade_per_block = 1;
   v.done = false;
   v.dir = 1;
   const SampleData* smp = nullptr;
@@ -339,6 +341,8 @@ bool Engine::start_sampler(Voice& v, const SnapTrack& t, const Note& n) {
       v.gain *= sm.kit[i].level;
       v.pan = sm.kit[i].pan;
       v.choke = sm.kit[i].choke;
+      if (const float secs = kit_decay_seconds(sm.kit[i].decay); secs > 0)
+        v.fade_per_block = std::pow(0.001f, float(kSubBlock) / (secs * float(kSampleRate)));  // -60 dB in secs
       a = 0, b = 1, la = 0, lb = 1;
       loop = LoopMode::Off;
       reverse = false;
@@ -380,6 +384,7 @@ void Engine::start_voice(Voice& v, int track, const Note& n, int64_t gate, bool 
   v.last_peak = 0;
   v.started = clock_;  // clock_ is the start of the current sub-block
   v.live = false;
+  v.one_shot = false;
   if (!legato) {  // a legato note carries its modulators on, as it does the amp envelope
     v.mod_started = clock_;
     for (int m = 0; m < kModulators; ++m) {
@@ -397,6 +402,12 @@ void Engine::start_voice(Voice& v, int track, const Note& n, int64_t gate, bool 
     if (!start_sampler(v, t, n)) {
       v.track = -1;  // nothing to play (no sample, or the note has no slice or kit slot)
       return;
+    }
+    // Kit drums are one-shots: the note's end doesn't release them. They stop at the end of the
+    // sample, or early when choked, stolen (a drum hit again at one voice per drum) or stopped.
+    if (t.sampler.mode == SamplerMode::Kit) {
+      v.one_shot = true;
+      v.gate = INT64_MAX / 2;
     }
     v.env.gate_on();
     return;
@@ -789,6 +800,12 @@ void Engine::render(float* out, int frames) {
       } else if (use_adsr) {
         env_from = env_to = v.env.level();
       }
+      if (v.fade_per_block < 1) {  // a kit slot's decay, on top of the envelope
+        env_from *= v.fade;
+        if (grid_start) v.fade *= v.fade_per_block;
+        env_to *= v.fade;
+        if (v.fade < 0.001f) v.done = true;  // faded out: free it at the end of the grid block
+      }
 
       if (v.instrument == InstrumentType::Macro) {
         if (grid_start) v.glide_note += (v.pitch_target - v.glide_note) * glide_step;
@@ -848,6 +865,7 @@ void Engine::render(float* out, int frames) {
       if (v.gate > 0) {
         v.gate -= n;
         if (v.gate <= 0) release(v);
+        else if (v.one_shot && grid_end && v.env.idle()) v.track = -1;  // choked or hit again: free
       } else if (grid_end) {
         v.quiet = peak < kQuietLevel ? v.quiet + 1 : 0;
         bool finished;

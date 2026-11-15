@@ -188,6 +188,11 @@ float comp_threshold_db(float v) { return -40.0f * std::min(1.0f, std::max(0.0f,
 float comp_ratio(float v) { return 1.5f + 8.5f * std::min(1.0f, std::max(0.0f, v)); }
 float comp_release_seconds(float v) { return 0.03f * std::pow(1.0f / 0.03f, std::min(1.0f, std::max(0.0f, v))); }
 
+float kit_decay_seconds(float v) {
+  if (v >= 1) return 0;
+  return 0.02f * std::pow(200.0f, std::max(0.0f, v) / 0.98f);
+}
+
 float env_seconds(float v) { return 0.001f * std::pow(10000.0f, std::min(1.0f, std::max(0.0f, v))); }
 
 std::string format_param(ParamId id, float v) {
