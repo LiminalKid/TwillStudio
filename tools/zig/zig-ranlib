@@ -1,0 +1,4 @@
+#!/bin/sh
+# Wrapper so CMake can use "zig ranlib" as a single compiler path (see cmake/toolchains/).
+ZIG="${ZIG:-$(command -v zig || echo /opt/homebrew/bin/zig)}"
+exec "$ZIG" ranlib  "$@"

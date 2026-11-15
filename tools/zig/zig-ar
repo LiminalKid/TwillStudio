@@ -1,0 +1,4 @@
+#!/bin/sh
+# Wrapper so CMake can use "zig ar" as a single compiler path (see cmake/toolchains/).
+ZIG="${ZIG:-$(command -v zig || echo /opt/homebrew/bin/zig)}"
+exec "$ZIG" ar  "$@"

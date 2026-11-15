@@ -1,0 +1,24 @@
+{
+  "version": 3,
+  "configurePresets": [
+    {
+      "name": "macos",
+      "displayName": "macOS (SDL2 from Homebrew)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/macos",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
+    },
+    {
+      "name": "knulli",
+      "displayName": "KNULLI handhelds, AArch64 (TrimUI Brick Pro)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/knulli",
+      "toolchainFile": "${sourceDir}/cmake/toolchains/knulli-aarch64.cmake",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
+    }
+  ],
+  "buildPresets": [
+    { "name": "macos", "configurePreset": "macos" },
+    { "name": "knulli", "configurePreset": "knulli" }
+  ]
+}
