@@ -72,6 +72,17 @@ On a device: copy `build/knulli/twill_tests` and `tests/golden/` over and run it
 
 Both run over SSH on a handheld: copy them from `build/knulli/` to the device's `/tmp`.
 
+## Releases
+
+GitHub Actions (`.github/workflows/build.yml`) builds the handheld version and runs the tests on
+GitHub's AArch64 Linux machines for every push to `main`. A version tag publishes a release:
+
+1. Set the version in `CMakeLists.txt` (`project(TwillStudio VERSION x.y.z)`) and push it.
+2. Tag that commit with the release notes as the tag's message, and push the tag:
+   `git tag -a vx.y.z -m "notes"` then `git push origin vx.y.z`.
+3. The workflow checks the tag matches the version, builds, tests, and publishes "Twill Studio x.y.z"
+   with `twill.zip` (the PortMaster package) attached.
+
 ## License
 
 Twill Studio is free software: you can redistribute it and/or modify it under the terms of the GNU

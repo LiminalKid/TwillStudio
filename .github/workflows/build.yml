@@ -1,0 +1,93 @@
+# Builds the handheld version and runs the tests on every push to main; on a version tag (v0.2.0)
+# it also publishes a GitHub release with the PortMaster zip, its notes taken from the tag's message.
+#
+# It runs on GitHub's AArch64 Linux machines, so the tests run natively, as they would on a handheld.
+# The build is the same as tools/make-knulli-sysroot.sh plus the knulli preset, except that the SDL2
+# library linked against is Ubuntu's rather than one copied from a KNULLI device: the binary only
+# needs libSDL2-2.0.so.0 at run time, and uses the device's own.
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  ZIG_VERSION: 0.17.1
+  ZIG_SHA256: a1546d5646eb184437918d6635ca6b762a0e889eac09cef720ee7a1ed3fe7795  # zig-aarch64-linux-0.17.1.tar.xz
+  SDL_VERSION: 2.32.8  # the headers match what KNULLI ships
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tools
+        run: sudo apt-get update -q && sudo apt-get install -y -q ninja-build zip libsdl2-2.0-0
+
+      - name: Zig
+        run: |
+          cd "$RUNNER_TEMP"
+          curl -sSfL -o zig.tar.xz "https://ziglang.org/download/$ZIG_VERSION/zig-aarch64-linux-$ZIG_VERSION.tar.xz"
+          echo "$ZIG_SHA256  zig.tar.xz" | sha256sum -c -
+          tar xf zig.tar.xz
+          echo "ZIG=$RUNNER_TEMP/zig-aarch64-linux-$ZIG_VERSION/zig" >> "$GITHUB_ENV"
+
+      - name: Sysroot (SDL2)
+        run: |
+          S="$RUNNER_TEMP/sysroot"
+          mkdir -p "$S/usr/lib" "$S/usr/include/SDL2"
+          cp -L /usr/lib/aarch64-linux-gnu/libSDL2-2.0.so.0 "$S/usr/lib/"
+          ln -s libSDL2-2.0.so.0 "$S/usr/lib/libSDL2.so"
+          curl -sSfL "https://github.com/libsdl-org/SDL/releases/download/release-$SDL_VERSION/SDL2-$SDL_VERSION.tar.gz" \
+            | tar xz -C "$RUNNER_TEMP"
+          cp "$RUNNER_TEMP/SDL2-$SDL_VERSION"/include/*.h "$S/usr/include/SDL2/"
+          echo "TWILL_SYSROOT=$S" >> "$GITHUB_ENV"
+
+      - name: Build
+        run: |
+          cmake --preset knulli
+          cmake --build --preset knulli
+
+      - name: Tests
+        run: build/knulli/twill_tests
+
+      - name: PortMaster zip
+        run: tools/make-portmaster-zip.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: twill-portmaster
+          path: build/portmaster/twill.zip
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tag matches the version
+        run: |
+          v=$(sed -n 's/^project(TwillStudio VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)
+          test "v$v" = "$GITHUB_REF_NAME" || { echo "Tag $GITHUB_REF_NAME, but CMakeLists.txt says $v"; exit 1; }
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: twill-portmaster
+
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # twill.zip, the name PortMaster installs it under.
+        run: |
+          gh release create "$GITHUB_REF_NAME" twill.zip \
+            --title "Twill Studio ${GITHUB_REF_NAME#v}" --notes-from-tag --verify-tag
