@@ -29,6 +29,9 @@ class ArrangementView {
   void paste();  // an independent copy at the cursor, on any track (Y makes a linked one)
   void open_project_settings();  // tempo, key, scale, files, MIDI clock (Menu, from any view)
 
+  // A global chord used L or R (L/R + Start): releasing it then does nothing here.
+  void consume_lr() { lr_used_ = true; }
+
  private:
   static constexpr Tick kBar = 4 * kTicksPerQuarter;
   struct Layout {

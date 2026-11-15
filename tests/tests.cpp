@@ -1852,6 +1852,26 @@ void test_ui_l2_r2_are_l_r() {
   CHECK(ui.app.track() == track);
 }
 
+void test_ui_play_from_cursor() {
+  // L or R + Start plays from the cursor, and the shoulder button's release doesn't change track.
+  // Select + Start does nothing: it's left to the handhelds' "close the app" shortcut.
+  UiDriver ui;
+  ui.audio = true;
+  ui.tap(twill::kRight, twill::kSelect);  // the roll
+  for (int i = 0; i < 4; ++i) ui.tap(twill::kRight);  // a beat in
+  const int track = ui.app.track();
+  ui.tap(twill::kStart, twill::kR);
+  ui.step(0);
+  CHECK(ui.app.engine().playing());
+  CHECK_MSG(ui.app.engine().position() >= Q, "played from %d", int(ui.app.engine().position()));
+  CHECK(ui.app.track() == track);
+  ui.tap(twill::kStart);  // stop
+  CHECK(!ui.app.engine().playing());
+  ui.tap(twill::kStart, twill::kSelect);
+  ui.step(0);
+  CHECK(!ui.app.engine().playing());
+}
+
 void test_ui_project_tempo() {
   UiDriver ui;
   ui.tap(twill::kDown);  // Snare: bar 1 is empty
@@ -2105,6 +2125,7 @@ int main(int argc, char** argv) {
       {"ui_lane_velocity_and_automation", test_ui_lane_velocity_and_automation},
       {"ui_project_tempo", test_ui_project_tempo},
       {"ui_l2_r2_are_l_r", test_ui_l2_r2_are_l_r},
+      {"ui_play_from_cursor", test_ui_play_from_cursor},
       {"ui_select_all", test_ui_select_all},
       {"ui_song_names", test_ui_song_names},
       {"ui_menu_opens_project", test_ui_menu_opens_project},

@@ -11,6 +11,7 @@ constexpr float kLabelW = 64, kNameH = 30, kLevelH = 118, kMinLevelH = 80, kRowH
 constexpr int kRows = 6;  // under the level: pan, three sends, mute, solo
 const char* const kRowNames[] = {"Level", "Pan", "Chorus", "Delay", "Reverb", "Mute", "Solo"};
 const char* const kMasterRowNames[] = {"Level", "EQ low", "EQ mid", "EQ high", "", "", ""};
+const char* const kMasterRowShort[] = {"Level", "Low", "Mid", "High", "", "", ""};  // narrow strips
 }  // namespace
 
 MixerView::Layout MixerView::layout() const {
@@ -259,13 +260,18 @@ void MixerView::draw(Canvas& c) {
       }
     }
     if (master) {
+      const float fits = sr.w - 2 * pad;
+      bool long_names = true;  // all long or all short
+      for (int row = kPan; row <= kDelay; ++row) long_names = long_names && small.measure(kMasterRowNames[row]) <= fits;
+      const char* const* names = long_names ? kMasterRowNames : kMasterRowShort;
       for (int row = kPan; row <= kDelay; ++row)
-        c.text(small, sr.x + pad, row_y(row) + int(app_.u(3)) + small.ascent(), kMasterRowNames[row], th.text_secondary);
+        c.text(small, sr.x + pad, row_y(row) + int(app_.u(3)) + small.ascent(), names[row], th.text_secondary);
       // The compressor (set in the effects panel): how hard it's working.
       c.text(small, sr.x + pad, row_y(kReverb) + int(app_.u(9)), "Comp", th.text_secondary);
       char gr[24];
       if (comp_shown_ < 0) std::snprintf(gr, sizeof gr, "Off");
       else std::snprintf(gr, sizeof gr, "-%.1f dB", comp_shown_);
+      if (fb.measure(gr) > fits && comp_shown_ >= 0) std::snprintf(gr, sizeof gr, "-%.1f", comp_shown_);
       c.text(fb, sr.x + pad, row_y(kReverb) + int(app_.u(24)), gr, comp_shown_ >= 6 ? th.warning : th.text);
     }
   }

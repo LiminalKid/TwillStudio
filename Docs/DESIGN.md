@@ -363,6 +363,11 @@ Brick Pro), full-screen at the display's native mode on desktop, and the full ba
 on high-DPI screens (a Retina window draws at 2× its point size). It is never a small canvas scaled up.
 The SDL2 adapter asks for the largest display mode and a high-DPI window, and reports the real pixel
 size back.
+- *Portrait panels* (a portrait panel in a landscape case, like the RG28XX's): the app draws
+  landscape and turns the picture on its way out, the way the kernel says the panel is mounted
+  (`fbcon=rotate:` on the boot command line, else the DRM panel's `panel_orientation`, the same
+  sources PortMaster reads), else 270°. `TWILL_ROTATE=0/90/270` overrides it; the RG28XX launcher
+  sets 270, the direction checked on the device, until the kernel's answer has been seen in its log.
 
 - **gfx/** is a small software rasterizer of our own: filled and rounded rectangles, lines, alpha
   blending, clipping, bitmap blits. It needs no GPU, so it ports anywhere a framebuffer can be shown.
@@ -445,7 +450,7 @@ when built with uncommitted changes), build date, audio and screen. `cmake/versi
 | L / R (tap) | previous / next track |
 | L / R held + d-pad | in the roll: the grid (left/right; the view zooms with it, and a message names the new grid) and scroll by page (up/down); in the arrangement: zoom |
 | Select held + d-pad | switch view: arrangement, piano roll, instrument, mixer |
-| Start | play / stop (Select + Start: play from the cursor) |
+| Start | play / stop (L or R + Start: play from the cursor) |
 
 Most handhelds also have L2/R2 and analog sticks; they add shortcuts (sticks for scrolling, L2/R2 for
 snap and velocity) but nothing requires them. On desktop, a mouse and keyboard work as in any piano
@@ -463,8 +468,10 @@ and record into the clip, quantized or not.
 - **Zoom is the grid step:** L/R + left/right steps through 1 bar ... 1/64 (with triplets); cells
   keep their width, so the cursor always moves one cell.
 - **Global chords:** Select + left/right switches view, Select + B undoes, Select + A redoes,
-  Select + Start plays from the cursor. **Menu + Start quits**, since Select + Start is taken. **Menu on its own opens the
-  project panel** (tempo, key, scale, files, MIDI clock) from any view; the hint bar says so when
+  L or R + Start plays from the cursor (it was Select + Start until 0.2.0; that's PortMaster's and
+  most handheld front ends' "close the app" shortcut, so the app leaves it free). **Menu + Start
+  quits** (on a few devices PortMaster closes ports with that same chord, which is just as good).
+  **Menu on its own opens the project panel** (tempo, key, scale, files, MIDI clock) from any view; the hint bar says so when
   there is room. (X on an empty bar in the arrangement still opens it too.)
   (Select + up/down changed tempo in M3; since M5 it moves between the notes and the lane strip, and
   tempo is in the project panel.)
@@ -554,13 +561,24 @@ Project
 - **CMake**, a toolchain file per target, a preset per platform (`brickpro`, `macos`, `linux-x64`,
   `headless`, later `web`).
 - **Brick Pro / KNULLI:** AArch64, Cortex-A53, cross-compiled with **Zig** (`zig c++`, target
-  `aarch64-linux-gnu.2.38`), which supplies glibc stubs and links libc++ statically. The binary needs
-  only glibc and the device's own SDL2. glibc 2.38 is the oldest the device's SDL2 links against
-  (KNULLI 20260921 has 2.40). A small sysroot holds that SDL2 and matching headers
+  `aarch64-linux-gnu.2.29`), which supplies glibc stubs and links libc++ statically. The binary needs
+  only glibc and the device's own SDL2. *Since 2026-11-15* the target is glibc 2.29, PortMaster's
+  floor (the binary itself asks for no more than 2.27); the KNULLI SDL2 it links against was built
+  for a newer glibc, so the link skips checking that library's own references
+  (`--allow-shlib-undefined`), which the device resolves. The Cortex-A53 tuning stays: the binary
+  has only ARMv8.0 instructions, so any 64-bit handheld runs it, and it's about 4% faster on the
+  Brick than generic ARMv8-A. A small sysroot holds that SDL2 and matching headers
   (`tools/make-knulli-sysroot.sh`). On the device SDL2 uses the `mali` video driver with the
   OpenGL ES 2 renderer, and ALSA (PipeWire) audio.
 - **Packaging:** a launcher script and an app folder for KNULLI's Ports, as with
-  LittleGPTracker; a PortMaster package later.
+  LittleGPTracker; and a PortMaster package (*2026-11-15*): `packaging/portmaster/` holds the
+  launcher (PortMaster's standard template: its controller mapping, gptokeyb2 for the close-app
+  shortcut only, no bundled libraries), `port.json` (rtr, `!lowres`, `min_glibc` 2.27), the README
+  and gameinfo; `tools/make-portmaster-zip.sh` adds the stripped binary as `twill.aarch64` and the
+  licences from `third_party/` and writes a zip in the installed layout. Checked at PortMaster's
+  test sizes with headless renders: 640x480, 720x720 (the top bar drops the track name, the master
+  strip uses short EQ labels) and 1280x720 are fine; 480x320 works but is cramped, hence `!lowres`.
+  On a GameController pad a stick click stands in for Menu (not every handheld has one).
 - **Third-party code** is vendored under `third_party/` with its licences and source commit: `plaits/dsp`,
   the `stmlib` subset, Clouds' reverb, `dr_wav`, and the font (OFL).
 

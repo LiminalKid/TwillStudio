@@ -35,6 +35,9 @@ class PianoRollView {
   void select_all();  // every note in the open clip
   void paste();  // at the cursor, keeping pitches and spacing; the pasted notes end up selected
 
+  // A global chord used L or R (L/R + Start): releasing it then does nothing here.
+  void consume_lr() { lr_used_ = true; }
+
  private:
   struct Layout {
     Rect ruler, keys, grid;

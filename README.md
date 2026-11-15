@@ -1,4 +1,9 @@
-# TWILL Studio
+<h1>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="Docs/images/wordmark-dark.svg">
+    <img src="Docs/images/wordmark-light.svg" alt="Twill Studio" height="80">
+  </picture>
+</h1>
 
 Twill is a portable groovebox with built-in synthesizer and sample instrument support. Songs are edited using a piano roll. It is being designed and coded on a TrimUI Brick Pro running KNULLI, but the goal is for it to work on any similar device via the PortMaster standard.
 
@@ -29,6 +34,9 @@ Escape = Menu (Escape + Return quits).
 Then update the game lists in EmulationStation and start Twill Studio from Ports. Menu + Start
 quits. The project autosaves to `autosave.twill` next to the app; saved projects go to `projects/`,
 WAV renders to `renders/`, and the app's own sounds to `samples/Factory/`.
+
+For PortMaster, `tools/make-portmaster-zip.sh` packages that build as `build/portmaster/twill.zip`
+(drop it in PortMaster's autoinstall folder).
 
 ## Test hooks
 

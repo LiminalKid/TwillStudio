@@ -1,4 +1,4 @@
 #!/bin/sh
 # Wrapper so CMake can use "zig cc" as a single compiler path (see cmake/toolchains/).
 ZIG="${ZIG:-$(command -v zig || echo /opt/homebrew/bin/zig)}"
-exec "$ZIG" cc -target "${TWILL_ZIG_TARGET:-aarch64-linux-gnu.2.38}" -mcpu=cortex_a53 "$@"
+exec "$ZIG" cc -target "${TWILL_ZIG_TARGET:-aarch64-linux-gnu.2.29}" -mcpu=cortex_a53 "$@"

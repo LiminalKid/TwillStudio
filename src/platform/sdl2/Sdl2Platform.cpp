@@ -21,6 +21,41 @@ namespace twill {
 
 namespace {
 
+// Which way a portrait panel is mounted, as the kernel has it: the console rotation on the boot
+// command line (fbcon=rotate:1 or 3), or the DRM panel's orientation. 0 when it doesn't say.
+int kernel_rotation() {
+  if (FILE* f = std::fopen("/proc/cmdline", "r")) {
+    char line[2048] = {};
+    const size_t n = std::fread(line, 1, sizeof line - 1, f);
+    std::fclose(f);
+    line[n] = 0;
+    if (const char* r = std::strstr(line, "fbcon=rotate:")) {
+      if (r[13] == '1') return 90;
+      if (r[13] == '3') return 270;
+    }
+  }
+  if (DIR* d = opendir("/sys/class/drm")) {
+    int rot = 0;
+    while (dirent* e = readdir(d)) {
+      if (std::strncmp(e->d_name, "card", 4) != 0 || !std::strchr(e->d_name, '-')) continue;
+      const std::string path = std::string("/sys/class/drm/") + e->d_name + "/panel_orientation";
+      if (FILE* f = std::fopen(path.c_str(), "r")) {
+        char v[32] = {};
+        if (std::fgets(v, sizeof v, f)) {
+          if (std::strncmp(v, "left_side_up", 12) == 0) rot = 270;
+          if (std::strncmp(v, "right_side_up", 13) == 0) rot = 90;
+        }
+        std::fclose(f);
+      }
+      if (rot) break;
+    }
+    closedir(d);
+    return rot;
+  }
+  return 0;
+}
+
+
 // Joysticks whose raw button numbers we know, matched by name. Anything else is looked up in the
 // front end's own controller config (below), then SDL's game controller mapping.
 struct KnownPad {
@@ -150,11 +185,13 @@ void Sdl2Platform::update_size() {
   int w = 0, h = 0;
   SDL_GetRendererOutputSize(renderer_, &w, &h);  // real pixels, including high-DPI
   // Some handhelds (the Anbernic RG28XX) have a portrait panel in a landscape case. The app draws
-  // landscape and the picture is turned on its way out. TWILL_ROTATE=90 or 270 picks the direction
-  // (0 turns it off); 270 by default.
+  // landscape and the picture is turned on its way out: the way the kernel says the panel is
+  // mounted, else 270. TWILL_ROTATE=90 or 270 overrides that (0 turns it off).
   rotate_ = 0;
   if (handheld_ && h > w) {
-    rotate_ = 270;
+    const int kernel = kernel_rotation();
+    log("portrait panel; the kernel says it is turned %d (0: it doesn't say)", kernel);
+    rotate_ = kernel ? kernel : 270;
     if (const char* r = std::getenv("TWILL_ROTATE")) rotate_ = std::atoi(r);
     if (rotate_ != 0 && rotate_ != 90 && rotate_ != 270) rotate_ = 270;
     if (rotate_) std::swap(w, h);
@@ -287,6 +324,8 @@ uint32_t Sdl2Platform::read_pad() const {
         {SDL_CONTROLLER_BUTTON_LEFTSHOULDER, kL},   {SDL_CONTROLLER_BUTTON_RIGHTSHOULDER, kR},
         {SDL_CONTROLLER_BUTTON_START, kStart},      {SDL_CONTROLLER_BUTTON_BACK, kSelect},
         {SDL_CONTROLLER_BUTTON_GUIDE, kMenu},
+        // Not every handheld has a Menu (guide) button; a stick click stands in for it.
+        {SDL_CONTROLLER_BUTTON_LEFTSTICK, kMenu},   {SDL_CONTROLLER_BUTTON_RIGHTSTICK, kMenu},
     };
     for (const auto& m : map)
       if (SDL_GameControllerGetButton(controller_, m.sdl)) b |= m.button;

@@ -772,7 +772,7 @@ std::vector<Hint> PianoRollView::hints() const {
   if (in.held(kA)) return {{"Left/Right", "length"}, {"L+Left/Right", "fine"}, {"Up/Down", "pitch"}, {"R+Up/Down", "octave"}};
   if (in.held(kB)) return {{"D-pad", "move"}, {"L+Left/Right", "fine"}, {"R+Up/Down", "octave"}, {"release", "delete"}};
   if (in.held(kY)) return {{"D-pad", "select area"}, {"A", "select all"}, {"release", "toggle note"}};
-  if (in.held(kL) || in.held(kR)) return {{"Left/Right", "grid"}, {"Up/Down", "page"}, {"release", "track"}};
+  if (in.held(kL) || in.held(kR)) return {{"Left/Right", "grid"}, {"Up/Down", "page"}, {"Start", "from cursor"}, {"release", "track"}};
   if (!app_.open_clip()) return {{"A", "new clip"}, {"L/R", "track"}, {"Select+Left", "arrange"}};
   return {{"A", "add"}, {"B", "delete"}, {"Y", "select"}, {"X", "note/clip"}, {"L/R", "track"},
           {"Start", "play"}};

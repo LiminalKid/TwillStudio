@@ -753,10 +753,16 @@ void App::handle_global() {
       message(recording_ ? "Recording from MIDI: play to record into the clip" : "Recording off");
       invalidate(top_bar_);
     }
-    if (in.pressed(kStart)) {
-      Tick from = view_ == View::PianoRoll ? roll_->cursor_song_position() : arrangement_->cursor_song_position();
-      play_from(from);
-    }
+    return;
+  }
+  // L or R + Start: play from the cursor. (Select + Start is the handhelds' usual "close the app"
+  // shortcut, so it's left alone.) The shoulder button was used, so its release changes nothing.
+  if (in.pressed(kStart) && (in.held(kL) || in.held(kR))) {
+    play_from(view_ == View::PianoRoll ? roll_->cursor_song_position() : arrangement_->cursor_song_position());
+    roll_->consume_lr();
+    arrangement_->consume_lr();
+    instrument_->consume_lr();
+    invalidate(top_bar_);
     return;
   }
   if (in.pressed(kStart)) {
@@ -974,10 +980,12 @@ void App::draw_top_bar(Canvas& c) {
   if (!project_.tracks.empty()) {
     const Track& t = project_.tracks[size_t(track_)];
     int d = int(u(10));
-    c.fill_rounded(Rect{int(x), base - d, d, d}, d / 2.0f, track_colour(track_));
-    // The name, shortened if it would run into the transport.
+    // The name, shortened if it would run into the transport; with no room for a few letters
+    // (a square screen), no dot or name at all.
     std::string name = t.name;
     const float room = right_x - u(12) - (x + d + u(6));
+    if (room < fb.measure("Kic")) return;
+    c.fill_rounded(Rect{int(x), base - d, d, d}, d / 2.0f, track_colour(track_));
     while (name.size() > 1 && fb.measure(name.c_str()) > room) name.pop_back();
     x = c.text(fb, x + d + u(6), base, name.c_str(), theme_.text);
     const char* engine = sound_name(t);
@@ -1001,7 +1009,6 @@ void App::draw_hint_bar(Canvas& c) {
       hints.push_back({"R", "paste"});
     }
     hints.push_back({"X", "record"});
-    hints.push_back({"Start", "from cursor"});
     if (view_ == View::PianoRoll) hints.push_back({"Up/Down", "notes/lane"});
   } else if (input_.held(kMenu)) {
     hints = {{"release", "settings: theme, tempo, save..."}, {"Start", "quit"}};

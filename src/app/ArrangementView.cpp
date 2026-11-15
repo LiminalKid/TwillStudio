@@ -368,7 +368,7 @@ std::vector<Hint> ArrangementView::hints() const {
   if (in.held(kA)) return cursor_bar_ < 0 ? std::vector<Hint>{{"Left/Right", "engine"}}
                                           : std::vector<Hint>{{"Left/Right", "clip length"}};
   if (in.held(kB)) return {{"Left/Right", "move clip"}, {"release", "delete"}};
-  if (in.held(kL) || in.held(kR)) return {{"Left/Right", "zoom"}, {"Up/Down", "page"}};
+  if (in.held(kL) || in.held(kR)) return {{"Left/Right", "zoom"}, {"Up/Down", "page"}, {"Start", "from cursor"}};
   if (cursor_bar_ < 0) return {{"A+Left/Right", "engine"}, {"X", "track settings"}, {"Select+Right", "roll"}};
   if (placement_at(app_.track(), cursor_bar_) < 0) return {{"A", "new clip"}, {"X", "project"}, {"Start", "play"}};
   return {{"A", "select"}, {"B", "delete"}, {"Y", "duplicate"}, {"X", "open"}, {"Start", "play"}};

@@ -3,7 +3,9 @@
 dir="$(dirname "$0")/twill"
 cd "$dir" || exit 1
 
-# Portrait panels (Anbernic RG28XX): if the picture comes out upside down, change 270 to 90.
+# Portrait panels (Anbernic RG28XX): the app turns the picture the way the kernel says the panel
+# is mounted. This line fixes it at 270, known right on the RG28XX; if the picture comes out upside
+# down on another device, change 270 to 90.
 export TWILL_ROTATE=270
 
 # A copy of the front end's controller config, for setting up a new device from the log.
