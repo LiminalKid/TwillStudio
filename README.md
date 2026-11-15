@@ -9,6 +9,16 @@ Twill is a portable groovebox with built-in synthesizer and sample instrument su
 
 The design for this synth is in the [Docs/DESIGN.md](Docs/DESIGN.md) file.
 
+<p align="center">
+  <img src="Docs/images/screenshot-arrangement.png" alt="The arrangement: six tracks of the demo song playing, drums, bass, chords, lead, pluck and pad" width="100%">
+</p>
+<p align="center">
+  <img src="Docs/images/screenshot-roll.png" alt="The piano roll on the drum kit, one row per drum, with velocities below" width="32%">
+  <img src="Docs/images/screenshot-kit.png" alt="The sound view: the sampler in kit mode, with its sixteen pads" width="32%">
+  <img src="Docs/images/screenshot-mixer.png" alt="The mixer: a strip per track and the master" width="32%">
+</p>
+<p align="center"><sub>The demo song on a 1024 x 768 screen (TrimUI Brick Pro).</sub></p>
+
 Status: milestones M0 to M5 are done: arrangement, piano roll, sound, mixer; macro-oscillator and
 sampler instruments with modulators, automation lanes and parameter locks; send effects; project
 files; MIDI. See Docs/DESIGN.md §7 for the buttons (the hint bar shows them too). Menu + Start quits.

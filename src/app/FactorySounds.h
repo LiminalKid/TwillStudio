@@ -9,7 +9,8 @@ namespace twill {
 
 constexpr const char* kFactoryFolder = "samples/Factory";
 
-// Writes any factory samples that are missing. Returns how many it wrote.
+// Writes any factory samples that are missing or differ from the app's own (an older version's).
+// Returns how many it wrote.
 int make_factory_sounds(Platform& platform);
 // Fills a kit's sixteen slots with the factory kit in General MIDI order (kick on 36, snare on 38,
 // closed hat on 42...), with its levels, choke groups and decays.

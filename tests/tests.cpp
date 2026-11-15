@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "app/App.h"
+#include "app/FactorySounds.h"
 #include "app/ClockFollower.h"
 #include "app/SongNames.h"
 #include "app/MidiSender.h"
@@ -1748,6 +1749,14 @@ void test_ui_browser_up_a_folder() {
 void test_ui_sound_view_kit() {
   UiDriver ui;
   CHECK(ui.platform.files.count("samples/Factory/36 Kick.wav") == 1);  // factory sounds were made
+  {
+    // An older version's file is replaced on the next start; an unchanged one is left alone.
+    twill::NullPlatform pl;
+    pl.write_file("samples/Factory/46 Open Hat.wav", std::vector<uint8_t>{1, 2, 3});
+    CHECK(twill::make_factory_sounds(pl) > 1);
+    CHECK(pl.files["samples/Factory/46 Open Hat.wav"].size() > 3);
+    CHECK(twill::make_factory_sounds(pl) == 0);
+  }
   ui.tap(twill::kLeft, twill::kSelect);  // arrangement -> mixer
   ui.tap(twill::kLeft, twill::kSelect);  // -> sound view
   CHECK(ui.app.view() == twill::App::View::Instrument);
