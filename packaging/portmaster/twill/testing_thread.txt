@@ -1,3 +1,5 @@
+Testing zip: https://github.com/LiminalKid/TwillStudio/releases/download/v0.2.1/twill.zip (release 0.2.1)
+
 Instructions to install the Testing Zip:
 Drop the .zip into your Portmaster autoinstall folder and run Portmaster.
 or
@@ -8,7 +10,8 @@ Title: Twill Studio
 URL: https://github.com/LiminalKid/TwillStudio
 
 Instructions:
-Ready to run. No additional setup required. Your own WAV samples go in ports/twill/samples.
+Ready to run. No additional setup required. A factory drum kit is built in; your own WAV samples go in
+ports/twill/samples. Songs autosave; a demo song opens on first launch: press Start to play it.
 
 | Button | Action |
 |--|--|
@@ -36,10 +39,13 @@ ROCKNIX
 -> [ ] Libmali
 -> [ ] Panfrost
 -> [ ] Adreno (Optional)
-[ ] Knulli
+[x] Knulli (TrimUI Brick Pro, 1024x768)
 
 Resolutions:
 [ ] 480x320 (Optional)
-[ ] 640x480
+[x] 640x480: Anbernic RG28XX under KNULLI
 [ ] 720x720 (RGB30) (Optional)
-[ ] Higher resolutions (e.g., 1280)
+[x] Higher resolutions (e.g., 1280): 1024x768 on the Brick Pro
+
+Known limits: needs a 64-bit (aarch64) device; not made for 480x320. Hold Select + Start to quit through
+PortMaster (Menu + Start also quits).

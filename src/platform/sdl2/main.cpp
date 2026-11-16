@@ -39,6 +39,7 @@ int main(int, char**) {
 
   twill::Canvas canvas;
   twill::InputState input;
+  int frames_shown = 0, idle_frames = 0;
   for (;;) {
     platform.poll_input(input);
     twill::Size size = platform.display_size();
@@ -51,8 +52,15 @@ int main(int, char**) {
       break;
     }
     std::vector<twill::Rect> dirty = canvas.take_dirty();
-    // Nothing changed: keep the last frame on screen rather than presenting it again.
-    if (!dirty.empty()) platform.present(canvas.pixels(), canvas.stride(), dirty);
+    // Nothing changed: keep the last frame on screen rather than presenting it again, except that
+    // it is presented every frame for the first two seconds and then once a second. Some drivers
+    // drop the first frames (the RG28XX's mali driver showed a blank screen until a button press
+    // redrew it), and other things can draw over the screen; the frame is already on the GPU.
+    if (!dirty.empty() || frames_shown < 120 || ++idle_frames >= 60) {
+      platform.present(canvas.pixels(), canvas.stride(), dirty);
+      idle_frames = 0;
+    }
+    if (frames_shown < 120) ++frames_shown;
     // Vsync normally paces the loop; without it (or when idle), cap at about 60 frames a second.
     uint64_t spent = platform.micros() - t0;
     if (spent < 15000) SDL_Delay(Uint32((16667 - spent) / 1000));
