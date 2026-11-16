@@ -533,15 +533,9 @@ void PianoRollView::handle_input() {
     keep_cursor_visible(l);
   }
 
-  // L/R: tap for the previous/next track; held with the d-pad to zoom and page.
-  if (in.pressed(kL) || in.pressed(kR)) lr_used_ = false;
+  // L/R held with the d-pad: the grid and paging.
   // The lane strip has its own d-pad meanings; there R means bigger steps.
   if (lane_focus_ && lane_ >= 0 && clip) {
-    if (in.held(kR) && in.pressed_or_repeat(kUp | kDown)) lr_used_ = true;
-    if ((in.released(kL) || in.released(kR)) && !lr_used_) {
-      app_.set_track(track + (in.released(kR) ? 1 : -1));
-      return;
-    }
     if (in.pressed(kX)) {
       open_settings();
       return;
@@ -560,18 +554,12 @@ void PianoRollView::handle_input() {
     if (in.pressed_or_repeat(kUp)) cursor_pitch_ = shifted_pitch(cursor_pitch_, page, false), used = true;
     if (in.pressed_or_repeat(kDown)) cursor_pitch_ = shifted_pitch(cursor_pitch_, -page, false), used = true;
     if (used) {
-      lr_used_ = true;
       cursor_ = cursor_ / snap() * snap();
       keep_cursor_visible(l);
       app_.invalidate(app_.content_rect());
     }
     return;
   }
-  if ((in.released(kL) || in.released(kR)) && !lr_used_ && !in.held(kA | kB | kY)) {
-    app_.set_track(track + (in.released(kR) ? 1 : -1));
-    return;
-  }
-
   if (!clip) {
     // Nothing to edit yet: A makes a one-bar clip after the track's last one.
     if (in.pressed(kA)) {
@@ -621,7 +609,6 @@ void PianoRollView::handle_input() {
     if (dt || dp) {
       std::vector<uint32_t> ids = targets();
       const bool octave = in.held(kR);
-      if (octave || fine) lr_used_ = true;
       for (uint32_t id : ids) {
         Note n = *clip->find(id);
         if (dt && fine) {
@@ -658,7 +645,6 @@ void PianoRollView::handle_input() {
       std::vector<uint32_t> ids = targets();
       selection_ = ids;
       const bool octave = in.held(kR);
-      if (octave || fine) lr_used_ = true;
       // Move in time only if every note stays inside the clip. Fine moves leave the cursor where it
       // is, on the grid.
       const Tick by = dt * (fine ? f : s);
@@ -772,10 +758,9 @@ std::vector<Hint> PianoRollView::hints() const {
   if (in.held(kA)) return {{"Left/Right", "length"}, {"L+Left/Right", "fine"}, {"Up/Down", "pitch"}, {"R+Up/Down", "octave"}};
   if (in.held(kB)) return {{"D-pad", "move"}, {"L+Left/Right", "fine"}, {"R+Up/Down", "octave"}, {"release", "delete"}};
   if (in.held(kY)) return {{"D-pad", "select area"}, {"A", "select all"}, {"release", "toggle note"}};
-  if (in.held(kL) || in.held(kR)) return {{"Left/Right", "grid"}, {"Up/Down", "page"}, {"Start", "from cursor"}, {"release", "track"}};
-  if (!app_.open_clip()) return {{"A", "new clip"}, {"L/R", "track"}, {"Select+Left", "arrange"}};
-  return {{"A", "add"}, {"B", "delete"}, {"Y", "select"}, {"X", "note/clip"}, {"L/R", "track"},
-          {"Start", "play"}};
+  if (in.held(kL) || in.held(kR)) return {{"Left/Right", "grid"}, {"Up/Down", "page"}, {"Start", "from cursor"}};
+  if (!app_.open_clip()) return {{"A", "new clip"}, {"L2", "arrange"}};
+  return {{"A", "add"}, {"B", "delete"}, {"Y", "select"}, {"X", "note/clip"}, {"Start", "play"}};
 }
 
 void PianoRollView::draw(Canvas& c) {

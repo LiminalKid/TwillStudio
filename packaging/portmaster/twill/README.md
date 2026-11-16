@@ -17,15 +17,15 @@ Twill Studio is free software under the GPL-3.0; its source is at [github.com/Li
 | B | Delete the note under the cursor. Hold with the D-Pad to move the selected notes |
 | X | Open the panel for the note, clip or track under the cursor |
 | Y | Hold with the D-Pad to select notes. Y + A selects every note in the clip |
-| L1 / R1 | Previous / next track. Hold with the D-Pad to change the grid or page |
-| L2 / R2 | Same as L1 / R1 |
+| L1 / R1 | Hold with the D-Pad to change the grid or page |
+| L2 / R2 | Previous / next view: arrangement, piano roll, sound, mixer |
 | Start | Play / stop |
 | L1 or R1 + Start | Play from the cursor |
-| Select + Left / Right | Switch view: arrangement, piano roll, sound, mixer |
+| Select + Left / Right | Previous / next view (as L2 / R2) |
+| Select + Up / Down | In the sound view: previous / next track |
 | Select + B / A | Undo / redo |
 | Select + Y / R1 | Copy / paste |
-| Select + X | Record from a MIDI keyboard |
-| Menu (or a stick click) | Settings: tempo, key, saving and loading songs, About |
+| Select + X, or Menu | Settings: every control, tempo, key, saving and loading songs, recording from MIDI, About |
 | Menu + Start | Quit |
 
 The bar at the bottom of the screen shows what the buttons do as you hold them.

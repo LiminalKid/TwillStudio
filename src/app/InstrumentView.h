@@ -30,7 +30,6 @@ class InstrumentView {
   bool browsing() const { return browser_open_; }
 
   // A global chord used L or R (L/R + Start): releasing it then does nothing here.
-  void consume_lr() { lr_used_ = true; }
 
  private:
   struct Row {
@@ -54,7 +53,6 @@ class InstrumentView {
   App& app_;
   int sel_ = 0, top_ = 0;
   int kit_slot_ = 0;
-  bool lr_used_ = false;
 
   // Browser.
   bool browser_open_ = false;

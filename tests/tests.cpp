@@ -1841,11 +1841,10 @@ void test_ui_lane_velocity_and_automation() {
 void test_ui_menu_opens_project() {
   UiDriver ui;
   ui.tap(twill::kRight, twill::kSelect);  // from the roll, say
-  ui.tap(twill::kMenu);                // Menu alone: the settings panel (Theme, New song names, Tempo, ...)
+  ui.tap(twill::kMenu);                // Menu alone: the settings panel (Controls, Theme, New song names, Tempo, ...)
   CHECK(ui.app.inspector_open());
   const float tempo = ui.app.project().tempo;
-  ui.tap(twill::kDown);
-  ui.tap(twill::kDown);
+  for (int i = 0; i < 3; ++i) ui.tap(twill::kDown);
   ui.tap(twill::kRight);
   CHECK(ui.app.project().tempo == tempo + 1);
   ui.tap(twill::kB);  // close
@@ -1885,7 +1884,8 @@ void test_ui_select_all() {
 void test_ui_dark_mode_setting() {
   UiDriver ui;
   CHECK(!ui.app.dark_mode());
-  ui.tap(twill::kMenu);   // settings, on Theme
+  ui.tap(twill::kMenu);   // settings, on Controls
+  ui.tap(twill::kDown);   // Theme
   ui.tap(twill::kRight);  // dark
   CHECK(ui.app.dark_mode());
   CHECK(ui.platform.files.count("settings.txt") == 1);
@@ -2002,8 +2002,8 @@ void test_ui_song_names() {
 
   UiDriver ui;
   ui.tap(twill::kDown);  // Snare row, bar 1 empty
-  ui.tap(twill::kX);     // settings panel; Name is the sixth row
-  for (int i = 0; i < 5; ++i) ui.tap(twill::kDown);
+  ui.tap(twill::kX);     // settings panel; Name is the seventh row
+  for (int i = 0; i < 6; ++i) ui.tap(twill::kDown);
   ui.tap(twill::kA);  // the name editor
   ui.tap(twill::kX);  // make one up
   ui.tap(twill::kA);
@@ -2015,15 +2015,35 @@ void test_ui_song_names() {
   CHECK(ui.platform.files.count("settings.txt") == 1);
 }
 
-// L2 and R2 do what L and R do: here, a tap moves to the next or previous track in the roll.
-void test_ui_l2_r2_are_l_r() {
+// L2 / R2 step through the views; a tap of L or R on its own changes nothing; Select + Up / Down
+// choose the track in the sound view; Select + X opens and closes the settings panel.
+void test_ui_shoulder_buttons() {
+  using V = twill::App::View;
   UiDriver ui;
-  ui.tap(twill::kRight, twill::kSelect);  // the roll
-  const int track = ui.app.track();
+  CHECK(ui.app.view() == V::Arrangement);
   ui.tap(twill::kR2);
+  CHECK(ui.app.view() == V::PianoRoll);
+  const int track = ui.app.track();
+  ui.tap(twill::kR);
+  ui.tap(twill::kL);
+  CHECK(ui.app.track() == track);  // L1 / R1 taps no longer change track
+  CHECK(ui.app.view() == V::PianoRoll);
+  ui.tap(twill::kR2);
+  CHECK(ui.app.view() == V::Instrument);
+  ui.tap(twill::kDown, twill::kSelect);
   CHECK(ui.app.track() == track + 1);
-  ui.tap(twill::kL2);
+  ui.tap(twill::kUp, twill::kSelect);
   CHECK(ui.app.track() == track);
+  ui.tap(twill::kR2);
+  CHECK(ui.app.view() == V::Mixer);
+  ui.tap(twill::kR2);
+  CHECK(ui.app.view() == V::Arrangement);  // wraps round
+  ui.tap(twill::kL2);
+  CHECK(ui.app.view() == V::Mixer);
+  ui.tap(twill::kX, twill::kSelect);
+  CHECK(ui.app.inspector_open());
+  ui.tap(twill::kX, twill::kSelect);
+  CHECK(!ui.app.inspector_open());
 }
 
 void test_ui_play_from_cursor() {
@@ -2049,11 +2069,10 @@ void test_ui_play_from_cursor() {
 void test_ui_project_tempo() {
   UiDriver ui;
   ui.tap(twill::kDown);  // Snare: bar 1 is empty
-  ui.tap(twill::kX);     // settings panel: Theme, New song names, Tempo, ...
+  ui.tap(twill::kX);     // settings panel: Controls, Theme, New song names, Tempo, ...
   CHECK(ui.app.inspector_open());
   const float tempo = ui.app.project().tempo;
-  ui.tap(twill::kDown);
-  ui.tap(twill::kDown);
+  for (int i = 0; i < 3; ++i) ui.tap(twill::kDown);
   ui.tap(twill::kRight);
   ui.tap(twill::kRight, twill::kR);
   CHECK(ui.app.project().tempo == tempo + 11);
@@ -2098,8 +2117,8 @@ void test_ui_mixer() {
 void test_ui_project_files() {
   UiDriver ui;
   ui.tap(twill::kDown);  // Snare row, bar 1 empty
-  ui.tap(twill::kX);     // settings panel: Theme, New song names, Tempo, Key, Scale, Name, Save, Load, New, Render
-  for (int i = 0; i < 5; ++i) ui.tap(twill::kDown);
+  ui.tap(twill::kX);     // settings panel: Controls, Theme, New song names, Tempo, Key, Scale, Name, Save, Load, New, Render
+  for (int i = 0; i < 6; ++i) ui.tap(twill::kDown);
   // Rename: the first letter "D" of "Demo" up by one, to "E".
   ui.tap(twill::kA);
   for (int i = 0; i < 4; ++i) ui.tap(twill::kLeft);
@@ -2108,7 +2127,7 @@ void test_ui_project_files() {
   CHECK(ui.app.project().name == "Eemo");
   // Save.
   ui.tap(twill::kX);
-  for (int i = 0; i < 6; ++i) ui.tap(twill::kDown);
+  for (int i = 0; i < 7; ++i) ui.tap(twill::kDown);
   ui.tap(twill::kA);
   CHECK(ui.platform.files.count("projects/Eemo.twill") == 1);
   CHECK(!ui.app.has_unsaved_changes());
@@ -2147,7 +2166,7 @@ void test_ui_midi_record_and_clock() {
   ui.audio = true;
   ui.app.project().midi_clock = twill::MidiClock::Send;
   ui.tap(twill::kRight, twill::kSelect);  // roll: the Kick clip, one bar, placed for 8 bars
-  ui.tap(twill::kX, twill::kSelect);      // arm recording
+  ui.app.toggle_recording();              // arm recording (the settings panel's "Record from MIDI")
   ui.tap(twill::kStart);               // play (looping the clip's placement)
   // About half a second in (beat 2 at 112 BPM is 0.54 s), play a note for about a quarter second.
   for (int i = 0; i < 33; ++i) ui.step(0);
@@ -2299,7 +2318,7 @@ int main(int argc, char** argv) {
       {"ui_track_settings_engine_to_sampler", test_ui_track_settings_engine_to_sampler},
       {"ui_lane_velocity_and_automation", test_ui_lane_velocity_and_automation},
       {"ui_project_tempo", test_ui_project_tempo},
-      {"ui_l2_r2_are_l_r", test_ui_l2_r2_are_l_r},
+      {"ui_shoulder_buttons", test_ui_shoulder_buttons},
       {"ui_play_from_cursor", test_ui_play_from_cursor},
       {"ui_select_all", test_ui_select_all},
       {"ui_song_names", test_ui_song_names},

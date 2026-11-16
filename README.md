@@ -32,7 +32,7 @@ Needs CMake 3.20+ and Ninja.
     cmake --preset macos && cmake --build --preset macos
     ./build/macos/twill
 
-Keys: arrows move, X = A, Z = B, S = X, A = Y, Q / W = L / R, Return/Space = Start, Tab = Select,
+Keys: arrows move, X = A, Z = B, S = X, A = Y, Q / W = L / R, 1 / 2 = L2 / R2, Return/Space = Start, Tab = Select,
 Escape = Menu (Escape + Return quits).
 
 **KNULLI handhelds** (TrimUI Brick Pro), cross-compiled with Zig (`brew install zig`):

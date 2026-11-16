@@ -440,8 +440,20 @@ size back.
 
 The hard design problem is making a piano roll fast without a mouse. The approach is a **cursor**
 plus **held-button modifiers**, the same grammar the M8 uses so successfully (hold Edit + direction to
-change a value), mapped onto a handheld's buttons. L and R mean either shoulder button on their
-side: L2 and R2 do exactly what L1 and R1 do (2026-11-14), so whichever is easier to reach works.
+change a value), mapped onto a handheld's buttons. L and R are the first shoulder buttons (L1, R1).
+
+*Changed 2026-11-15:* **L2 / R2 switch view** (previous / next), in one press. Switching views is the
+most frequent move, and Select + left/right needs two hands' reach on devices where Select sits by the
+D-pad (RG28XX, RG35XX H, RG351P, RG552, RG34XX); Select + left/right still works. Every aarch64
+device PortMaster lists has L2/R2, though reviewers often call them awkward, so nothing depends on
+them alone. A tap of L or R on its own no longer changes track (it was easy to hit by accident); L
+and R are now only held modifiers. The track is picked in the arrangement, or with Select + up/down
+in the sound view. **Select + X** opens the settings panel as Menu does, since Menu is awkward or
+taken by the system on some devices and many have no sticks to click; the hint bar names it second,
+so small screens show it. (It was Select + L for a day; recording from MIDI, which Select + X used to
+arm, is now "Record from MIDI" in the settings panel.) The settings panel starts with **Controls**,
+a page listing every button combination by view, since the hint bar shows only what fits (about
+four hints at 640x480).
 
 *Added 2026-11-14:* **select all** in the roll: Y + A, or "Select all" in the clip panel (X off a
 note); A, B, X and copy then work on every note. Tapping **Menu** again puts the settings panel (or
@@ -463,13 +475,14 @@ when built with uncommitted changes), build date, audio and screen. `cmake/versi
 | Select + Y / Select + R | copy the selected notes (or the one under the cursor) / paste them at the cursor, keeping pitches and spacing; also Copy and Cut in the note panel and "Paste at cursor" in the clip panel. In the arrangement: copy a clip / paste an independent copy at the cursor on any track |
 | Y held + d-pad | extend a selection rectangle; then A/B act on all selected notes |
 | X | open the inspector for the selection (velocity, probability, glide, parameter locks) |
-| L / R (tap) | previous / next track |
 | L / R held + d-pad | in the roll: the grid (left/right; the view zooms with it, and a message names the new grid) and scroll by page (up/down); in the arrangement: zoom |
-| Select held + d-pad | switch view: arrangement, piano roll, instrument, mixer |
+| L2 / R2, or Select + left/right | switch view: arrangement, piano roll, instrument, mixer |
+| Select + up/down | in the roll: between the notes and the lane strip; in the sound view: previous / next track |
+| Select + X | the settings panel (as Menu) |
 | Start | play / stop (L or R + Start: play from the cursor) |
 
-Most handhelds also have L2/R2 and analog sticks; they add shortcuts (sticks for scrolling, L2/R2 for
-snap and velocity) but nothing requires them. On desktop, a mouse and keyboard work as in any piano
+Most handhelds also have analog sticks; they could add shortcuts (scrolling) but nothing requires
+them. On desktop, a mouse and keyboard work as in any piano
 roll, and touch works on phones and tablets. **Live input:** with a USB MIDI keyboard connected, play
 and record into the clip, quantized or not.
 
@@ -528,8 +541,8 @@ autosave a few seconds after each change and when quitting.
   at a time with the d-pad), Save, Load, New project, MIDI clock out, the MIDI devices found, and
   Render to WAV. Projects go to `projects/<name>.fluo`, renders to `renders/<name>.wav`. Loading or
   starting anew with unsaved changes asks for a second press.
-- **MIDI:** notes from any connected keyboard play the current track. Select + X arms recording
-  ("Rec" in the top bar): while playing, notes are recorded into the open clip, snapped to 1/16.
+- **MIDI:** notes from any connected keyboard play the current track. "Record from MIDI" in the
+  settings panel arms recording ("Rec" in the top bar): while playing, notes are recorded into the open clip, snapped to 1/16.
   MIDI clock (24 per beat) with start and stop goes out when switched on. *Polish round:* the
   engine stamps every MIDI event (notes, note-offs, clock on its own steady grid) with its sample,
   and `MidiSender`'s thread sends each when its audio reaches the speaker (two blocks after

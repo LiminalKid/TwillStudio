@@ -36,7 +36,6 @@ class PianoRollView {
   void paste();  // at the cursor, keeping pitches and spacing; the pasted notes end up selected
 
   // A global chord used L or R (L/R + Start): releasing it then does nothing here.
-  void consume_lr() { lr_used_ = true; }
 
  private:
   struct Layout {
@@ -71,7 +70,7 @@ class PianoRollView {
   Tick last_length_ = kTicksPerQuarter / 4;
   std::vector<uint32_t> selection_;
   std::vector<int> rows_;  // pitches, top row first
-  bool a_used_ = false, b_used_ = false, y_used_ = false, lr_used_ = false;
+  bool a_used_ = false, b_used_ = false, y_used_ = false;
   bool y_selected_all_ = false;  // Y + A selected everything: releasing Y leaves it so
   Tick y_anchor_tick_ = 0;
   int y_anchor_pitch_ = 60;

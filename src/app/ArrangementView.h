@@ -30,7 +30,6 @@ class ArrangementView {
   void open_project_settings();  // tempo, key, scale, files, MIDI clock (Menu, from any view)
 
   // A global chord used L or R (L/R + Start): releasing it then does nothing here.
-  void consume_lr() { lr_used_ = true; }
 
  private:
   static constexpr Tick kBar = 4 * kTicksPerQuarter;
@@ -49,7 +48,7 @@ class ArrangementView {
   int cursor_bar_ = 0;  // -1: the track header column
   int scroll_bar_ = 0, top_track_ = 0;
   int bars_per_cell_ = 1;
-  bool a_used_ = false, b_used_ = false, lr_used_ = false;
+  bool a_used_ = false, b_used_ = false;
   int last_playhead_x_ = -1;
 };
 

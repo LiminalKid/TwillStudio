@@ -35,6 +35,7 @@ struct InspectorField {
   std::function<std::string()> value;
   std::function<void(int step, bool coarse)> adjust;  // step is -1 or +1; may be null
   std::function<void()> press = nullptr;               // A; null if A does nothing
+  bool heading = false;  // a section title: drawn as one, and the selection passes over it
 };
 
 struct Hint {
@@ -88,6 +89,14 @@ class App {
   const Clip* open_clip() const { return const_cast<App*>(this)->open_clip(); }
   void open(int track, const Placement& pl);  // makes `pl` the track's open clip
   void show(View v);
+  // Moves through the views in order (arrangement, roll, sound, mixer), wrapping round.
+  void step_view(int by);
+  // Opens the settings panel, or puts it away if it is open.
+  void toggle_settings();
+  // Arms or disarms recording from MIDI (the settings panel's "Record from MIDI").
+  void toggle_recording();
+  // A panel listing every button combination.
+  void open_controls();
   View view() const { return view_; }
 
   void audition(int track, int pitch);

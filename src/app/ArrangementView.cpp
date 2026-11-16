@@ -188,7 +188,8 @@ void ArrangementView::open_track_settings(int track, int select_row) {
 void ArrangementView::open_project_settings() {
   App& app = app_;
   std::vector<InspectorField> fields;
-  // The app's own setting first, then the project's.
+  // Every button combination first, then the app's own setting, then the project's.
+  fields.push_back({"Controls", [] { return std::string("press A"); }, nullptr, [&app] { app.open_controls(); }});
   fields.push_back({"Theme", [&app] { return std::string(app.dark_mode() ? "Dark" : "Light"); },
                     [&app](int, bool) { app.set_dark_mode(!app.dark_mode()); }});
   fields.push_back({"New song names", [&app] { return std::string(app.auto_names() ? "Made up" : "Untitled"); },
@@ -222,7 +223,6 @@ void ArrangementView::handle_input() {
 
   // L/R held: zoom and page.
   if (in.held(kL) || in.held(kR)) {
-    if (in.pressed(kL) || in.pressed(kR)) lr_used_ = false;
     if (!in.held(kA) && !in.held(kB)) {
       if (in.pressed_or_repeat(kLeft)) bars_per_cell_ = std::min(4, bars_per_cell_ * 2);
       if (in.pressed_or_repeat(kRight)) bars_per_cell_ = std::max(1, bars_per_cell_ / 2);
@@ -230,7 +230,6 @@ void ArrangementView::handle_input() {
       if (in.pressed_or_repeat(kUp)) app_.set_track(track - page);
       if (in.pressed_or_repeat(kDown)) app_.set_track(track + page);
       if (in.pressed_or_repeat(kLeft | kRight | kUp | kDown)) {
-        lr_used_ = true;
         clamp_scroll(layout());
         app_.invalidate_all();
       }

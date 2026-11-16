@@ -116,6 +116,29 @@ void App::open(int track, const Placement& pl) {
   invalidate_all();
 }
 
+void App::toggle_recording() {
+  recording_ = !recording_;
+  message(recording_ ? "Recording from MIDI: play to record into the clip" : "Recording off");
+  invalidate(top_bar_);
+}
+
+void App::toggle_settings() {
+  if (inspector_open() && menu_panel_) {
+    close_inspector();
+  } else {
+    arrangement_->open_project_settings();
+    menu_panel_ = true;
+  }
+}
+
+void App::step_view(int by) {
+  const View order[] = {View::Arrangement, View::PianoRoll, View::Instrument, View::Mixer};
+  const int n = 4;
+  int i = 0;
+  while (order[i] != view_) ++i;
+  show(order[(i + by % n + n) % n]);
+}
+
 void App::show(View v) {
   if (v == view_) return;
   view_ = v;
@@ -222,6 +245,65 @@ void App::open_about() {
   open_inspector("About Twill Studio", std::move(fields));
 }
 
+void App::open_controls() {
+  // Every button combination, in one place: the hint bar shows only what fits, which on a 640x480
+  // screen is about four. Headings are rows with no value.
+  static const char* const kRows[][2] = {
+      {"EVERYWHERE", ""},
+      {"Start", "play / stop"},
+      {"L1 or R1 + Start", "play from cursor"},
+      {"L2 / R2", "prev / next view"},
+      {"Sel + Left / Right", "prev / next view"},
+      {"Sel + B / A", "undo / redo"},
+      {"Sel + Y / R1", "copy / paste"},
+      {"Sel + X, or Menu", "settings"},
+      {"Menu + Start", "quit"},
+      {"ARRANGEMENT", ""},
+      {"A", "new clip / select"},
+      {"A + Left / Right", "clip length"},
+      {"B", "delete clip"},
+      {"B + Left / Right", "move clip"},
+      {"Y", "duplicate clip"},
+      {"X", "open clip / panel"},
+      {"L1 or R1 + D-pad", "zoom / page"},
+      {"PIANO ROLL", ""},
+      {"A", "add / select note"},
+      {"A + Left / Right", "length"},
+      {"A + Up / Down", "pitch"},
+      {"B", "delete note"},
+      {"B + D-pad", "move notes"},
+      {"A or B + L1 + L / R", "fine"},
+      {"A or B + R1 + U / D", "octave"},
+      {"Y + D-pad", "select area"},
+      {"Y + A", "select all"},
+      {"X", "note / clip panel"},
+      {"L1 or R1 + D-pad", "grid / page"},
+      {"Sel + Up / Down", "notes / lane"},
+      {"SOUND", ""},
+      {"Up / Down", "choose"},
+      {"Left / Right", "change"},
+      {"A", "browse"},
+      {"B", "reset"},
+      {"Y", "listen"},
+      {"Sel + Up / Down", "track"},
+      {"MIXER", ""},
+      {"A + D-pad", "change"},
+      {"B", "reset"},
+      {"X", "effects"},
+      {"PANELS", ""},
+      {"R1 + Left / Right", "bigger steps"},
+      {"B or X", "close"},
+  };
+  std::vector<InspectorField> fields;
+  for (const auto& r : kRows) {
+    const std::string value = r[1];
+    InspectorField field{r[0], [value] { return value; }, nullptr};
+    field.heading = value.empty();
+    fields.push_back(std::move(field));
+  }
+  open_inspector("Controls", std::move(fields));
+}
+
 void App::add_project_fields(std::vector<InspectorField>& fields) {
   fields.push_back({"Name", [this] { return project_.name; }, nullptr, [this] {
                       close_inspector();
@@ -273,6 +355,9 @@ void App::add_project_fields(std::vector<InspectorField>& fields) {
                       last_edit_us_ = p_.micros();
                     }});
   fields.push_back({"MIDI devices", [this] { return p_.midi() ? p_.midi()->describe() : std::string("none"); }, nullptr});
+  // While on and playing, notes from a MIDI keyboard are recorded into the open clip ("Rec" on top).
+  fields.push_back({"Record from MIDI", [this] { return std::string(recording_ ? "On" : "Off"); },
+                    [this](int, bool) { toggle_recording(); }, [this] { toggle_recording(); }});
   fields.push_back({"Render to WAV", [] { return std::string("press A"); }, nullptr, [this] {
                       message("Rendering...");
                       if (render_song_to_wav()) message("Saved renders/" + file_safe(project_.name) + ".wav");
@@ -678,6 +763,8 @@ void App::open_inspector(std::string title, std::vector<InspectorField> fields) 
   inspector_fields_ = std::move(fields);
   inspector_sel_ = 0;
   inspector_scroll_ = 0;
+  while (inspector_sel_ + 1 < int(inspector_fields_.size()) && inspector_fields_[size_t(inspector_sel_)].heading)
+    ++inspector_sel_;
   invalidate_all();
 }
 
@@ -701,8 +788,14 @@ void App::handle_inspector() {
     return;
   }
   const int n = int(inspector_fields_.size());
-  if (in.pressed_or_repeat(kUp)) inspector_sel_ = (inspector_sel_ + n - 1) % n;
-  if (in.pressed_or_repeat(kDown)) inspector_sel_ = (inspector_sel_ + 1) % n;
+  const int dir = in.pressed_or_repeat(kUp) ? -1 : in.pressed_or_repeat(kDown) ? 1 : 0;
+  if (dir) {
+    // Headings are passed over (a panel of nothing but headings would stop after one lap).
+    for (int i = 0; i < n; ++i) {
+      inspector_sel_ = (inspector_sel_ + dir + n) % n;
+      if (!inspector_fields_[size_t(inspector_sel_)].heading) break;
+    }
+  }
   InspectorField& field = inspector_fields_[size_t(inspector_sel_)];
   int step = in.pressed_or_repeat(kRight) ? 1 : in.pressed_or_repeat(kLeft) ? -1 : 0;
   if (step && field.adjust) {
@@ -730,44 +823,35 @@ void App::handle_global() {
   if (in.pressed(kMenu)) menu_used_ = false;
   if (in.held(kMenu) && in.pressed(~uint32_t(kMenu))) menu_used_ = true;
   if (in.released(kMenu) && !menu_used_ && !name_edit_) {
-    if (inspector_open() && menu_panel_) {  // a second tap puts it away
-      close_inspector();
-    } else {
-      arrangement_->open_project_settings();
-      menu_panel_ = true;
-    }
+    toggle_settings();  // a second tap puts it away
+    return;
+  }
+  // L2 / R2: the previous / next view, in one press (Select + Left / Right does the same).
+  if (!name_edit_ && (in.pressed(kL2) || in.pressed(kR2))) {
+    step_view(in.pressed(kR2) ? 1 : -1);
     return;
   }
   if (in.held(kSelect)) {
     if (in.pressed(kB)) message(history_.undo() ? "Undone" : "Nothing to undo");
     if (in.pressed(kA)) message(history_.redo() ? "Redone" : "Nothing to redo");
-    if (in.pressed(kLeft) || in.pressed(kRight)) {
-      const View order[] = {View::Arrangement, View::PianoRoll, View::Instrument, View::Mixer};
-      const int n = 4;
-      int i = 0;
-      while (order[i] != view_) ++i;
-      show(order[(i + (in.pressed(kRight) ? 1 : n - 1)) % n]);
-    }
+    if (in.pressed(kLeft) || in.pressed(kRight)) step_view(in.pressed(kRight) ? 1 : -1);
     if (view_ == View::PianoRoll && (in.pressed(kUp) || in.pressed(kDown))) roll_->set_lane_focus(in.pressed(kDown));
+    // In the sound view, Up / Down choose the track (elsewhere the arrangement is where to pick one).
+    if (view_ == View::Instrument && (in.pressed(kUp) || in.pressed(kDown))) set_track(track_ + (in.pressed(kDown) ? 1 : -1));
+    // Select + X: the settings panel, as Menu opens it. Menu is awkward to reach on some handhelds
+    // (or kept by the system), and not all of them have sticks to click.
+    if (in.pressed(kX) && !name_edit_) toggle_settings();
     // Copy and paste: Y copies, R pastes at the cursor.
     if (in.pressed(kY) || in.pressed(kR)) {
       if (view_ == View::PianoRoll) in.pressed(kY) ? roll_->copy() : roll_->paste();
       else if (view_ == View::Arrangement) in.pressed(kY) ? arrangement_->copy() : arrangement_->paste();
     }
-    if (in.pressed(kX)) {
-      recording_ = !recording_;
-      message(recording_ ? "Recording from MIDI: play to record into the clip" : "Recording off");
-      invalidate(top_bar_);
-    }
     return;
   }
   // L or R + Start: play from the cursor. (Select + Start is the handhelds' usual "close the app"
-  // shortcut, so it's left alone.) The shoulder button was used, so its release changes nothing.
+  // shortcut, so it's left alone.)
   if (in.pressed(kStart) && (in.held(kL) || in.held(kR))) {
     play_from(view_ == View::PianoRoll ? roll_->cursor_song_position() : arrangement_->cursor_song_position());
-    roll_->consume_lr();
-    arrangement_->consume_lr();
-    instrument_->consume_lr();
     invalidate(top_bar_);
     return;
   }
@@ -821,11 +905,7 @@ void App::autosave(bool force) {
 
 bool App::frame(const InputState& state, Canvas& canvas) {
   const uint64_t now = p_.micros();
-  // L2 and R2 are second L and R buttons: whichever is easier to reach does the same.
-  uint32_t held = state.held;
-  if (held & kL2) held |= kL;
-  if (held & kR2) held |= kR;
-  input_.update(held & ~(kL2 | kR2), now);
+  input_.update(state.held, now);
   if (state.quit_requested) quit_ = true;
   if (canvas.width() != size_.w || canvas.height() != size_.h) layout(canvas);
 
@@ -1009,24 +1089,33 @@ void App::draw_hint_bar(Canvas& c) {
 
   std::vector<Hint> hints;
   if (input_.held(kSelect)) {
-    hints = {{"Left/Right", "view"}, {"B", "undo"}, {"A", "redo"}};
+    // Most important first: the bar drops what doesn't fit (a 640-pixel screen shows about four).
+    hints = {{"Left/Right", "view"}, {"X", "settings"}, {"B", "undo"}, {"A", "redo"}};
+    if (view_ == View::Instrument) hints.push_back({"Up/Down", "track"});
     if (view_ == View::PianoRoll || view_ == View::Arrangement) {
       hints.push_back({"Y", "copy"});
       hints.push_back({"R", "paste"});
     }
-    hints.push_back({"X", "record"});
     if (view_ == View::PianoRoll) hints.push_back({"Up/Down", "notes/lane"});
   } else if (input_.held(kMenu)) {
     hints = {{"release", "settings: theme, tempo, save..."}, {"Start", "quit"}};
   } else if (inspector_open()) {
-    hints = {{"Up/Down", "choose"}, {"Left/Right", "change"}, {"A", "do"}, {"R+", "bigger steps"}, {"X/B", "close"}};
+    // Only what this panel's rows can do: a read-only page (Controls, About) just scrolls.
+    bool adjusts = false, presses = false;
+    for (const InspectorField& field : inspector_fields_) adjusts |= bool(field.adjust), presses |= bool(field.press);
+    hints = {{"Up/Down", adjusts || presses ? "choose" : "scroll"}};
+    if (adjusts) hints.push_back({"Left/Right", "change"});
+    if (presses) hints.push_back({"A", "do"});
+    if (adjusts) hints.push_back({"R+", "bigger steps"});
+    hints.push_back({"X/B", "close"});
   } else {
     hints = view_ == View::Arrangement ? arrangement_->hints()
             : view_ == View::PianoRoll ? roll_->hints()
             : view_ == View::Instrument ? instrument_->hints()
                                         : mixer_->hints();
-    // With no button held, say where the settings are (last, so dropped first when short).
-    if (!input_.any_held()) hints.push_back({"Menu", "settings"});
+    // With no button held, say where the settings are, second so that small screens show it too:
+    // the panel is where to find everything else.
+    if (!input_.any_held()) hints.insert(hints.begin() + std::min<size_t>(1, hints.size()), {"Sel+X", "settings"});
   }
   // A message takes the right end; hints fill from the left, most important first, and stop
   // before they would run into it or off the screen.
@@ -1064,7 +1153,10 @@ void App::draw_inspector(Canvas& c) {
   const int n = int(inspector_fields_.size());
   const Rect list{r.x, y, r.w, r.bottom() - int(u(4)) - y};
   const int visible = std::max(1, list.h / row_h);
-  if (inspector_sel_ < inspector_scroll_) inspector_scroll_ = inspector_sel_;
+  // A heading just above the selection comes into view with it.
+  int top = inspector_sel_;
+  if (top > 0 && inspector_fields_[size_t(top - 1)].heading) --top;
+  if (top < inspector_scroll_) inspector_scroll_ = top;
   if (inspector_sel_ >= inspector_scroll_ + visible) inspector_scroll_ = inspector_sel_ - visible + 1;
   inspector_scroll_ = std::max(0, std::min(inspector_scroll_, n - visible));
   const bool more_above = inspector_scroll_ > 0, more_below = inspector_scroll_ + visible < n;
@@ -1084,8 +1176,15 @@ void App::draw_inspector(Canvas& c) {
   for (int i = inspector_scroll_; i < n && y < list.bottom(); ++i) {
     Rect row{r.x + int(u(4)), y, r.w - int(u(8)), row_h};
     bool sel = i == inspector_sel_;
-    if (sel) c.fill_rounded(row, u(3), theme_.chip);
     int base = y + (row_h + f.ascent() - f.descent()) / 2;
+    if (inspector_fields_[size_t(i)].heading) {
+      // A section title: bold, in the accent colour, with a rule above it.
+      if (i > 0) c.hline(r.x + int(u(12)), r.right() - int(u(12)), y + int(u(4)), theme_.divider);
+      c.text(fb, r.x + u(12), base + u(2), inspector_fields_[size_t(i)].label.c_str(), theme_.note);
+      y += row_h;
+      continue;
+    }
+    if (sel) c.fill_rounded(row, u(3), theme_.chip);
     c.text(f, r.x + u(12), base, inspector_fields_[size_t(i)].label.c_str(), sel ? theme_.text : theme_.text_secondary);
     std::string v = inspector_fields_[size_t(i)].value();
     float w = fb.measure(v.c_str());

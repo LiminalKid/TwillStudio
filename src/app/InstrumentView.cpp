@@ -475,13 +475,11 @@ void InstrumentView::handle_input() {
   sel_ = std::max(0, std::min(sel_, n - 1));
   bool changed = false;
 
-  if (in.pressed(kL) || in.pressed(kR)) lr_used_ = false;
   if (in.pressed_or_repeat(kUp)) sel_ = (sel_ + n - 1) % n, changed = true;
   if (in.pressed_or_repeat(kDown)) sel_ = (sel_ + 1) % n, changed = true;
   const int step = in.pressed_or_repeat(kRight) ? 1 : in.pressed_or_repeat(kLeft) ? -1 : 0;
   if (step && list[size_t(sel_)].adjust) {
     list[size_t(sel_)].adjust(step, in.held(kR));
-    if (in.held(kR)) lr_used_ = true;
     changed = true;
   }
   if (in.pressed(kA) && list[size_t(sel_)].press) {
@@ -490,10 +488,6 @@ void InstrumentView::handle_input() {
   }
   if (in.pressed(kB) && list[size_t(sel_)].reset) list[size_t(sel_)].reset(), changed = true;
   if (in.pressed(kY)) app_.audition(app_.track(), audition_note());
-  if ((in.released(kL) || in.released(kR)) && !lr_used_) {
-    app_.set_track(app_.track() + (in.released(kR) ? 1 : -1));
-    changed = true;
-  }
   if (changed || in.pressed(~0u)) app_.invalidate(app_.content_rect());
 }
 
