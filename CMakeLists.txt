@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(TwillStudio VERSION 0.2.2 LANGUAGES CXX)
+project(TwillStudio VERSION 0.3.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -41,6 +41,9 @@ add_library(twill_core STATIC
   src/app/PianoRollView.cpp
   src/app/InputTracker.cpp
   src/app/PianoKeys.cpp
+  src/app/Paper.cpp
+  src/app/Splash.cpp
+  src/app/gen/logo.cpp
   src/gfx/Canvas.cpp
   src/gfx/Font.cpp
   src/gfx/gen/fonts.cpp

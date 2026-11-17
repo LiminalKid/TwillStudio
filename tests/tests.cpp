@@ -2046,6 +2046,43 @@ void test_ui_shoulder_buttons() {
   CHECK(!ui.app.inspector_open());
 }
 
+void test_ui_x_and_y_in_sound_and_mixer() {
+  // X in the sound view opens the track's settings; Y in the mixer plays the track's sound.
+  using V = twill::App::View;
+  UiDriver ui;
+  ui.app.show(V::Instrument);
+  ui.tap(twill::kX);
+  CHECK(ui.app.inspector_open());
+  ui.tap(twill::kX);
+  CHECK(!ui.app.inspector_open());
+  ui.app.show(V::Mixer);
+  ui.audio = true;
+  for (int i = 0; i < 4; ++i) ui.step(0);
+  CHECK(ui.app.engine().active_voices() == 0);
+  ui.tap(twill::kY);
+  CHECK(ui.app.engine().active_voices() > 0);
+}
+
+void test_ui_playhead_redraws_cleanly() {
+  // While playing, only the playhead's strip is redrawn each frame; that must leave the screen as a
+  // full redraw would (the marker in the ruler once left a trail).
+  using V = twill::App::View;
+  for (V v : {V::Arrangement, V::PianoRoll}) {
+    UiDriver ui;
+    ui.app.show(v);
+    ui.audio = true;
+    ui.tap(twill::kStart);
+    for (int i = 0; i < 90; ++i) ui.step(0);
+    ui.audio = false;  // the playhead stays where it is
+    ui.step(0);
+    std::vector<uint32_t> partial(ui.canvas.pixels(), ui.canvas.pixels() + 1024 * 768);
+    ui.app.invalidate_all();
+    ui.step(0);
+    std::vector<uint32_t> full(ui.canvas.pixels(), ui.canvas.pixels() + 1024 * 768);
+    CHECK(partial == full);
+  }
+}
+
 void test_ui_play_from_cursor() {
   // L or R + Start plays from the cursor, and the shoulder button's release doesn't change track.
   // Select + Start does nothing: it's left to the handhelds' "close the app" shortcut.
@@ -2320,6 +2357,8 @@ int main(int argc, char** argv) {
       {"ui_project_tempo", test_ui_project_tempo},
       {"ui_shoulder_buttons", test_ui_shoulder_buttons},
       {"ui_play_from_cursor", test_ui_play_from_cursor},
+      {"ui_playhead_redraws_cleanly", test_ui_playhead_redraws_cleanly},
+      {"ui_x_and_y_in_sound_and_mixer", test_ui_x_and_y_in_sound_and_mixer},
       {"ui_select_all", test_ui_select_all},
       {"ui_song_names", test_ui_song_names},
       {"ui_menu_opens_project", test_ui_menu_opens_project},

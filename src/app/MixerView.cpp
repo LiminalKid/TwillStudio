@@ -1,4 +1,5 @@
 #include "app/MixerView.h"
+#include "app/Paper.h"
 
 #include <algorithm>
 #include <cmath>
@@ -88,6 +89,8 @@ void MixerView::handle_input() {
     open_effects();
     return;
   }
+  // Y: hear the track (as in the sound view).
+  if (in.pressed(kY) && !in.held(kA) && !is_master(strip_)) app_.listen(strip_);
   if (in.pressed(kA)) {
     a_used_ = false;
     // Mute and solo switch on a press.
@@ -171,8 +174,9 @@ void MixerView::tick() {
 std::vector<Hint> MixerView::hints() const {
   const InputTracker& in = app_.input();
   if (in.held(kA)) return {{"D-pad", "change"}, {"R+", "bigger steps"}};
-  if (!is_master(strip_) && (row_ == kMute || row_ == kSolo)) return {{"A", "switch"}, {"X", "effects"}};
-  return {{"A+D-pad", "change"}, {"B", "reset"}, {"X", "effects"}, {"Start", "play"}};
+  if (!is_master(strip_) && (row_ == kMute || row_ == kSolo)) return {{"A", "switch"}, {"Y", "listen"}, {"X", "effects"}};
+  if (is_master(strip_)) return {{"A+D-pad", "change"}, {"B", "reset"}, {"X", "effects"}, {"Start", "play"}};
+  return {{"A+D-pad", "change"}, {"B", "reset"}, {"Y", "listen"}, {"X", "effects"}, {"Start", "play"}};
 }
 
 void MixerView::draw(Canvas& c) {
@@ -180,20 +184,25 @@ void MixerView::draw(Canvas& c) {
   const Project& p = app_.project();
   const Layout l = layout();
   const Rect content = app_.content_rect();
-  const Font& fb = Font::get(FontFace::SemiBold, app_.u(11));
-  const Font& small = Font::get(FontFace::Regular, app_.u(10));
+  const Font& name_f = Font::get(FontFace::CondensedBold, app_.u(14));
+  const Font& label_f = Font::get(FontFace::CondensedSemiBold, app_.u(13));
+  const Font& small = Font::get(FontFace::CondensedSemiBold, app_.u(11));
+  const Font& value_f = Font::get(FontFace::CondensedBold, app_.u(14));
+  const Font& ms_f = Font::get(FontFace::SemiBold, app_.u(13));
+  const float sp = app_.u(kCapsSpacing);
+  const int line = std::max(1, int(app_.u(1)));
   c.fill(content, th.background);
 
-  // Row labels.
-  c.fill(l.labels, th.header);
+  // Row labels, on a sheet like the arrangement's track headers.
+  c.fill(l.labels, th.panel);
   auto row_y = [&](int row) { return row == kLevel ? l.top + l.name_h : l.top + l.name_h + l.level_h + (row - 1) * l.row_h; };
   auto row_h = [&](int row) { return row == kLevel ? l.level_h : l.row_h; };
   for (int row = 0; row < kNumRows; ++row) {
     const int y = row_y(row);
-    c.text(small, l.labels.x + app_.u(6), y + (row_h(row) + small.ascent() - small.descent()) / 2, kRowNames[row],
-           th.text_secondary);
+    const std::string name = caps(kRowNames[row]);
+    c.text(label_f, l.labels.x + app_.u(8), label_f.baseline_in(y, row_h(row)), name.c_str(), th.text_secondary, sp);
   }
-  c.vline(l.labels.right() - 1, content.y, content.bottom(), th.divider);
+  c.vline(l.labels.right() - 1, content.y, content.bottom(), th.grid_bar);
 
   const int n = strips();
   meters_.resize(p.tracks.size(), 0.0f);
@@ -202,85 +211,99 @@ void MixerView::draw(Canvas& c) {
     const bool master = is_master(s);
     const Color col = master ? th.text : app_.track_colour(s);
     const int pad = int(app_.u(4));
-    if (s % 2) c.fill(sr, th.row_black);
-    // Name.
-    c.fill(Rect{sr.x + pad, l.top, sr.w - 2 * pad, int(app_.u(3))}, col);
-    // A name too wide for a narrow strip gets a smaller size first; only then is it cut short.
-    std::string name = master ? "Master" : p.tracks[size_t(s)].name;
-    const Font* nf = &fb;
-    for (float size = 10; size >= 8.5f && nf->measure(name.c_str()) > sr.w - pad; size -= 1.5f)
-      nf = &Font::get(FontFace::SemiBold, app_.u(size));
+    // Name, under a bar of the track's colour. A name too wide for a narrow strip gets a smaller
+    // size first; only then is it cut short.
+    c.fill(Rect{sr.x + pad, l.top + int(app_.u(4)), sr.w - 2 * pad, int(app_.u(4))}, col);
+    std::string name = caps(master ? "Master" : p.tracks[size_t(s)].name);
+    const Font* nf = &name_f;
+    for (float size = 12; size >= 10 && nf->measure(name.c_str()) > sr.w - pad; size -= 2)
+      nf = &Font::get(FontFace::CondensedBold, app_.u(size));
     while (name.size() > 1 && nf->measure(name.c_str()) > sr.w - pad) name.pop_back();
-    c.text(*nf, sr.x + (sr.w - nf->measure(name.c_str())) / 2, l.top + int(app_.u(20)), name.c_str(), th.text);
+    c.text(*nf, sr.x + (sr.w - nf->measure(name.c_str())) / 2, l.top + l.name_h - int(app_.u(6)), name.c_str(), th.text);
 
-    // Level: fader bar with the meter beside it.
+    // Level: a flat bar in the track's colour, with the meter beside it.
     const float lvl = master ? p.mix.master / 1.5f : p.tracks[size_t(s)].level;
     const float meter = master ? master_meter_ : meters_[size_t(s)];
     const int ly = row_y(kLevel) + int(app_.u(4)), lh = row_h(kLevel) - int(app_.u(22));
-    const int fw = std::max(6, int(app_.u(10))), mw = std::max(3, int(app_.u(4)));
-    const int fx = sr.x + sr.w / 2 - fw, mx = sr.x + sr.w / 2 + int(app_.u(3));
-    c.fill_rounded(Rect{fx, ly, fw, lh}, app_.u(2), th.grid_beat);
+    const int fw = std::max(6, int(app_.u(9))), mw = std::max(3, int(app_.u(3)));
+    const int fx = sr.x + sr.w / 2 - fw + int(app_.u(1)), mx = fx + fw + int(app_.u(3));
+    c.fill(Rect{fx, ly, fw, lh}, th.grid_step);
     const int fh = int(lh * std::min(1.0f, lvl));
-    c.fill_rounded(Rect{fx, ly + lh - fh, fw, fh}, app_.u(2), col);
+    c.fill(Rect{fx, ly + lh - fh, fw, fh}, col);
     c.fill(Rect{mx, ly, mw, lh}, th.grid_step);
     const int mh = int(lh * std::min(1.0f, meter));
     c.fill(Rect{mx, ly + lh - mh, mw, mh}, meter > 0.98f ? th.cursor : th.text_secondary);
     char b[16];
     std::snprintf(b, sizeof b, "%.0f", lvl * (master ? 150 : 100));
-    c.text(small, sr.x + (sr.w - small.measure(b)) / 2, ly + lh + int(app_.u(14)), b, th.text_secondary);
+    c.text(value_f, sr.x + (sr.w - value_f.measure(b)) / 2, ly + lh + int(app_.u(15)), b, th.text);
 
-    // Small rows.
+    // Small rows: sliders (a groove, a fill in the track's colour, a thin thumb), then M and S.
     for (int row = kPan; row < kNumRows; ++row) {
       const int y = row_y(row);
-      const Rect cell{sr.x + pad, y + int(app_.u(4)), sr.w - 2 * pad, l.row_h - int(app_.u(8))};
+      const Rect cell{sr.x + int(app_.u(2.5f)), y + int(app_.u(4)), sr.w - int(app_.u(5)), l.row_h - int(app_.u(8))};
       if (master && row > kDelay) continue;
       if (!master && (row == kMute || row == kSolo)) {
         const Track& t = p.tracks[size_t(s)];
         const bool on = row == kMute ? t.mute : t.solo;
-        c.fill_rounded(cell, app_.u(3), on ? (row == kSolo ? th.cursor : th.text) : th.chip);
+        const int bw = std::min(int(app_.u(32)), sr.w - int(app_.u(10)));
+        const Rect box{sr.x + (sr.w - bw) / 2, y + int(app_.u(3)), bw, l.row_h - int(app_.u(6))};
+        const Color box_col = row == kSolo && on ? th.cursor : th.text;
+        if (on) c.fill(box, box_col);
+        else c.stroke_rect(box, line, th.text);
         const char* txt = row == kMute ? "M" : "S";
-        c.text(fb, cell.x + (cell.w - fb.measure(txt)) / 2, cell.y + (cell.h + fb.ascent() - fb.descent()) / 2, txt,
-               on ? th.header : th.text_secondary);
+        c.text(ms_f, box.x + (box.w - ms_f.measure(txt)) / 2, ms_f.baseline_in(box.y, box.h), txt,
+               on ? th.chip_active_text : th.text);
         continue;
       }
       const ParamId id = param_at(s, row);
       const ParamInfo* info = param_info(id);
       const float v = master ? p.mix.get(id) : p.track_param(s, id);
-      // The master's rows have a label above the bar, so its bar sits at the bottom of the cell.
+      // The master's rows have a label above the slider, so its slider sits low in the cell.
       const int bar_h = std::max(3, int(app_.u(4)));
-      const Rect bar{cell.x, master ? cell.bottom() - bar_h : cell.y + cell.h / 2 - int(app_.u(2)), cell.w, bar_h};
-      c.fill(bar, th.grid_beat);
-      if (info->min < 0) {  // centred (pan, EQ)
+      const int bar_y = master ? cell.bottom() - bar_h - int(app_.u(1)) : cell.y + (cell.h - bar_h) / 2;
+      const Rect bar{cell.x, bar_y, cell.w, bar_h};
+      c.fill(bar, th.grid_step);
+      const int x = bar.x + int((v - info->min) / (info->max - info->min) * bar.w);
+      if (info->min < 0) {  // centred (pan, EQ): filled from the middle, which is marked
         const int mid = bar.x + bar.w / 2;
-        const int x = bar.x + int((v - info->min) / (info->max - info->min) * bar.w);
         c.fill(Rect{std::min(mid, x), bar.y, std::abs(x - mid) + 1, bar.h}, col);
-        c.vline(mid, bar.y - int(app_.u(2)), bar.bottom() + int(app_.u(2)), th.grid_bar);
+        c.vline(mid, bar.y - int(app_.u(3)), bar.bottom() + int(app_.u(3)), th.grid_bar);
       } else {
-        c.fill(Rect{bar.x, bar.y, int(bar.w * (v - info->min) / (info->max - info->min)), bar.h}, col);
+        c.fill(Rect{bar.x, bar.y, x - bar.x, bar.h}, col);
       }
+      const int tw = std::max(2, int(app_.u(2)));
+      c.fill(Rect{x - tw / 2, bar.y + bar.h / 2 - int(app_.u(4.5f)), tw, int(app_.u(9))}, th.text_secondary);
     }
     if (master) {
       const float fits = sr.w - 2 * pad;
       bool long_names = true;  // all long or all short
-      for (int row = kPan; row <= kDelay; ++row) long_names = long_names && small.measure(kMasterRowNames[row]) <= fits;
-      const char* const* names = long_names ? kMasterRowNames : kMasterRowShort;
       for (int row = kPan; row <= kDelay; ++row)
-        c.text(small, sr.x + pad, row_y(row) + int(app_.u(3)) + small.ascent(), names[row], th.text_secondary);
+        long_names = long_names && small.measure(caps(kMasterRowNames[row]).c_str(), sp) <= fits;
+      const char* const* names = long_names ? kMasterRowNames : kMasterRowShort;
+      for (int row = kPan; row <= kDelay; ++row) {
+        const std::string nm = caps(names[row]);
+        c.text(small, sr.x + pad, row_y(row) + int(app_.u(3)) + small.cap_height() + int(app_.u(1)), nm.c_str(),
+               th.text_secondary, sp);
+      }
       // The compressor (set in the effects panel): how hard it's working.
-      c.text(small, sr.x + pad, row_y(kReverb) + int(app_.u(9)), "Comp", th.text_secondary);
+      c.text(small, sr.x + pad, row_y(kReverb) + int(app_.u(10)), "COMP", th.text_secondary, sp);
       char gr[24];
-      if (comp_shown_ < 0) std::snprintf(gr, sizeof gr, "Off");
+      if (comp_shown_ < 0) std::snprintf(gr, sizeof gr, "OFF");
       else std::snprintf(gr, sizeof gr, "-%.1f dB", comp_shown_);
-      if (fb.measure(gr) > fits && comp_shown_ >= 0) std::snprintf(gr, sizeof gr, "-%.1f", comp_shown_);
-      c.text(fb, sr.x + pad, row_y(kReverb) + int(app_.u(24)), gr, comp_shown_ >= 6 ? th.warning : th.text);
+      if (value_f.measure(gr) > fits && comp_shown_ >= 0) std::snprintf(gr, sizeof gr, "-%.1f", comp_shown_);
+      c.text(value_f, sr.x + pad, row_y(kReverb) + int(app_.u(24)), gr, comp_shown_ >= 6 ? th.warning : th.text);
     }
   }
 
-  // Cursor.
+  // The labels lie on the strips like a sheet.
+  draw_shadow(c, l.labels.right(), content.y, content.h, int(app_.u(6)), false, th.shadow_strength * 3 / 4);
+
+  // Cursor: viewfinder corners around the selected control.
   {
     const Rect sr = strip_rect(l, strip_);
-    const Rect cur{sr.x + 1, row_y(row_), sr.w - 2, row_h(row_)};
-    c.stroke_rect(cur, std::max(2, int(app_.u(1.5f))), th.cursor);
+    const int inset = int(app_.u(3));
+    const Rect cur{sr.x + inset, row_y(row_) + int(app_.u(2)), sr.w - 2 * inset, row_h(row_) - int(app_.u(4))};
+    draw_brackets(c, cur, th.text, app_.u(1));
   }
 }
 

@@ -3,15 +3,16 @@
 #include <algorithm>
 #include <cstdio>
 
+#include "app/Paper.h"
 #include "engine/PlaitsVoice.h"
 
 namespace twill {
 
 namespace {
 // Sizes, in layout units (x2 on the Brick Pro). Tuned for reading on a handheld at arm's length.
-constexpr float kRulerH = 22, kHeaderW = 150, kRowH = 46, kBarW = 64;
-constexpr float kNameSize = 16, kSmallSize = 12;
-constexpr float kNameBaseline = 20, kEngineBaseline = 37;  // from the top of the row
+constexpr float kRulerH = 22, kHeaderW = 128, kRowH = 46, kBarW = 64;
+constexpr float kNameSize = 20, kSmallSize = 12, kRulerText = 14;
+constexpr float kNameBaseline = 21, kEngineBaseline = 37;  // from the top of the row
 }  // namespace
 
 ArrangementView::Layout ArrangementView::layout() const {
@@ -355,9 +356,9 @@ void ArrangementView::tick() {
   int x = -1;
   if (app_.engine().playing()) x = bar_x(l, double(app_.engine().position()) / kBar);
   if (x != last_playhead_x_) {
-    const int w = int(app_.u(2)) + 2;
-    if (last_playhead_x_ >= 0) app_.invalidate(Rect{last_playhead_x_ - w, l.ruler.y, 2 * w, l.ruler.h + l.grid.h});
-    if (x >= 0) app_.invalidate(Rect{x - w, l.ruler.y, 2 * w, l.ruler.h + l.grid.h});
+    const int w = int(app_.u(6)) + 2;  // the line, and the marker in the ruler (5 points each side)
+    if (last_playhead_x_ >= 0) app_.invalidate(Rect{last_playhead_x_ - w, l.ruler.y, 2 * w + 1, l.ruler.h + l.grid.h});
+    if (x >= 0) app_.invalidate(Rect{x - w, l.ruler.y, 2 * w + 1, l.ruler.h + l.grid.h});
     last_playhead_x_ = x;
   }
 }
@@ -378,21 +379,27 @@ void ArrangementView::draw(Canvas& c) {
   const Project& p = app_.project();
   const Layout l = layout();
   const Rect content = app_.content_rect();
-  const Font& fb = Font::get(FontFace::SemiBold, app_.u(kNameSize));
-  const Font& small = Font::get(FontFace::Regular, app_.u(kSmallSize));
+  const Font& name_f = Font::get(FontFace::CondensedBold, app_.u(kNameSize));
+  const Font& small = Font::get(FontFace::CondensedSemiBold, app_.u(kSmallSize));
+  const Font& ruler_f = Font::get(FontFace::CondensedBold, app_.u(kRulerText));
+  const float sp = app_.u(kCapsSpacing);
+  const int line = std::max(1, int(app_.u(1)));
   const int ntracks = int(p.tracks.size());
 
-  // Ruler and the corner above the headers.
-  c.fill(Rect{content.x, content.y, l.headers.w, l.ruler.h}, th.header);
+  // Ruler, and the corner above the headers (a sheet like them).
+  c.fill(Rect{content.x, content.y, l.headers.w, l.ruler.h}, th.panel);
+  c.text(ruler_f, content.x + app_.u(10), ruler_f.baseline_in(l.ruler.y, l.ruler.h), "ARRANGE", th.text_secondary,
+         app_.u(0.6f));
   c.fill(l.ruler, th.header);
-  c.hline(content.x, content.right(), l.ruler.bottom() - 1, th.divider);
-  const int base = l.ruler.y + (l.ruler.h + small.ascent() - small.descent()) / 2;
+  const int base = ruler_f.baseline_in(l.ruler.y, l.ruler.h);
   const int label_every = bars_per_cell_ >= 4 ? 4 : bars_per_cell_ >= 2 ? 2 : 1;
   for (int bar = scroll_bar_; bar_x(l, bar) < l.ruler.right(); ++bar) {
     int x = bar_x(l, bar);
-    c.vline(x, l.ruler.bottom() - int(app_.u(7)), l.ruler.bottom(), th.grid_bar);
-    if (bar % label_every == 0) c.text(small, x + app_.u(4), base, std::to_string(bar + 1).c_str(), th.text_secondary);
+    if (bar % label_every) continue;
+    c.vline(x, l.ruler.y + int(app_.u(6)), l.ruler.bottom(), th.grid_bar);
+    c.text(ruler_f, x + app_.u(4), base, std::to_string(bar + 1).c_str(), th.text);
   }
+  c.fill(Rect{content.x, l.ruler.bottom() - line, content.w, line}, th.text);
 
   // Rows.
   const Tick loop_end = std::max(kBar, p.song_end());
@@ -403,42 +410,53 @@ void ArrangementView::draw(Canvas& c) {
     Rect header{l.headers.x, y, l.headers.w, l.row_h};
     Rect lane{l.grid.x, y, l.grid.w, l.row_h};
     if (t >= ntracks) {
-      c.fill(Rect{content.x, y, content.w, l.grid.bottom() - y}, th.background);
+      c.fill(Rect{l.headers.x, y, l.headers.w, l.grid.bottom() - y}, th.panel);
+      c.fill(Rect{l.grid.x, y, l.grid.w, l.grid.bottom() - y}, th.background);
       break;
     }
     const Track& tr = p.tracks[size_t(t)];
     const Color col = app_.track_colour(t);
 
-    // Header: colour bar, name, engine, mute/solo.
+    // Header: colour swatch, number, name, engine, mute/solo.
     c.fill(header, t == app_.track() ? th.chip : th.panel);
-    c.fill(Rect{header.x, header.y, int(app_.u(5)), header.h}, col);
+    const int sw = int(app_.u(9));
+    c.fill(Rect{header.x + int(app_.u(8)), y + int(app_.u(10)), sw, sw}, col);
+    char num[8];
+    std::snprintf(num, sizeof num, "%02d", t + 1);
+    c.text(small, header.x + app_.u(22), y + int(app_.u(19)), num, th.text_secondary);
+    std::string name = caps(tr.name);
+    const char* badge = tr.solo ? "S" : tr.mute ? "M" : "";
+    const float name_x = header.x + app_.u(38);
+    const float name_room = header.right() - app_.u(8) - name_x - (badge[0] ? name_f.measure(badge) + app_.u(6) : 0);
+    while (name.size() > 1 && name_f.measure(name.c_str()) > name_room) name.pop_back();
     const int nb = y + int(app_.u(kNameBaseline));
-    c.text(fb, header.x + app_.u(13), nb, tr.name.c_str(), tr.mute ? th.text_secondary : th.text);
-    c.text(small, header.x + app_.u(13), y + int(app_.u(kEngineBaseline)), App::sound_name(tr),
-           th.text_secondary);
-    if (tr.mute || tr.solo) {
-      const char* badge = tr.solo ? "S" : "M";
-      c.text(fb, header.right() - app_.u(10) - fb.measure(badge), nb, badge, tr.solo ? th.cursor : th.text_secondary);
-    }
-    c.hline(header.x, header.right(), y + l.row_h - 1, th.grid_step);
+    c.text(name_f, name_x, nb, name.c_str(), tr.mute ? th.text_secondary : th.text);
+    if (badge[0]) c.text(name_f, header.right() - app_.u(8) - name_f.measure(badge), nb, badge, tr.solo ? th.cursor : th.text_secondary);
+    std::string engine = caps(App::sound_name(tr));
+    while (engine.size() > 1 && small.measure(engine.c_str(), sp) > header.right() - app_.u(6) - name_x) engine.pop_back();
+    c.text(small, name_x, y + int(app_.u(kEngineBaseline)), engine.c_str(), th.text_secondary, sp);
+    c.hline(header.x, header.right(), y + l.row_h - 1, th.divider);
 
-    // Lane, bar lines.
-    c.fill(lane, t % 2 ? th.row_black : th.row_white);
+    // Lane: bar lines, stronger every four bars, and beat lines when the bars are wide.
+    c.fill(lane, th.row_white);
     for (int bar = scroll_bar_; bar_x(l, bar) < lane.right(); ++bar) {
-      Color lc = bar % 4 == 0 ? th.grid_beat : th.grid_step;
-      if (bars_per_cell_ == 1 || bar % 4 == 0) c.vline(bar_x(l, bar), y, y + l.row_h, lc);
+      const int x = bar_x(l, bar);
+      if (bars_per_cell_ == 1)
+        for (int q = 1; q < 4; ++q) c.vline(x + l.bar_w * q / 4, y, y + l.row_h, th.grid_step);
+      if (bars_per_cell_ == 1 || bar % 4 == 0) c.vline(x, y, y + l.row_h, bar % 4 == 0 ? th.grid_bar : th.grid_beat);
     }
     c.hline(lane.x, lane.right(), y + l.row_h - 1, th.grid_step);
 
-    // Clips, cut off at the lane's edges when they start before the scrolled view.
+    // Clips, cut off at the lane's edges when they start before the scrolled view: a pale fill of
+    // the track's colour, the notes in a deep shade of it.
+    const Color fill = th.track_fill(int(tr.colour)), ink = th.track_ink(int(tr.colour));
     const Rect saved_clip = c.clip();
     c.set_clip(saved_clip.intersect(lane));
     for (const Placement& pl : tr.arrangement) {
       int x0 = bar_x(l, double(pl.start) / kBar), x1 = bar_x(l, double(pl.start + pl.length) / kBar);
       if (x1 < lane.x || x0 > lane.right()) continue;
-      Rect block{x0 + 1, y + int(app_.u(3)), x1 - x0 - 2, l.row_h - int(app_.u(6))};
-      c.fill_rounded(block, app_.u(2), col);
-      c.fill_rounded(block.inset(1), app_.u(2) - 1, th.tint_base.mix(col, th.dark ? 90 : 60));
+      Rect block{x0 + 1, y + int(app_.u(4)), x1 - x0 - 2, l.row_h - int(app_.u(8))};
+      c.fill(block, fill);
       const Clip* clip = p.find_clip(pl.clip_id);
       if (clip && clip->length > 0) {
         // A miniature of the notes, the clip repeating across the placement.
@@ -451,10 +469,10 @@ void ArrangementView::draw(Canvas& c) {
             Tick s = rep + n.start;
             if (s < 0 || s >= pl.length) continue;
             int nx = block.x + int(s * px_per_tick);
-            int nw = std::max(1, int(std::min<Tick>(n.length, pl.length - s) * px_per_tick));
+            int nw = std::max(1, int(std::min<Tick>(n.length, pl.length - s) * px_per_tick) - 1);
             int ny = hi == lo ? inner.y + inner.h / 2
                               : inner.bottom() - 1 - (n.pitch - lo) * (inner.h - 2) / std::max(1, hi - lo);
-            c.fill(Rect{nx, ny, nw, std::max(1, int(app_.u(2.5f)))}, col);
+            c.fill(Rect{nx, ny, nw, std::max(1, int(app_.u(2.5f)))}, ink);
           }
         // Clips placed more than once are linked: editing one changes all.
         int uses = 0;
@@ -463,7 +481,7 @@ void ArrangementView::draw(Canvas& c) {
         if (uses > 1 && block.w > app_.u(24)) {
           char b[8];
           std::snprintf(b, sizeof b, "x%d", uses);
-          c.text(small, block.right() - small.measure(b) - app_.u(4), block.y + small.ascent() + int(app_.u(2)), b, col);
+          c.text(small, block.right() - small.measure(b) - app_.u(4), block.y + small.cap_height() + int(app_.u(3)), b, ink);
         }
       }
     }
@@ -473,32 +491,38 @@ void ArrangementView::draw(Canvas& c) {
   int ex = bar_x(l, double(loop_end) / kBar);
   if (ex > l.grid.x && ex < l.grid.right()) c.vline(ex, l.grid.y, l.grid.bottom(), th.grid_bar);
 
-  // Cursor.
+  // The headers lie on the lanes like a sheet: a soft shadow over the lanes' edge.
+  c.vline(l.headers.right() - 1, content.y, l.headers.bottom(), th.grid_bar);
+  draw_shadow(c, l.headers.right(), l.grid.y, l.grid.h, int(app_.u(6)), false, th.shadow_strength * 3 / 4);
+
+  // Cursor: viewfinder corners around the clip, the empty bar or the header.
   const int crow = app_.track() - top_track_;
   if (crow >= 0 && l.grid.y + crow * l.row_h < l.grid.bottom()) {
     const int y = l.grid.y + crow * l.row_h;
-    Rect cur = cursor_bar_ < 0 ? Rect{l.headers.x, y, l.headers.w, l.row_h}
-                               : Rect{bar_x(l, cursor_bar_), y, l.bar_w, l.row_h};
+    Rect cur = cursor_bar_ < 0 ? Rect{l.headers.x + int(app_.u(4)), y + int(app_.u(4)), l.headers.w - int(app_.u(8)),
+                                      l.row_h - int(app_.u(8))}
+                               : Rect{bar_x(l, cursor_bar_) + 1, y + int(app_.u(4)), l.bar_w - 2, l.row_h - int(app_.u(8))};
     const int pi = cursor_bar_ >= 0 ? placement_at(app_.track(), cursor_bar_) : -1;
     if (pi >= 0) {
       const Placement& pl = p.tracks[size_t(app_.track())].arrangement[size_t(pi)];
       int x0 = bar_x(l, double(pl.start) / kBar), x1 = bar_x(l, double(pl.start + pl.length) / kBar);
-      cur = Rect{x0, y, x1 - x0, l.row_h};
+      cur = Rect{x0 + 1, cur.y, x1 - x0 - 2, cur.h};
     }
-    // A clip that starts before the view: its outline stops at the grid's edge.
+    // A clip that starts before the view: its corners stop at the grid's edge.
     const Rect saved_clip = c.clip();
-    if (cursor_bar_ >= 0) c.set_clip(saved_clip.intersect(l.grid));
-    c.stroke_rect(cur, std::max(3, int(app_.u(2))), th.cursor);
+    if (cursor_bar_ >= 0) c.set_clip(saved_clip.intersect(Rect{l.grid.x, content.y, l.grid.w, content.h}));
+    draw_brackets(c, cur, th.text, app_.u(1));
     c.set_clip(saved_clip);
   }
 
-  // Playhead.
+  // Playhead: an ink line with a marker in the ruler.
   if (app_.engine().playing()) {
     int x = bar_x(l, double(app_.engine().position()) / kBar);
-    if (x >= l.grid.x && x < l.grid.right())
-      c.fill(Rect{x, l.ruler.y, std::max(1, int(app_.u(1))), l.ruler.h + l.grid.h}, th.playhead_line);
+    if (x >= l.grid.x && x < l.grid.right()) {
+      c.fill(Rect{x, l.ruler.y + int(app_.u(2)), line, l.ruler.h + l.grid.h - int(app_.u(2))}, th.playhead_line);
+      draw_marker(c, x, l.ruler.y + int(app_.u(15)), int(app_.u(5)), th.playhead_line);
+    }
   }
-  c.vline(l.headers.right() - 1, l.headers.y, l.headers.bottom(), th.divider);
 }
 
 }  // namespace twill

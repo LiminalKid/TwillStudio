@@ -100,5 +100,5 @@ them in anything, with or without credit. Music you make with Twill Studio is yo
 - `dr_wav` 0.14.6 (public domain or MIT-0): `third_party/dr_libs/`.
 - Jacquard 24 and Jersey 15 fonts (SIL Open Font License 1.1), for the wordmark only:
   `third_party/fonts/jacquard24/`, `third_party/fonts/jersey15/`; `tools/make-wordmark.py` draws it.
-- Inter font (SIL Open Font License 1.1): `third_party/fonts/inter/`. `tools/mkfonts.py` turns it
-  into `src/gfx/gen/fonts.cpp`.
+- Inter and Barlow Condensed fonts (SIL Open Font License 1.1): `third_party/fonts/inter/`,
+  `third_party/fonts/barlow-condensed/`. `tools/mkfonts.py` turns them into `src/gfx/gen/fonts.cpp`.

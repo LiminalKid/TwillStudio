@@ -137,7 +137,7 @@ void Canvas::line(float x0, float y0, float x1, float y1, Color c) {
   mark_dirty(bounds.intersect(clip_));
 }
 
-float Canvas::text(const Font& font, float x, int baseline, const char* s, Color c) {
+float Canvas::text(const Font& font, float x, int baseline, const char* s, Color c, float spacing) {
   float pen = x;
   Rect touched;
   for (const char* p = s; *p; ++p) {
@@ -160,6 +160,7 @@ float Canvas::text(const Font& font, float x, int baseline, const char* s, Color
       }
     }
     pen += g->advance;
+    if (p[1]) pen += spacing;
   }
   mark_dirty(touched);
   return pen;

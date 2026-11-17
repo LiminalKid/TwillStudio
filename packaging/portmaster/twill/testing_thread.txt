@@ -1,4 +1,4 @@
-Testing zip: https://github.com/LiminalKid/TwillStudio/releases/download/v0.2.2/twill.zip (release 0.2.2)
+Testing zip: https://github.com/LiminalKid/TwillStudio/releases/download/v0.3.0/twill.zip (release 0.3.0)
 
 Instructions to install the Testing Zip:
 Drop the .zip into your Portmaster autoinstall folder and run Portmaster.
@@ -38,14 +38,14 @@ CFW Tests:
 ROCKNIX
 -> [ ] Libmali
 -> [ ] Panfrost
--> [ ] Adreno (Optional)
+-> [x] Adreno (Optional): Retroid Pocket 5, reported by a tester
 [x] Knulli (TrimUI Brick Pro, 1024x768)
 
 Resolutions:
 [ ] 480x320 (Optional)
 [x] 640x480: Anbernic RG28XX under KNULLI
 [ ] 720x720 (RGB30) (Optional)
-[x] Higher resolutions (e.g., 1280): 1024x768 on the Brick Pro
+[x] Higher resolutions (e.g., 1280): 1024x768 on the Brick Pro; 1920x1080 on the Retroid Pocket 5 (ROCKNIX)
 
 Known limits: needs a 64-bit (aarch64) device; not made for 480x320. Hold Select + Start to quit through
 PortMaster (Menu + Start also quits).

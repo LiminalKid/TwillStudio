@@ -26,9 +26,9 @@ const GlyphInfo* Font::glyph(char c) const {
   return &d_->glyphs[code - d_->first];
 }
 
-float Font::measure(const char* text) const {
+float Font::measure(const char* text, float spacing) const {
   float w = 0;
-  for (const char* p = text; *p; ++p) w += glyph(*p)->advance;
+  for (const char* p = text; *p; ++p) w += glyph(*p)->advance + (p[1] ? spacing : 0);
   return w;
 }
 

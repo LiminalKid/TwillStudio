@@ -10,6 +10,7 @@
 #include "app/FactorySounds.h"
 #include "app/InstrumentView.h"
 #include "app/MixerView.h"
+#include "app/Paper.h"
 #include "app/PianoRollView.h"
 #include "app/SongNames.h"
 #include "Version.h"
@@ -20,8 +21,8 @@ namespace twill {
 
 namespace {
 // Sizes, in layout units (x2 on the Brick Pro); see the arrangement's for the reasoning.
-constexpr float kTopBarH = 32, kHintBarH = 28, kTopText = 14, kHintText = 13;
-constexpr float kPanelW = 250, kPanelTitle = 15, kPanelText = 13, kPanelRowH = 24;
+constexpr float kTopBarH = 32, kHintBarH = 28, kTopText = 16, kHintText = 13;
+constexpr float kPanelW = 250, kPanelTitle = 18, kPanelText = 13, kPanelRowH = 24;
 constexpr uint64_t kAutosaveDelayUs = 3000000;  // save 3 s after the last edit
 constexpr int kStrip = 32;                      // see App::draw
 }  // namespace
@@ -209,6 +210,16 @@ void App::audition(int track, int pitch) {
   if (!engine_->playing()) engine_->audition(track, uint8_t(std::max(0, std::min(127, pitch))), 0.3f);
 }
 
+void App::listen(int track) {
+  if (track < 0 || track >= int(project_.tracks.size())) return;
+  const Track& t = project_.tracks[size_t(track)];
+  int note = 60;
+  if (t.instrument == InstrumentType::Sampler) note = t.sampler.mode == SamplerMode::Kit ? kKitFirstNote : t.sampler.root;
+  audition(track, note);
+}
+
+void App::open_track_settings(int track) { arrangement_->open_track_settings(track); }
+
 void App::message(const std::string& text) {
   message_ = text;
   message_until_us_ = p_.micros() + 2000000;
@@ -285,10 +296,12 @@ void App::open_controls() {
       {"A", "browse"},
       {"B", "reset"},
       {"Y", "listen"},
+      {"X", "track settings"},
       {"Sel + Up / Down", "track"},
       {"MIXER", ""},
       {"A + D-pad", "change"},
       {"B", "reset"},
+      {"Y", "listen"},
       {"X", "effects"},
       {"PANELS", ""},
       {"R1 + Left / Right", "bigger steps"},
@@ -299,6 +312,7 @@ void App::open_controls() {
     const std::string value = r[1];
     InspectorField field{r[0], [value] { return value; }, nullptr};
     field.heading = value.empty();
+    field.buttons = !field.heading;
     fields.push_back(std::move(field));
   }
   open_inspector("Controls", std::move(fields));
@@ -608,14 +622,10 @@ void App::handle_name_edit() {
 
 void App::draw_name_edit(Canvas& c) {
   const Rect r = inspector_rect_;
-  c.fill(Rect{r.x - int(u(3)), r.y, int(u(3)), r.h}, theme_.panel_shadow);
-  c.fill(r, theme_.panel);
-  c.vline(r.x, r.y, r.bottom(), theme_.divider);
-  const Font& title = Font::get(FontFace::SemiBold, u(kPanelTitle));
+  draw_panel_frame(c, "PROJECT NAME");
   const Font& f = Font::get(FontFace::Regular, u(kPanelText));
   const Font& big = Font::get(FontFace::SemiBold, u(20));
   const Font& faint = Font::get(FontFace::Regular, u(14));
-  c.text(title, r.x + u(12), r.y + int(u(12)) + title.ascent(), "Project name", theme_.text);
   // The name as ordinary text. The letter being changed is in the cursor's colour on a tint,
   // with the letters Up and Down would give shown faintly above and below it, like a wheel.
   const int y = r.y + int(u(84));
@@ -1007,85 +1017,90 @@ void App::draw(Canvas& c) {
 void App::draw_top_bar(Canvas& c) {
   const Rect& r = top_bar_;
   c.fill(r, theme_.header);
-  c.hline(r.x, r.right(), r.bottom() - 1, theme_.divider);
-  const Font& f = Font::get(FontFace::Regular, u(kTopText));
-  const Font& fb = Font::get(FontFace::SemiBold, u(kTopText));
-  const int base = r.y + (r.h + f.ascent() - f.descent()) / 2;
+  c.fill(Rect{r.x, r.bottom() - std::max(1, int(u(1))), r.w, std::max(1, int(u(1)))}, theme_.text);
+  const Font& fb = Font::get(FontFace::CondensedBold, u(kTopText));
+  const Font& fs = Font::get(FontFace::CondensedSemiBold, u(kTopText - 2));
+  const int base = fb.baseline_in(r.y, r.h - int(u(1)));
+  const int mid = base - fb.cap_height() / 2;
 
-  // Right side first, so the left side knows how much room it has: the transport.
-  // While notes are being cut off for want of voices, "Voices full" takes the transport's place.
-  char right[64];
+  // Right side first, so the left side knows how much room it has: the transport. A triangle when
+  // playing, a square when stopped; while notes are cut off for want of voices, "VOICES FULL".
+  char pos_text[16], tempo_text[32];
   const Tick pos = engine_->position();
   const Tick bar = 4 * kTicksPerQuarter;
-  const bool full = voices_full_until_us_ != 0;
+  std::snprintf(pos_text, sizeof pos_text, "%d.%d", pos / bar + 1, pos % bar / kTicksPerQuarter + 1);
   if (tempo_override_ > 0)  // following a MIDI clock: the master's tempo
-    std::snprintf(right, sizeof right, "  %d.%d   Ext %.1f BPM", pos / bar + 1, pos % bar / kTicksPerQuarter + 1,
-                  clock_in_.bpm());
+    std::snprintf(tempo_text, sizeof tempo_text, "EXT %.1f BPM", clock_in_.bpm());
   else
-    std::snprintf(right, sizeof right, "  %d.%d   %.0f BPM", pos / bar + 1, pos % bar / kTicksPerQuarter + 1,
-                  project_.tempo);
-  const char* state = full ? "Voices full" : engine_->playing() ? "Playing" : "Stopped";
-  const char* rec = recording_ ? "Rec  " : "";
-  const Font& sf = full ? fb : f;
-  float right_x = r.right() - u(12) - f.measure(rec) - sf.measure(state) - f.measure(right);
-  // On a narrow screen the track name comes first: "Playing"/"Stopped" goes (the playhead and
-  // the position show it), "Voices full" stays.
-  if (!full && !project_.tracks.empty()) {
-    float tabs = u(10);
-    for (const char* name : {"Arrange", "Roll", "Sound", "Mix"}) tabs += fb.measure(name) + u(22);
-    const float name_x = r.x + tabs + u(12) + u(10) + u(6);
-    const float want = std::min(fb.measure(project_.tracks[size_t(track_)].name.c_str()), fb.measure("Chords"));
-    if (right_x - u(12) - name_x < want) {
-      state = "";
-      right_x = r.right() - u(12) - f.measure(rec) - f.measure(right + 2);
-    }
-  }
-  const char* right_text = state[0] ? right : right + 2;  // no gap before the position without a state
-  const Color col = engine_->playing() ? theme_.text : theme_.text_secondary;
-  float rx = c.text(f, right_x, base, rec, col);
-  rx = c.text(sf, rx, base, state, full ? theme_.warning : col);
-  c.text(f, rx, base, right_text, col);
-
-  // View tabs.
-  float x = r.x + u(10);
-  for (View v : {View::Arrangement, View::PianoRoll, View::Instrument, View::Mixer}) {
-    const char* name = v == View::Arrangement ? "Arrange" : v == View::PianoRoll ? "Roll" : v == View::Instrument ? "Sound" : "Mix";
-    float w = fb.measure(name) + u(18);
-    Rect tab{int(x), r.y + int(u(5)), int(w), r.h - int(u(10))};
-    if (v == view_) {
-      c.fill_rounded(tab, u(4), theme_.chip_active);
-      c.text(fb, x + u(9), base, name, theme_.header);
+    std::snprintf(tempo_text, sizeof tempo_text, "%.0f BPM", project_.tempo);
+  const bool full = voices_full_until_us_ != 0;
+  const float gap = u(12), icon = u(10);
+  float x_right = r.right() - u(10) - fb.measure(tempo_text);
+  c.text(fb, x_right, base, tempo_text, theme_.text);
+  x_right -= gap + fb.measure(pos_text);
+  c.text(fb, x_right, base, pos_text, theme_.text);
+  if (full) {
+    x_right -= u(8) + fb.measure("VOICES FULL");
+    c.text(fb, x_right, base, "VOICES FULL", theme_.warning);
+  } else {
+    x_right -= u(7) + icon;
+    const int ix = int(x_right), half = int(icon / 2);
+    if (engine_->playing()) {  // a triangle pointing right
+      for (int i = 0; i <= half; ++i) c.fill(Rect{ix, mid - half + i, int(icon * i / half * 0.8f) + 1, 1}, theme_.text);
+      for (int i = 0; i < half; ++i) c.fill(Rect{ix, mid + half - i, int(icon * i / half * 0.8f) + 1, 1}, theme_.text);
     } else {
-      c.text(f, x + u(9), base, name, theme_.text_secondary);
+      c.fill(Rect{ix + int(u(1)), mid - half + int(u(1)), int(icon - u(2)), int(icon - u(2))}, theme_.text_secondary);
     }
-    x += w + u(4);
+  }
+  if (recording_) {
+    x_right -= gap + fb.measure("REC");
+    c.text(fb, x_right, base, "REC", theme_.cursor);
+    const int d = int(u(8));
+    x_right -= u(4) + d;
+    c.fill_rounded(Rect{int(x_right), mid - d / 2, d, d}, d / 2.0f, theme_.cursor);
   }
 
-  // Current track: colour dot, name, and engine if there's room.
+  // View tabs: the current one an ink block.
+  float x = r.x + u(6);
+  for (View v : {View::Arrangement, View::PianoRoll, View::Instrument, View::Mixer}) {
+    const char* name = v == View::Arrangement ? "ARRANGE" : v == View::PianoRoll ? "ROLL" : v == View::Instrument ? "SOUND" : "MIX";
+    const float w = fb.measure(name) + u(14);
+    if (v == view_) {
+      c.fill(Rect{int(x), r.y + int(u(5)), int(w), r.h - int(u(10))}, theme_.chip_active);
+      c.text(fb, x + u(7), base, name, theme_.chip_active_text);
+    } else {
+      c.text(fb, x + u(7), base, name, theme_.text_secondary);
+    }
+    x += w + u(2);
+  }
+
+  // Current track: colour swatch, name, and engine if there's room.
   x += u(12);
   if (!project_.tracks.empty()) {
     const Track& t = project_.tracks[size_t(track_)];
-    int d = int(u(10));
+    const int d = int(u(10));
     // The name, shortened if it would run into the transport; with no room for a few letters
-    // (a square screen), no dot or name at all.
-    std::string name = t.name;
-    const float room = right_x - u(12) - (x + d + u(6));
-    if (room < fb.measure("Kic")) return;
-    c.fill_rounded(Rect{int(x), base - d, d, d}, d / 2.0f, track_colour(track_));
+    // (a square screen), no swatch or name at all.
+    std::string name = caps(t.name);
+    const float room = x_right - gap - (x + d + u(6));
+    if (room < fb.measure("KIC")) return;
+    c.fill(Rect{int(x), mid - d / 2, d, d}, track_colour(track_));
     while (name.size() > 1 && fb.measure(name.c_str()) > room) name.pop_back();
     x = c.text(fb, x + d + u(6), base, name.c_str(), theme_.text);
-    const char* engine = sound_name(t);
-    if (x + u(8) + f.measure(engine) < right_x - u(12)) c.text(f, x + u(8), base, engine, theme_.text_secondary);
+    const std::string engine = caps(sound_name(t));
+    const float sp = u(kCapsSpacing);
+    if (x + u(8) + fs.measure(engine.c_str(), sp) < x_right - gap)
+      c.text(fs, x + u(8), base, engine.c_str(), theme_.text_secondary, sp);
   }
 }
 
 void App::draw_hint_bar(Canvas& c) {
   const Rect& r = hint_bar_;
-  c.fill(r, theme_.header);
-  c.hline(r.x, r.right(), r.y, theme_.divider);
-  const Font& f = Font::get(FontFace::Regular, u(kHintText));
-  const Font& fb = Font::get(FontFace::SemiBold, u(kHintText));
-  const int base = r.y + (r.h + f.ascent() - f.descent()) / 2;
+  c.fill(r, theme_.hint_bar);
+  const Font& fb = Font::get(FontFace::CondensedBold, u(kHintText));
+  const Font& fs = Font::get(FontFace::CondensedSemiBold, u(kHintText));
+  const int base = fs.baseline_in(r.y, r.h);
+  const float sp = u(0.4f);
 
   std::vector<Hint> hints;
   if (input_.held(kSelect)) {
@@ -1118,34 +1133,49 @@ void App::draw_hint_bar(Canvas& c) {
     if (!input_.any_held()) hints.insert(hints.begin() + std::min<size_t>(1, hints.size()), {"Sel+X", "settings"});
   }
   // A message takes the right end; hints fill from the left, most important first, and stop
-  // before they would run into it or off the screen.
-  float limit = r.right() - u(10);
+  // before they would run into it or off the screen. Each hint is its buttons as a keycap, then
+  // what they do.
+  float limit = r.right() - u(8);
   if (!message_.empty()) {
-    float w = fb.measure(message_.c_str());
-    c.text(fb, limit - w, base, message_.c_str(), theme_.cursor);
+    const std::string m = caps(message_);
+    const float w = fs.measure(m.c_str(), sp);
+    c.text(fs, limit - w, base, m.c_str(), theme_.cursor.mix(theme_.hint_text, 60), sp);
     limit -= w + u(16);
   }
-  float x = r.x + u(10);
+  float x = r.x + u(7);
+  const int cap_y = r.y + int(u(5)), cap_h = r.h - int(u(10));
   for (const Hint& h : hints) {
-    const float w = fb.measure(h.keys) + u(5) + f.measure(h.action);
+    const std::string keys = caps(h.keys), action = caps(h.action);
+    const int kw = keycap_width(fb, keys.c_str(), u(1));
+    const float w = kw + u(5) + fs.measure(action.c_str(), sp);
     if (x + w > limit) break;
-    x = c.text(fb, x, base, h.keys, theme_.text);
-    x = c.text(f, x + u(5), base, h.action, theme_.text_secondary) + u(16);
+    draw_keycap(c, fb, int(x), cap_y, cap_h, keys.c_str(), theme_.keycap, theme_.keycap_text, false, u(1));
+    x = c.text(fs, x + kw + u(5), base, action.c_str(), theme_.hint_text, sp) + u(11);
   }
+}
+
+int App::draw_panel_frame(Canvas& c, const char* title) {
+  // A sheet a shade lighter than the page, casting a soft shadow to the left.
+  const Rect& r = inspector_rect_;
+  draw_shadow(c, r.x, r.y, r.h, int(u(8)), true, theme_.shadow_strength);
+  c.fill(r, theme_.panel);
+  c.vline(r.x, r.y, r.bottom(), theme_.grid_bar);
+  const Font& tf = Font::get(FontFace::CondensedBold, u(kPanelTitle));
+  c.text(tf, r.x + u(12), r.y + int(u(24)), title, theme_.text);
+  const int rule_y = r.y + int(u(32));
+  c.fill(Rect{r.x + int(u(8)), rule_y, r.w - int(u(16)), std::max(1, int(u(1)))}, theme_.text);
+  return rule_y + int(u(4));
 }
 
 void App::draw_inspector(Canvas& c) {
   const Rect& r = inspector_rect_;
-  c.fill(Rect{r.x - int(u(3)), r.y, int(u(3)), r.h}, theme_.panel_shadow);
-  c.fill(r, theme_.panel);
-  c.vline(r.x, r.y, r.bottom(), theme_.divider);
-  const Font& title = Font::get(FontFace::SemiBold, u(kPanelTitle));
-  const Font& f = Font::get(FontFace::Regular, u(kPanelText));
-  const Font& fb = Font::get(FontFace::SemiBold, u(kPanelText));
-  int y = r.y + int(u(12));
-  c.text(title, r.x + u(12), y + title.ascent(), inspector_title_.c_str(), theme_.text);
-  const int title_y = y;
-  y += int(u(30));
+  const std::string title_caps = caps(inspector_title_);
+  int y = draw_panel_frame(c, title_caps.c_str());
+  const Font& label_f = Font::get(FontFace::CondensedSemiBold, u(kPanelText));
+  const Font& value_f = Font::get(FontFace::CondensedBold, u(kPanelText + 2));
+  const Font& action_f = Font::get(FontFace::CondensedSemiBold, u(kPanelText + 1));
+  const Font& key_f = Font::get(FontFace::CondensedBold, u(kPanelText - 1));
+  const float sp = u(kCapsSpacing);
   const int row_h = int(u(kPanelRowH));
 
   // Rows that don't fit scroll, keeping the selection in view. The last row shown may be cut off
@@ -1167,28 +1197,62 @@ void App::draw_inspector(Canvas& c) {
       c.fill(Rect{cx - i, row, 2 * i + 1, 1}, theme_.text_secondary);
     }
   };
-  const int ax = r.right() - int(u(20)), amid = title_y + int(title.ascent() / 2);
-  if (more_above) arrow(ax, amid - ah - int(u(2)), true);
-  if (more_below) arrow(ax, amid + ah + int(u(2)), false);
+  const int ax = r.right() - int(u(18)), amid = r.y + int(u(17));
+  if (more_above) arrow(ax, amid - ah - int(u(1)), true);
+  if (more_below) arrow(ax, amid + ah + int(u(1)), false);
 
   const Rect saved = c.clip();
   c.set_clip(saved.intersect(list));
   for (int i = inspector_scroll_; i < n && y < list.bottom(); ++i) {
-    Rect row{r.x + int(u(4)), y, r.w - int(u(8)), row_h};
-    bool sel = i == inspector_sel_;
-    int base = y + (row_h + f.ascent() - f.descent()) / 2;
-    if (inspector_fields_[size_t(i)].heading) {
-      // A section title: bold, in the accent colour, with a rule above it.
-      if (i > 0) c.hline(r.x + int(u(12)), r.right() - int(u(12)), y + int(u(4)), theme_.divider);
-      c.text(fb, r.x + u(12), base + u(2), inspector_fields_[size_t(i)].label.c_str(), theme_.note);
+    const InspectorField& field = inspector_fields_[size_t(i)];
+    const bool sel = i == inspector_sel_;
+    if (field.heading) {
+      // A section title: bold spaced capitals with a rule running on to the right.
+      const int base = value_f.baseline_in(y, row_h) + int(u(2));
+      const float end = c.text(key_f, r.x + u(12), base, field.label.c_str(), theme_.text, u(1));
+      c.fill(Rect{int(end + u(8)), base - key_f.cap_height() / 2, int(r.right() - u(12) - end - u(8)),
+                  std::max(1, int(u(1)))}, theme_.text);
       y += row_h;
       continue;
     }
-    if (sel) c.fill_rounded(row, u(3), theme_.chip);
-    c.text(f, r.x + u(12), base, inspector_fields_[size_t(i)].label.c_str(), sel ? theme_.text : theme_.text_secondary);
-    std::string v = inspector_fields_[size_t(i)].value();
-    float w = fb.measure(v.c_str());
-    c.text(fb, r.right() - u(12) - w, base, v.c_str(), theme_.text);
+    if (sel) c.fill(Rect{r.x + int(u(4)), y + 1, r.w - int(u(8)), row_h - 2}, theme_.chip_active);
+    const Color ink = sel ? theme_.chip_active_text : theme_.text;
+    const Color quiet = sel ? theme_.chip_active_text : theme_.text_secondary;
+    const int base = label_f.baseline_in(y, row_h);
+    std::string v = field.value();
+    if (field.buttons) {
+      // "Sel + X, or Menu": each button a keycap, joined by "+" and "or".
+      std::string label = field.label;
+      for (size_t at; (at = label.find(", or ")) != std::string::npos;) label.replace(at, 5, " or ");
+      float x = r.x + u(12);
+      const int cap_y = y + int(u(4)), cap_h = row_h - int(u(8));
+      size_t start = 0;
+      bool first = true;
+      while (start <= label.size()) {
+        size_t plus = label.find(" + ", start);
+        const std::string part = label.substr(start, plus == std::string::npos ? std::string::npos : plus - start);
+        if (!first) x = c.text(key_f, x + u(3), base, "+", quiet) + u(3);
+        first = false;
+        size_t s2 = 0;
+        bool first_alt = true;
+        while (s2 <= part.size()) {
+          size_t orr = part.find(" or ", s2);
+          const std::string key = caps(part.substr(s2, orr == std::string::npos ? std::string::npos : orr - s2));
+          if (!first_alt) x = c.text(label_f, x + u(3), base, "or", quiet) + u(3);
+          first_alt = false;
+          x += draw_keycap(c, key_f, int(x), cap_y, cap_h, key.c_str(), ink, ink, true, u(1));
+          if (orr == std::string::npos) break;
+          s2 = orr + 4;
+        }
+        if (plus == std::string::npos) break;
+        start = plus + 3;
+      }
+      c.text(action_f, r.right() - u(12) - action_f.measure(v.c_str()), base, v.c_str(), quiet);
+    } else {
+      const std::string label = caps(field.label);
+      c.text(label_f, r.x + u(12), base, label.c_str(), quiet, sp);
+      c.text(value_f, r.right() - u(12) - value_f.measure(v.c_str()), base, v.c_str(), ink);
+    }
     y += row_h;
   }
   c.set_clip(saved);

@@ -1,4 +1,5 @@
 #include "app/InstrumentView.h"
+#include "app/Paper.h"
 
 #include <algorithm>
 #include <cctype>
@@ -15,7 +16,7 @@ namespace twill {
 namespace {
 
 // Sizes, in layout units.
-constexpr float kRowH = 24, kText = 13, kTitle = 18, kSmall = 11;
+constexpr float kRowH = 24, kText = 13, kSmall = 11;
 
 bool is_audio_file(const std::string& name) {
   std::string lower = name;
@@ -475,6 +476,11 @@ void InstrumentView::handle_input() {
   sel_ = std::max(0, std::min(sel_, n - 1));
   bool changed = false;
 
+  // X: the track's settings, as on its header in the arrangement.
+  if (in.pressed(kX)) {
+    app_.open_track_settings(app_.track());
+    return;
+  }
   if (in.pressed_or_repeat(kUp)) sel_ = (sel_ + n - 1) % n, changed = true;
   if (in.pressed_or_repeat(kDown)) sel_ = (sel_ + 1) % n, changed = true;
   const int step = in.pressed_or_repeat(kRight) ? 1 : in.pressed_or_repeat(kLeft) ? -1 : 0;
@@ -493,7 +499,8 @@ void InstrumentView::handle_input() {
 
 std::vector<Hint> InstrumentView::hints() const {
   if (browser_open_) return {{"A", "open/pick"}, {"Y", "listen"}, {"B", "up a folder"}, {"X", "cancel"}};
-  return {{"Up/Down", "choose"}, {"Left/Right", "change"}, {"A", "browse"}, {"B", "reset"}, {"Y", "listen"}};
+  return {{"Up/Down", "choose"}, {"Left/Right", "change"}, {"A", "browse"}, {"B", "reset"}, {"Y", "listen"},
+          {"X", "track"}};
 }
 
 // --- Drawing ----------------------------------------------------------------------------------
@@ -504,46 +511,50 @@ void InstrumentView::draw(Canvas& c) {
   if (browser_open_) return draw_browser(c, content);
   const Track& t = app_.project().tracks[size_t(app_.track())];
   std::vector<Row> list = rows();
-  const Font& f = Font::get(FontFace::Regular, app_.u(kText));
-  const Font& fb = Font::get(FontFace::SemiBold, app_.u(kText));
+  const Font& f = Font::get(FontFace::CondensedSemiBold, app_.u(kText));
+  const Font& fb = Font::get(FontFace::CondensedBold, app_.u(kText + 2));
+  const float sp = app_.u(kCapsSpacing);
 
-  // Settings list on the left.
+  // Settings list on the left; the selected row an ink block.
   const int list_w = content.w * 52 / 100;
   Rect list_r{content.x, content.y, list_w, content.h};
-  c.fill(list_r, th.panel);
+  c.fill(list_r, th.background);
   const int row_h = int(app_.u(kRowH));
   const int visible = std::max(1, (list_r.h - int(app_.u(8))) / row_h);
   if (sel_ < top_) top_ = sel_;
   if (sel_ >= top_ + visible) top_ = sel_ - visible + 1;
   int y = list_r.y + int(app_.u(4));
+  const Color col = app_.track_colour(app_.track());
   for (int i = top_; i < int(list.size()) && i < top_ + visible; ++i, y += row_h) {
     const Row& row = list[size_t(i)];
     const bool sel = i == sel_;
-    Rect rr{list_r.x + int(app_.u(6)), y, list_r.w - int(app_.u(12)), row_h};
-    if (sel) c.fill_rounded(rr, app_.u(4), th.chip);
-    const int base = y + (row_h + f.ascent() - f.descent()) / 2 - int(app_.u(1));
-    c.text(f, rr.x + app_.u(8), base, row.label.c_str(), sel ? th.text : th.text_secondary);
+    Rect rr{list_r.x + int(app_.u(4)), y, list_r.w - int(app_.u(8)), row_h};
+    if (sel) c.fill(Rect{rr.x, rr.y + 1, rr.w, rr.h - 2}, th.chip_active);
+    const int base = f.baseline_in(y, row_h - (row.fraction ? int(app_.u(3)) : 0));
+    const std::string label = caps(row.label);
+    c.text(f, rr.x + app_.u(8), base, label.c_str(), sel ? th.chip_active_text : th.text_secondary, sp);
     std::string v = row.value ? row.value() : "";
-    c.text(fb, rr.right() - app_.u(8) - fb.measure(v.c_str()), base, v.c_str(), th.text);
+    c.text(fb, rr.right() - app_.u(8) - fb.measure(v.c_str()), base, v.c_str(), sel ? th.chip_active_text : th.text);
     if (row.fraction) {
       const float fr = std::max(0.0f, std::min(1.0f, row.fraction()));
-      const int bw = int(app_.u(70));
+      const int bw = int(app_.u(64));
       Rect bar{rr.right() - int(app_.u(8)) - bw, y + row_h - int(app_.u(5)), bw, std::max(2, int(app_.u(2)))};
-      c.fill(bar, th.grid_beat);
-      c.fill(Rect{bar.x, bar.y, int(bw * fr), bar.h}, app_.track_colour(app_.track()));
+      c.fill(bar, sel ? th.text_secondary : th.grid_bar);
+      c.fill(Rect{bar.x, bar.y, int(bw * fr), bar.h}, col);
     }
   }
-  if (y < list_r.bottom()) c.fill(Rect{list_r.x, y, list_r.w, list_r.bottom() - y}, th.panel);
-  c.vline(list_r.right(), content.y, content.bottom(), th.divider);
+  if (y < list_r.bottom()) c.fill(Rect{list_r.x, y, list_r.w, list_r.bottom() - y}, th.background);
+  c.fill(Rect{list_r.right(), content.y, std::max(1, int(app_.u(1))), content.h}, th.text);
 
   // Picture on the right.
-  Rect pic{list_r.right() + 1, content.y, content.right() - list_r.right() - 1, content.h};
+  const int rule = std::max(1, int(app_.u(1)));
+  Rect pic{list_r.right() + rule, content.y, content.right() - list_r.right() - rule, content.h};
   c.fill(pic, th.background);
   if (t.instrument == InstrumentType::MidiOut) {
-    const Font& big = Font::get(FontFace::SemiBold, app_.u(kTitle + 4));
+    const Font& big = Font::get(FontFace::CondensedBold, app_.u(26));
     const Font& sm = Font::get(FontFace::Regular, app_.u(kText));
     const std::string ch = "Channel " + std::to_string(t.midi_channel + 1);
-    c.text(big, pic.x + app_.u(16), pic.y + int(app_.u(70)), "MIDI out", app_.track_colour(app_.track()));
+    c.text(big, pic.x + app_.u(16), pic.y + int(app_.u(70)), "MIDI OUT", th.track_ink(int(t.colour)));
     c.text(sm, pic.x + app_.u(16), pic.y + int(app_.u(96)), ch.c_str(), th.text_secondary);
     for (int which = 0; which < 2; ++which) {
       const std::string cc = std::string(which == 0 ? "CC A: " : "CC B: ") + cc_label(t.midi_cc[which]);
@@ -568,25 +579,38 @@ void InstrumentView::draw(Canvas& c) {
 
 void InstrumentView::draw_macro(Canvas& c, const Rect& r, const Track& t) {
   const Theme& th = app_.theme();
-  const Font& big = Font::get(FontFace::SemiBold, app_.u(kTitle + 4));
-  const Font& f = Font::get(FontFace::Regular, app_.u(kText));
+  const Font& big = Font::get(FontFace::CondensedBold, app_.u(26));
+  const Font& label = Font::get(FontFace::CondensedSemiBold, app_.u(kText));
+  const Font& value = Font::get(FontFace::CondensedBold, app_.u(kText + 2));
+  const float sp = app_.u(0.6f);
   const int x = r.x + int(app_.u(16));
-  int y = r.y + int(app_.u(40));
+  const int w = r.w - int(app_.u(32));
+  int y = r.y + int(app_.u(26));
   char num[16];
-  std::snprintf(num, sizeof num, "Engine %d", t.macro.engine + 1);
-  c.text(f, x, y, num, th.text_secondary);
+  std::snprintf(num, sizeof num, "ENGINE %d", t.macro.engine + 1);
+  c.text(label, x, y, num, th.text_secondary, sp);
   y += int(app_.u(30));
-  c.text(big, x, y, PlaitsVoice::engine_name(t.macro.engine), app_.track_colour(app_.track()));
-  y += int(app_.u(36));
-  // The three main controls, large.
+  // The engine's name, large, shrinking to fit.
+  std::string name = caps(PlaitsVoice::engine_name(t.macro.engine));
+  const Font* nf = &big;
+  if (nf->measure(name.c_str()) > w) nf = &Font::get(FontFace::CondensedBold, app_.u(20));
+  while (name.size() > 1 && nf->measure(name.c_str()) > w) name.pop_back();
+  c.text(*nf, x, y, name.c_str(), th.track_ink(int(t.colour)));
+  y += int(app_.u(32));
+  // The three main controls, large: a thick bar in the track's colour with an ink mark at the value.
   const Color col = app_.track_colour(app_.track());
-  for (auto [label, v] : {std::pair<const char*, float>{"Harmonics", t.macro.harmonics},
-                          {"Timbre", t.macro.timbre}, {"Morph", t.macro.morph}}) {
-    c.text(f, x, y, label, th.text_secondary);
-    Rect bar{x, y + int(app_.u(8)), r.w - int(app_.u(32)), int(app_.u(8))};
-    c.fill_rounded(bar, app_.u(3), th.grid_beat);
-    c.fill_rounded(Rect{bar.x, bar.y, std::max(int(app_.u(6)), int(bar.w * v)), bar.h}, app_.u(3), col);
-    y += int(app_.u(40));
+  for (auto [name_c, v] : {std::pair<const char*, float>{"HARMONICS", t.macro.harmonics},
+                           {"TIMBRE", t.macro.timbre}, {"MORPH", t.macro.morph}}) {
+    c.text(label, x, y, name_c, th.text_secondary, sp);
+    char vb[16];
+    std::snprintf(vb, sizeof vb, "%.2f", v);
+    c.text(value, x + w - value.measure(vb), y, vb, th.text);
+    Rect bar{x, y + int(app_.u(6)), w, int(app_.u(10))};
+    c.fill(bar, th.grid_step);
+    c.fill(Rect{bar.x, bar.y, int(bar.w * v), bar.h}, col);
+    const int mw = std::max(2, int(app_.u(2)));
+    c.fill(Rect{bar.x + int(bar.w * v) - mw / 2, bar.y - int(app_.u(2)), mw, bar.h + int(app_.u(4))}, th.text);
+    y += int(app_.u(44));
   }
 }
 
@@ -647,29 +671,49 @@ void InstrumentView::draw_waveform(Canvas& c, const Rect& r, const SampleData& s
 
 void InstrumentView::draw_kit(Canvas& c, const Rect& r, const Track& t) {
   const Theme& th = app_.theme();
-  const Font& f = Font::get(FontFace::Regular, app_.u(kSmall));
-  const Font& fb = Font::get(FontFace::SemiBold, app_.u(kSmall + 1));
+  const Font& f = Font::get(FontFace::CondensedSemiBold, app_.u(kSmall + 1));
+  const Font& fb = Font::get(FontFace::CondensedBold, app_.u(15));
+  const float sp = 0;  // pads are narrow: no letter spacing
   const int pad = int(app_.u(10)), gap = int(app_.u(6));
   const int cols = 4, rows = 4;
   const int cw = (r.w - 2 * pad - (cols - 1) * gap) / cols, ch = (r.h - 2 * pad - (rows - 1) * gap) / rows;
-  const Color col = app_.track_colour(app_.track());
+  const Color fill = th.track_fill(int(t.colour)), ink = th.track_ink(int(t.colour));
+  const int line_h = int(app_.u(13));
   for (int i = 0; i < kKitSlots; ++i) {
     const int cx = r.x + pad + (i % cols) * (cw + gap), cy = r.y + pad + (i / cols) * (ch + gap);
     Rect cell{cx, cy, cw, ch};
-    const bool sel = i == kit_slot_;
     const bool has = !t.sampler.kit[i].sample.empty();
-    c.fill_rounded(cell, app_.u(4), sel ? col : th.divider);
-    c.fill_rounded(cell.inset(sel ? 2 : 1), app_.u(4), has ? th.tint_base.mix(col, th.dark ? 80 : 50) : th.panel);
-    c.text(fb, cx + app_.u(6), cy + fb.ascent() + int(app_.u(4)), std::to_string(i + 1).c_str(), has ? th.text : th.text_secondary);
+    if (has) c.fill(cell, fill);
+    else c.stroke_rect(cell, std::max(1, int(app_.u(1))), th.divider);
+    c.text(fb, cx + app_.u(5), cy + int(app_.u(16)), std::to_string(i + 1).c_str(), has ? ink : th.text_secondary);
     if (has) {
       std::string name = file_name(t.sampler.kit[i].sample);
-      name = name.substr(0, name.find_last_of('.'));
+      name = caps(name.substr(0, name.find_last_of('.')));
       if (name.size() > 3 && std::isdigit(static_cast<unsigned char>(name[0])) && name[2] == ' ') name = name.substr(3);
-      // Shorten to fit the cell.
-      while (name.size() > 1 && f.measure(name.c_str()) > cw - app_.u(10)) name.pop_back();
-      c.text(f, cx + app_.u(6), cy + ch - int(app_.u(6)), name.c_str(), th.text_secondary);
+      // One line if it fits, else two (split at the last space that lets the first line fit),
+      // shortened if a word is still too long.
+      const float room = cw - app_.u(8);
+      std::vector<std::string> lines{name};
+      if (f.measure(name.c_str(), sp) > room) {
+        size_t cut = name.rfind(' ');
+        while (cut != std::string::npos && cut > 0 && f.measure(name.substr(0, cut).c_str(), sp) > room)
+          cut = name.rfind(' ', cut - 1);
+        if (cut != std::string::npos && cut > 0) lines = {name.substr(0, cut), name.substr(cut + 1)};
+      }
+      for (std::string& ln : lines)
+        while (ln.size() > 1 && f.measure(ln.c_str(), sp) > room) ln.pop_back();
+      int by = cy + ch - int(app_.u(6)) - int(lines.size() - 1) * line_h;
+      for (const std::string& ln : lines) {
+        c.text(f, cx + app_.u(5), by, ln.c_str(), ink, sp);
+        by += line_h;
+      }
     }
   }
+  // The selected slot: viewfinder corners.
+  const int i = kit_slot_;
+  if (i >= 0 && i < kKitSlots)
+    draw_brackets(c, Rect{r.x + pad + (i % cols) * (cw + gap), r.y + pad + (i / cols) * (ch + gap), cw, ch}, th.text,
+                  app_.u(1));
 }
 
 void InstrumentView::draw_browser(Canvas& c, const Rect& r) {
@@ -694,11 +738,12 @@ void InstrumentView::draw_browser(Canvas& c, const Rect& r) {
     const int y = top_y + (i - btop_) * row_h;
     Rect rr{r.x + int(app_.u(6)), y, r.w - int(app_.u(12)), row_h};
     const bool sel = i == bsel_;
-    if (sel) c.fill_rounded(rr, app_.u(4), th.chip);
+    if (sel) c.fill(Rect{rr.x, rr.y + 1, rr.w, rr.h - 2}, th.chip_active);
     const auto& e = entries_[size_t(i)];
-    const int base = y + (row_h + f.ascent() - f.descent()) / 2;
+    const int base = f.baseline_in(y, row_h);
     std::string label = e.name == ".." ? std::string("Up a folder") : e.is_dir ? e.name + "/" : e.name;
-    c.text(e.is_dir ? fb : f, rr.x + app_.u(10), base, label.c_str(), e.is_dir || sel ? th.text : th.text_secondary);
+    c.text(e.is_dir ? fb : f, rr.x + app_.u(10), base, label.c_str(),
+           sel ? th.chip_active_text : e.is_dir ? th.text : th.text_secondary);
   }
 }
 

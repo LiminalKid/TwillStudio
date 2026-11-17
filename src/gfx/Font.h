@@ -4,7 +4,9 @@
 
 namespace twill {
 
-enum class FontFace : uint8_t { Regular, SemiBold };
+// Inter (Regular, SemiBold) for values and running text; Barlow Condensed for names, tabs and
+// labels, usually in capitals.
+enum class FontFace : uint8_t { Regular, SemiBold, CondensedSemiBold, CondensedBold };
 
 struct GlyphInfo {
   int16_t atlas_x, atlas_y;  // top-left of the glyph in the atlas
@@ -17,6 +19,7 @@ struct FontData {
   FontFace face;
   int pixel_size;
   int ascent, descent;
+  int cap_height;            // baseline to the top of a capital
   int first, last;           // character range covered
   int atlas_width, atlas_height;
   const GlyphInfo* glyphs;
@@ -34,11 +37,15 @@ class Font {
   int ascent() const { return d_->ascent; }
   int descent() const { return d_->descent; }
   int line_height() const { return d_->ascent + d_->descent; }
+  int cap_height() const { return d_->cap_height; }
+  // The baseline that centres capitals (and digits) in a box from `top`, `h` high. Centring on the
+  // ascent and descent instead leaves capitals sitting high, by the room kept for descenders.
+  int baseline_in(int top, int h) const { return top + (h + d_->cap_height + 1) / 2; }
   int pixel_size() const { return d_->pixel_size; }
   const GlyphInfo* glyph(char c) const;
   const uint8_t* atlas() const { return d_->atlas; }
   int atlas_width() const { return d_->atlas_width; }
-  float measure(const char* text) const;
+  float measure(const char* text, float spacing = 0) const;  // spacing as in Canvas::text
 
   explicit Font(const FontData* d) : d_(d) {}
 

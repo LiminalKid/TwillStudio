@@ -387,9 +387,9 @@ size back.
 
 - **gfx/** is a small software rasterizer of our own: filled and rounded rectangles, lines, alpha
   blending, clipping, bitmap blits. It needs no GPU, so it ports anywhere a framebuffer can be shown.
-- **Fonts** are pre-rendered at build time from an open-licence font (one sans, one mono; OFL) into
-  antialiased bitmap atlases at several pixel sizes. There's no FreeType or font file parsing on the
-  device.
+- **Fonts** are pre-rendered at build time from open-licence fonts (OFL: Inter, and Barlow Condensed
+  for names and labels) into antialiased bitmap atlases at several pixel sizes, with each size's
+  capital height for centring. There's no FreeType or font file parsing on the device.
 - **Layout in points:** views are laid out in logical units times a UI scale chosen from the screen
   size and DPI (Brick Pro about 1.5×, desktop user-adjustable). Views get more room, not bigger
   pixels, on larger screens: a wider screen shows more bars, a taller one more octaves.
@@ -408,9 +408,22 @@ size back.
   lines a step darker; scale rows as a faint tint; notes as solid fills in one clear colour per track,
   with velocity as saturation rather than glow. No neon, gradients or glow effects. Contrast is
   chosen for reading a handheld screen in daylight.
+  *Changed 2026-11-16, the paper look:* cream paper (#F5EFE1) and near-black ink, with firm ink
+  rules under the top bar and rulers. Names, tabs and labels are in Barlow Condensed (bold, mostly
+  capitals, small labels letter-spaced); values and running text stay in Inter. Text is centred on
+  the capitals' height. The current tab and a selected list row are solid ink blocks with paper
+  text. The hint bar is ink in both themes, each button drawn as a keycap. The cursor is four
+  viewfinder corners, in every view; the playhead is an ink line with a marker in the ruler. Track
+  colours are muted (the same hues as before, so projects keep theirs), each with a pale fill and a
+  deep shade: clips are the pale fill with notes in the deep shade (inverted in the dark theme).
+  Columns that stay put while the rest scrolls (track headers, the roll's keys or names, the
+  mixer's labels) and panels are sheets a shade lighter than the page, casting a soft shadow. The
+  keyboard is flat: cream keys, ink black keys, firm lines between keys. Kit rows are taller (16
+  points) for 14-point names. Mockups were judged on the RG28XX's own screen at 640x480 before
+  any code changed.
 - **Themes:** a small set of colour tokens (background, grid lines, bar lines, scale rows, note fill
-  per track, selection, playhead). Light is the default. *As built:* a dark theme (graphite, the
-  same design; piano keys stay light) is the first row of the Settings panel (Menu). It is an app
+  per track, selection, playhead). Light is the default. *As built:* a dark theme (cool graphite with
+  off-white ink, the same design; piano keys stay light) is the first row of the Settings panel (Menu). It is an app
   setting, kept in `settings.txt` in the data folder, not in projects and not undoable.
 
 ### Views
@@ -454,6 +467,12 @@ so small screens show it. (It was Select + L for a day; recording from MIDI, whi
 arm, is now "Record from MIDI" in the settings panel.) The settings panel starts with **Controls**,
 a page listing every button combination by view, since the hint bar shows only what fits (about
 four hints at 640x480).
+
+*Changed 2026-11-16:* **X in the sound view** opens the track's settings, as X on a track header
+does in the arrangement (it did nothing there; every other screen's X opens a panel). **Y in the
+mixer** plays the track's sound, as Y does in the sound view: Y means "listen" wherever there is
+nothing to select (sound view, mixer, sample browser), and stays select in the roll and duplicate
+in the arrangement.
 
 *Added 2026-11-14:* **select all** in the roll: Y + A, or "Select all" in the clip panel (X off a
 note); A, B, X and copy then work on every note. Tapping **Menu** again puts the settings panel (or

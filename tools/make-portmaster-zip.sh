@@ -32,6 +32,7 @@ cp "$ROOT/assets/factory/LICENSE" "$L/LICENSE-factory-kit.txt"  # CC0
 cp "$ROOT/third_party/eurorack/LICENSE" "$L/LICENSE-plaits-clouds.txt"
 cp "$ROOT/third_party/eurorack/stmlib/LICENSE" "$L/LICENSE-stmlib.txt"
 cp "$ROOT/third_party/fonts/inter/LICENSE.txt" "$L/LICENSE-inter-font.txt"
+cp "$ROOT/third_party/fonts/barlow-condensed/OFL.txt" "$L/LICENSE-barlow-condensed-font.txt"
 # dr_wav keeps its licence at the end of its header.
 sed -n '/^ALTERNATIVE 1 - Public Domain/,$p' "$ROOT/third_party/dr_libs/dr_wav.h" | sed '$d' |
   { echo "dr_wav (github.com/mackron/dr_libs), used to read WAV files. Either licence applies."; echo; cat; } \

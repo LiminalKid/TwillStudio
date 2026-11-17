@@ -31,8 +31,9 @@ class Canvas {
   void vline(int x, int y0, int y1, Color c) { fill(Rect{x, y0, 1, y1 - y0}, c); }
   void line(float x0, float y0, float x1, float y1, Color c);  // antialiased, 1 px wide
 
-  // Draws `text` with its baseline at y. Returns the x after the last glyph.
-  float text(const Font& font, float x, int y, const char* text, Color c);
+  // Draws `text` with its baseline at y, with `spacing` extra pixels between letters (small
+  // capitals read better spaced out). Returns the x after the last glyph.
+  float text(const Font& font, float x, int y, const char* text, Color c, float spacing = 0);
 
   // Regions changed since the last call to take_dirty().
   void mark_dirty(const Rect& r);

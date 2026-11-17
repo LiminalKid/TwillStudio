@@ -36,6 +36,7 @@ struct InspectorField {
   std::function<void(int step, bool coarse)> adjust;  // step is -1 or +1; may be null
   std::function<void()> press = nullptr;               // A; null if A does nothing
   bool heading = false;  // a section title: drawn as one, and the selection passes over it
+  bool buttons = false;  // the label is a button combination ("Sel + X"), drawn as keycaps
 };
 
 struct Hint {
@@ -100,6 +101,11 @@ class App {
   View view() const { return view_; }
 
   void audition(int track, int pitch);
+  // Y in the views with nothing to select: a note of the track's sound (a kit's first slot, a
+  // sample's own note, else middle C).
+  void listen(int track);
+  // The track's settings panel (X on its header in the arrangement, X in the sound view).
+  void open_track_settings(int track);
   // A track's sound, as one list: the macro oscillator's engines, then the sampler, then MIDI out.
   // "Engine" in the app means a place in this list.
   static constexpr int kNumSounds = PlaitsVoice::kNumEngines + 2;
@@ -146,6 +152,8 @@ class App {
   void draw_top_bar(Canvas& c);
   void draw_hint_bar(Canvas& c);
   void draw_inspector(Canvas& c);
+  // A panel's sheet, shadow and title; returns the y below the title's rule.
+  int draw_panel_frame(Canvas& c, const char* title);
   void validate_open_clips();
   void replace_project(Project p);
   // Asks for a second press within a few seconds before discarding unsaved work.

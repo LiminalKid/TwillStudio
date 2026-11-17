@@ -1,4 +1,5 @@
 #include "app/PianoRollView.h"
+#include "app/Paper.h"
 
 #include <algorithm>
 #include <cctype>
@@ -65,7 +66,7 @@ PianoRollView::Layout PianoRollView::layout() const {
   Layout l;
   const Track& tr = app_.project().tracks[size_t(app_.track())];
   const bool kit = tr.instrument == InstrumentType::Sampler && tr.sampler.mode == SamplerMode::Kit;
-  const int ruler_h = int(app_.u(22)), keys_w = int(app_.u(kit ? 84 : 52));
+  const int ruler_h = int(app_.u(22)), keys_w = int(app_.u(kit ? 92 : 52));
   const int lane_h = lane_ >= 0 ? int(app_.u(70)) : 0;
   l.ruler = Rect{c.x + keys_w, c.y, c.w - keys_w, ruler_h};
   l.keys = Rect{c.x, c.y + ruler_h, keys_w, c.h - ruler_h - lane_h};
@@ -74,7 +75,7 @@ PianoRollView::Layout PianoRollView::layout() const {
     l.lane = Rect{l.grid.x, l.grid.bottom(), l.grid.w, lane_h};
     l.lane_label = Rect{c.x, l.grid.bottom(), keys_w, lane_h};
   }
-  l.row_h = int(app_.u(13));
+  l.row_h = int(app_.u(kit ? 16 : 13));  // a kit's rows are taller, for its names
   l.cell_w = int(app_.u(22));
   return l;
 }
@@ -743,9 +744,9 @@ void PianoRollView::tick() {
     }
   }
   if (x != last_playhead_x_) {
-    const int w = int(app_.u(2)) + 2;
-    if (last_playhead_x_ >= 0) app_.invalidate(Rect{last_playhead_x_ - w, l.ruler.y, 2 * w, l.ruler.h + l.grid.h});
-    if (x >= 0) app_.invalidate(Rect{x - w, l.ruler.y, 2 * w, l.ruler.h + l.grid.h});
+    const int w = int(app_.u(6)) + 2;  // the line, and the marker in the ruler (5 points each side)
+    if (last_playhead_x_ >= 0) app_.invalidate(Rect{last_playhead_x_ - w, l.ruler.y, 2 * w + 1, l.ruler.h + l.grid.h + l.lane.h});
+    if (x >= 0) app_.invalidate(Rect{x - w, l.ruler.y, 2 * w + 1, l.ruler.h + l.grid.h + l.lane.h});
     last_playhead_x_ = x;
   }
 }
@@ -770,9 +771,12 @@ void PianoRollView::draw(Canvas& c) {
   const Rect content = app_.content_rect();
   const Clip* clip = app_.open_clip();
   const Placement* open_pl = app_.open_placement();
-  const Font& small = Font::get(FontFace::Regular, app_.u(12));
-  const Font& label = Font::get(FontFace::Regular, app_.u(11));
+  const Font& small = Font::get(FontFace::CondensedBold, app_.u(14));
+  const Font& label = Font::get(FontFace::CondensedSemiBold, app_.u(12));
   const Color col = app_.track_colour(app_.track());
+  const int colour_index = int(p.tracks[size_t(app_.track())].colour);
+  const Color deep = th.track_ink(colour_index);
+  const int line = std::max(1, int(app_.u(1)));
   rebuild_rows();
 
   if (!clip) {
@@ -786,22 +790,22 @@ void PianoRollView::draw(Canvas& c) {
   const int visible_rows = (l.grid.h + l.row_h - 1) / l.row_h;
 
   // Ruler: bar numbers and beat ticks; the corner above the keys shows the grid.
-  c.fill(Rect{content.x, content.y, l.keys.w, l.ruler.h}, th.header);
+  c.fill(Rect{content.x, content.y, l.keys.w, l.ruler.h}, th.panel);
   c.fill(l.ruler, th.header);
-  c.hline(content.x, content.right(), l.ruler.bottom() - 1, th.divider);
-  const int rbase = l.ruler.y + (l.ruler.h + small.ascent() - small.descent()) / 2;
-  c.text(small, content.x + app_.u(5), rbase, kSnaps[snap_index_].name, th.text_secondary);
+  const int rbase = small.baseline_in(l.ruler.y, l.ruler.h);
+  c.text(small, content.x + app_.u(8), rbase, kSnaps[snap_index_].name, th.text_secondary);
   const Tick right_tick = scroll_ + Tick(int64_t(l.grid.w) * s / l.cell_w) + s;
   for (Tick t = scroll_ / kTicksPerQuarter * kTicksPerQuarter; t < right_tick; t += kTicksPerQuarter) {
     int x = tick_x(l, t);
     if (x < l.ruler.x) continue;
     if (t % kBar == 0) {
-      c.vline(x, l.ruler.y + int(app_.u(3)), l.ruler.bottom(), th.grid_bar);
-      c.text(small, x + app_.u(3), rbase, std::to_string(t / kBar + 1).c_str(), th.text);
+      c.vline(x, l.ruler.y + int(app_.u(6)), l.ruler.bottom(), th.grid_bar);
+      c.text(small, x + app_.u(4), rbase, std::to_string(t / kBar + 1).c_str(), th.text);
     } else if (int64_t(kTicksPerQuarter) * l.cell_w / s >= int(app_.u(10))) {
       c.vline(x, l.ruler.bottom() - int(app_.u(4)), l.ruler.bottom(), th.grid_beat);
     }
   }
+  c.fill(Rect{content.x, l.ruler.bottom() - line, content.w, line}, th.text);
 
   // Lanes.
   for (int r = 0; r < visible_rows; ++r) {
@@ -814,10 +818,14 @@ void PianoRollView::draw(Canvas& c) {
     }
     const int pitch = rows_[size_t(ri)];
     const bool scale_on = p.scale != ScaleType::Chromatic && !kit_track(p.tracks[size_t(app_.track())]);
-    const bool shaded = scale_on ? !in_scale(pitch, p.key, p.scale) : is_black_key(pitch);
+    const bool kit = kit_track(p.tracks[size_t(app_.track())]);
+    const bool shaded = kit ? false : scale_on ? !in_scale(pitch, p.key, p.scale) : is_black_key(pitch);
     c.fill(lane, shaded ? th.row_black : th.row_white);
     if (scale_on && ((pitch - p.key) % 12 + 12) % 12 == 0) c.fill(lane, th.scale_root);
-    c.hline(lane.x, lane.right(), y + l.row_h - 1, th.grid_step);
+    if (kit)  // named rows: a firmer line between them
+      c.fill(Rect{lane.x, y + l.row_h - line, lane.w, line}, th.grid_beat);
+    else
+      c.hline(lane.x, lane.right(), y + l.row_h - 1, th.grid_step);
   }
 
   // Grid lines: steps (if not too dense), beats, bars.
@@ -874,17 +882,22 @@ void PianoRollView::draw(Canvas& c) {
            th.selection_fill);
   }
 
-  // Notes: the track's colour, paler for quieter notes; selected ones outlined.
+  // Notes: the track's colour, paler for quieter notes, outlined in its deep shade on paper.
+  // Selected notes are solid in the deep shade (pale in the dark).
   for (const Note& n : clip->notes) {
     Rect r = note_rect(n.start, n.length, n.pitch);
     if (r.empty() || r.right() < l.grid.x || r.x > l.grid.right()) continue;
     const bool sel = contains(selection_, n.id);
     const Color fill = col.mix(th.tint_base, (127 - n.velocity) * 150 / 127);  // quieter: paler
-    c.fill_rounded(r, app_.u(1), sel ? th.text : col.mix(Color::rgb(0x000000), 50));
-    c.fill_rounded(r.inset(sel ? 2 : 1), std::max(0.0f, app_.u(1) - 1), fill);
+    if (sel) {
+      c.fill(r, deep);
+    } else {
+      c.fill(r, fill);
+      if (!th.dark) c.stroke_rect(r, std::max(1, int(app_.u(1) + 0.5f)), deep);
+    }
     if (n.num_locks > 0 || n.probability < 100 || n.glide) {
       const int d = std::max(2, int(app_.u(2.5f)));
-      c.fill(Rect{r.x + d, r.y + (r.h - d) / 2, d, d}, Color::rgb(0xFFFFFF));
+      c.fill(Rect{r.x + d + line, r.y + (r.h - d) / 2, d, d}, sel ? fill : deep);
     }
   }
 
@@ -892,16 +905,16 @@ void PianoRollView::draw(Canvas& c) {
   const Track& track = p.tracks[size_t(app_.track())];
   if (kit_track(track)) {
     c.fill(l.keys, th.name_column);
-    const Font& kf = Font::get(FontFace::Regular, app_.u(9.5f));
+    const Font& kf = Font::get(FontFace::CondensedSemiBold, app_.u(14));
+    const float sp = app_.u(0.3f);
     for (int r = 0; r < visible_rows && top_row_ + r < int(rows_.size()); ++r) {
       const int pitch = rows_[size_t(top_row_ + r)];
       const int y = l.grid.y + r * l.row_h;
-      std::string name = slot_label(track, pitch);
-      while (name.size() > 1 && kf.measure(name.c_str()) > l.keys.w - app_.u(8)) name.pop_back();
-      c.text(kf, l.keys.x + app_.u(4), y + (l.row_h + kf.ascent() - kf.descent()) / 2, name.c_str(), th.text);
-      c.hline(l.keys.x, l.keys.right(), y + l.row_h - 1, th.name_column_line);
+      std::string name = caps(slot_label(track, pitch));
+      while (name.size() > 1 && kf.measure(name.c_str(), sp) > l.keys.w - app_.u(12)) name.pop_back();
+      c.text(kf, l.keys.x + app_.u(8), kf.baseline_in(y, l.row_h - line), name.c_str(), th.text, sp);
+      c.fill(Rect{l.keys.x, y + l.row_h - line, l.keys.w, line}, th.grid_beat);
     }
-    c.vline(l.keys.right() - 1, l.keys.y, l.keys.bottom(), th.divider);
   } else if (!fold_) {
     draw_piano_keys(c, PianoKeysLayout{l.keys, rows_[size_t(top_row_)], visible_rows, l.row_h, app_.scale_value()}, th);
   } else {
@@ -910,43 +923,55 @@ void PianoRollView::draw(Canvas& c) {
       const int pitch = rows_[size_t(top_row_ + r)];
       const int y = l.grid.y + r * l.row_h;
       const bool root = ((pitch - p.key) % 12 + 12) % 12 == 0;
-      const Font& f = root ? Font::get(FontFace::SemiBold, app_.u(11)) : label;
+      const Font& f = root ? Font::get(FontFace::CondensedBold, app_.u(12)) : label;
       std::string name = note_name(pitch);
-      c.text(f, l.keys.right() - app_.u(6) - f.measure(name.c_str()), y + (l.row_h + f.ascent() - f.descent()) / 2,
+      c.text(f, l.keys.right() - app_.u(6) - f.measure(name.c_str()), f.baseline_in(y, l.row_h),
              name.c_str(), root ? th.text : th.text_secondary);
       c.hline(l.keys.x, l.keys.right(), y + l.row_h - 1, th.name_column_line);
     }
-    c.vline(l.keys.right() - 1, l.keys.y, l.keys.bottom(), th.divider);
   }
+  // The column lies on the grid like a sheet: a soft shadow over the grid's edge.
+  c.vline(l.keys.right() - 1, content.y, l.keys.bottom(), th.grid_bar);
+  draw_shadow(c, l.keys.right(), l.grid.y, l.grid.h, int(app_.u(6)), false, th.shadow_strength * 3 / 4);
 
-  // Cursor.
+  // Cursor: viewfinder corners around the cell (grey while the lane below has the focus).
   {
     const int r = row_of(cursor_pitch_) - top_row_;
     if (r >= 0 && r < visible_rows) {
-      Rect cur{tick_x(l, cursor_), l.grid.y + r * l.row_h, l.cell_w, l.row_h};
-      c.stroke_rect(cur, std::max(2, int(app_.u(1.5f))), lane_focus_ ? th.grid_bar : th.cursor);
+      const int gap = std::max(1, int(app_.u(1)));
+      Rect cur{tick_x(l, cursor_) + 1, l.grid.y + r * l.row_h + gap, l.cell_w - 1, l.row_h - 2 * gap};
+      const Rect saved = c.clip();
+      c.set_clip(saved.intersect(Rect{l.grid.x, content.y, l.grid.w, content.h}));
+      draw_brackets(c, cur, lane_focus_ ? th.grid_bar : th.text, app_.u(1));
+      c.set_clip(saved);
     }
   }
 
   if (!l.lane.empty()) draw_lane(c, l, *clip);
 
-  // Playhead.
-  if (last_playhead_x_ >= 0)
-    c.fill(Rect{last_playhead_x_, l.ruler.y, std::max(1, int(app_.u(1))), l.ruler.h + l.grid.h + l.lane.h}, th.playhead_line);
+  // Playhead: an ink line with a marker in the ruler.
+  if (last_playhead_x_ >= 0) {
+    c.fill(Rect{last_playhead_x_, l.ruler.y + int(app_.u(2)), line, l.ruler.h + l.grid.h + l.lane.h - int(app_.u(2))},
+           th.playhead_line);
+    draw_marker(c, last_playhead_x_, l.ruler.y + int(app_.u(15)), int(app_.u(5)), th.playhead_line);
+  }
 }
 
 void PianoRollView::draw_lane(Canvas& c, const Layout& l, const Clip& clip) {
   const Theme& th = app_.theme();
-  const Color col = app_.track_colour(app_.track());
+  const Color col = th.track_ink(int(app_.project().tracks[size_t(app_.track())].colour));
   const Tick s = snap();
   const Rect& r = l.lane;
-  c.fill(l.lane_label, lane_focus_ ? th.chip : th.header);
-  c.fill(r, th.panel);
-  c.hline(l.lane_label.x, r.right(), r.y, th.divider);
-  const Font& f = Font::get(FontFace::SemiBold, app_.u(10));
-  std::string name = lane_name();
-  while (name.size() > 1 && f.measure(name.c_str()) > l.lane_label.w - app_.u(8)) name.pop_back();
-  c.text(f, l.lane_label.x + app_.u(5), l.lane_label.y + int(app_.u(16)), name.c_str(), lane_focus_ ? th.text : th.text_secondary);
+  c.fill(l.lane_label, lane_focus_ ? th.chip : th.panel);
+  c.fill(r, th.header);
+  c.fill(Rect{l.lane_label.x, r.y, r.right() - l.lane_label.x, std::max(1, int(app_.u(1)))}, th.text);
+  // The lane's name, spaced out if it fits, else tight, else shortened.
+  const Font& f = Font::get(FontFace::CondensedSemiBold, app_.u(12));
+  const float room = l.lane_label.w - app_.u(10);
+  std::string name = caps(lane_name());
+  const float sp = f.measure(name.c_str(), app_.u(kCapsSpacing)) <= room ? app_.u(kCapsSpacing) : 0;
+  while (name.size() > 1 && f.measure(name.c_str(), sp) > room) name.pop_back();
+  c.text(f, l.lane_label.x + app_.u(8), l.lane_label.y + int(app_.u(18)), name.c_str(), lane_focus_ ? th.text : th.text_secondary, sp);
   const Rect plot = Rect{r.x, r.y + int(app_.u(6)), r.w, r.h - int(app_.u(10))};
   float lo, hi;
   lane_range(lo, hi);
@@ -996,7 +1021,7 @@ void PianoRollView::draw_lane(Canvas& c, const Layout& l, const Clip& clip) {
   // The cursor's column, when the lane has focus.
   if (lane_focus_) {
     const int x = tick_x(l, cursor_);
-    c.stroke_rect(Rect{x, r.y + 1, l.cell_w, r.h - 1}, std::max(2, int(app_.u(1.5f))), th.cursor);
+    draw_brackets(c, Rect{x + 1, r.y + int(app_.u(5)), l.cell_w - 1, r.h - int(app_.u(10))}, th.text, app_.u(1));
   }
 }
 

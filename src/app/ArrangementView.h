@@ -28,6 +28,7 @@ class ArrangementView {
   void copy();   // the clip under the cursor
   void paste();  // an independent copy at the cursor, on any track (Y makes a linked one)
   void open_project_settings();  // tempo, key, scale, files, MIDI clock (Menu, from any view)
+  void open_track_settings(int track, int select_row = 0);  // select_row: after reopening
 
   // A global chord used L or R (L/R + Start): releasing it then does nothing here.
 
@@ -41,7 +42,6 @@ class ArrangementView {
   int bar_x(const Layout& l, double bar) const;
   // The placement covering the cursor's bar on the cursor's track, or -1.
   int placement_at(int track, int bar) const;
-  void open_track_settings(int track, int select_row = 0);  // select_row: after reopening
   void clamp_scroll(const Layout& l);
 
   App& app_;

@@ -6,6 +6,7 @@
 #include <string>
 
 #include "app/App.h"
+#include "app/Splash.h"
 #include "gfx/Canvas.h"
 #include "platform/sdl2/Sdl2Platform.h"
 
@@ -31,13 +32,29 @@ int main(int, char**) {
   const char* screenshot = std::getenv("TWILL_SCREENSHOT");
   int frames = 0;
 
+  // The splash, while the app starts (loading the factory kit and the last song), and for at least
+  // a second and a half in all. Presented a few times: some drivers drop the first frames.
+  twill::Canvas canvas;
+  const uint64_t splash_start = platform.micros();
+  if (!screenshot) {
+    const twill::Size size = platform.display_size();
+    canvas.resize(size.w, size.h);
+    twill::draw_splash(canvas);
+    for (int i = 0; i < 3; ++i) {
+      platform.present(canvas.pixels(), canvas.stride(), canvas.take_dirty());
+      SDL_Delay(16);
+    }
+  }
   twill::App app(platform);
   app.start();
+  while (!screenshot && platform.micros() - splash_start < 1500000) {
+    platform.present(canvas.pixels(), canvas.stride(), {twill::Rect{0, 0, canvas.width(), canvas.height()}});
+    SDL_Delay(16);
+  }
   // Test hook: TWILL_VIEW=roll starts in the piano roll.
   if (const char* v = std::getenv("TWILL_VIEW"))
     if (std::string(v) == "roll") app.show(twill::App::View::PianoRoll);
 
-  twill::Canvas canvas;
   twill::InputState input;
   int frames_shown = 0, idle_frames = 0;
   for (;;) {
