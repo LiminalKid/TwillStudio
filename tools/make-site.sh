@@ -31,8 +31,8 @@ cp "$F/barlow-condensed/BarlowCondensed-Bold.ttf" "$F/barlow-condensed/BarlowCon
 cp "$F/barlow-condensed/OFL.txt" "$OUT/fonts/LICENSE-Barlow-Condensed.txt"
 cp "$F/inter/LICENSE.txt" "$OUT/fonts/LICENSE-Inter.txt"
 
-# The logo images the pages use (the icon and the picture shown when the site is linked).
-for f in twill-logo-dark-square-512.png twill-logo-dark-social-1280x640.png; do
+# The picture shown when the site is linked.
+for f in twill-logo-dark-social-1280x640.png; do
   cp "$ROOT/Docs/images/logo/$f" "$OUT/images/logo/"
 done
 
