@@ -11,7 +11,7 @@
     "porter": [
       "LiminalKid"
     ],
-    "desc": "A groovebox for handhelds. Write songs in a piano roll with synths built on the Plaits macro oscillator and sampler kits, arrange clips, automate sounds and effects, mix, and render to WAV. Plays along with USB MIDI keyboards and synths.",
+    "desc": "A groovebox for handhelds. Write songs in a piano roll with synths built on Emilie Gillet's open-source eurorack code (MIT) and sampler kits, arrange clips, automate sounds and effects, mix, and render to WAV. Plays along with USB MIDI keyboards and synths.",
     "desc_md": null,
     "inst": "Ready to run, no additional files needed. Your own WAV samples go in ports/twill/samples.",
     "inst_md": null,
