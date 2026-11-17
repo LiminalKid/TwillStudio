@@ -656,8 +656,10 @@ Project
 
 M3 is the riskiest: the button grammar in §7 is a starting point, and it needs real time on the device.
 
-**Status:** M0–M5 done (2026-11-11/12). Each section above has an "as built" note where the build
-differs from or settles the plan. Next is M6.
+**Status:** M0–M5 done (2026-11-11/12): arrangement, piano roll, sound, mixer; macro-oscillator
+and sampler instruments with modulators, automation lanes and parameter locks; send effects; project
+files; MIDI. Each section above has an "as built" note where the build differs from or settles the
+plan. Next is M6.
 
 ### Song names (2026-11-14)
 

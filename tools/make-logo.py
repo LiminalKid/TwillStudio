@@ -7,6 +7,9 @@ and a finer pixel "STUDIO". Everything sits on a pixel grid; colours are the app
 Writes:
   src/app/gen/logo.cpp                    the logo as palette indices, for the launch splash
   packaging/portmaster/twill/cover.png    PortMaster's cover: the splash at 640x480
+  Docs/images/logo/                       the logo for use elsewhere, for dark and light
+                                          backgrounds: on the cloth texture, on a plain ground,
+                                          and transparent (cropped, at 4x, 8x and 16x)
 
 Needs Pillow.
 
@@ -23,6 +26,12 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BG, PAPER, ORANGE, GREEN = 1, 2, 3, 4
 COLOURS = {BG: 0x1B1B1D, PAPER: 0xF5EFE1, ORANGE: 0xE58A55, GREEN: 0x7DAE88}
 TEXTURE = 0x202023  # the cloth texture's second shade, behind the logo
+# The light version, for paper: the cream threads and lettering become ink.
+LIGHT = {BG: 0xF5EFE1, PAPER: 0x151412, ORANGE: 0xE58A55, GREEN: 0x7DAE88}
+LIGHT_TEXTURE = 0xEFE8D7
+# Sizes for Docs/images/logo/: name, width, height, and how much of the image the logo may fill.
+SIZES = [("square-512", 512, 512, 0.75), ("square-1024", 1024, 1024, 0.75),
+         ("wide-1920x1080", 1920, 1080, 0.75), ("social-1280x640", 1280, 640, 0.8)]
 
 # The swatch, in cells (one cell = 2 logo pixels).
 THREAD, GAP, THREADS, FRINGE = 3, 1, 5, 5
@@ -139,28 +148,62 @@ def logo():
     return img
 
 
-def splash(w, h, img):
-    """The splash as the app draws it (src/app/Splash.cpp): the logo on a faint twill."""
+def rgb(c):
+    return ((c >> 16) & 255, (c >> 8) & 255, c & 255)
+
+
+def render(w, h, img, scale, colours=COLOURS, ground="texture"):
+    """The logo at an integer scale, centred. ground: "texture" (the ground colour with a faint
+    twill), "plain", or "none" (transparent, the swatch's gaps too)."""
     lh, lw = len(img), len(img[0])
-    scale = max(1, min(int(w * 0.6) // lw, int(h * 0.75) // lh))
-    cell = max(2, scale)
-    out = Image.new("RGB", (w, h))
+    texture = TEXTURE if colours is COLOURS else LIGHT_TEXTURE
+    if ground == "none":
+        out = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    else:
+        out = Image.new("RGB", (w, h), rgb(colours[BG]))
     px = out.load()
-    bg, tex = COLOURS[BG], TEXTURE
-    for y in range(h):
-        for x in range(w):
-            c = tex if ((x // cell) - (y // cell)) % 4 < 2 else bg
-            px[x, y] = ((c >> 16) & 255, (c >> 8) & 255, c & 255)
+    if ground == "texture":
+        cell = max(2, scale)
+        for y in range(h):
+            for x in range(w):
+                if ((x // cell) - (y // cell)) % 4 < 2:
+                    px[x, y] = rgb(texture)
     ox, oy = (w - lw * scale) // 2, (h - lh * scale) // 2
     for y in range(lh):
         for x in range(lw):
             c = img[y][x]
-            if c:
-                rgb = COLOURS[c]
-                for b in range(scale):
-                    for a in range(scale):
-                        px[ox + x * scale + a, oy + y * scale + b] = ((rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255)
+            if not c or (ground == "none" and c == BG):
+                continue
+            col = rgb(colours[c]) + ((255,) if ground == "none" else ())
+            for b in range(scale):
+                for a in range(scale):
+                    px[ox + x * scale + a, oy + y * scale + b] = col
     return out
+
+
+def fit(w, h, img, fill):
+    return max(1, min(int(w * fill) // len(img[0]), int(h * fill) // len(img)))
+
+
+def splash(w, h, img):
+    """The splash as the app draws it (src/app/Splash.cpp): the logo on a faint twill."""
+    lh, lw = len(img), len(img[0])
+    return render(w, h, img, max(1, min(int(w * 0.6) // lw, int(h * 0.75) // lh)))
+
+
+def write_images(img, out):
+    """The logo for use elsewhere: cream for dark backgrounds, ink for light ones."""
+    os.makedirs(out, exist_ok=True)
+    lh, lw = len(img), len(img[0])
+    for theme, colours in (("dark", COLOURS), ("light", LIGHT)):
+        for name, w, h, fill in SIZES:
+            s = fit(w, h, img, fill)
+            for ground, suffix in (("texture", ""), ("plain", "-plain")):
+                path = os.path.join(out, "twill-logo-%s-%s%s.png" % (theme, name, suffix))
+                render(w, h, img, s, colours, ground).save(path, optimize=True)
+        for s in (4, 8, 16):
+            path = os.path.join(out, "twill-logo-%s-transparent-%dx.png" % (theme, s))
+            render(lw * s, lh * s, img, s, colours, "none").save(path, optimize=True)
 
 
 def main():
@@ -190,7 +233,8 @@ def main():
     with open(out, "w") as f:
         f.write("\n".join(src))
     splash(640, 480, img).save(os.path.join(ROOT, "packaging", "portmaster", "twill", "cover.png"), optimize=True)
-    print("wrote %s (%dx%d) and cover.png" % (out, w, h))
+    write_images(img, os.path.join(ROOT, "Docs", "images", "logo"))
+    print("wrote %s (%dx%d), cover.png and Docs/images/logo/" % (out, w, h))
 
 
 if __name__ == "__main__":
