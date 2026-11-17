@@ -1,0 +1,68 @@
+# Builds the website and publishes it with GitHub Pages on every push to main: the landing page
+# (site/) and the web version of the app (play/), assembled by tools/make-site.sh. The web build's
+# tests run first, under Node.
+#
+# Needs Pages switched on once, in the repository's Settings > Pages, with "GitHub Actions" as the
+# source.
+name: Website
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  EMSCRIPTEN_VERSION: 7.0.0  # the version the web build was made and tested with
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tools
+        run: sudo apt-get update -q && sudo apt-get install -y -q ninja-build
+
+      - name: Emscripten
+        run: |
+          git clone -q --depth 1 https://github.com/emscripten-core/emsdk.git "$RUNNER_TEMP/emsdk"
+          cd "$RUNNER_TEMP/emsdk"
+          ./emsdk install "$EMSCRIPTEN_VERSION"
+          ./emsdk activate "$EMSCRIPTEN_VERSION"
+
+      - name: Build the web version
+        run: |
+          source "$RUNNER_TEMP/emsdk/emsdk_env.sh"
+          emcmake cmake -S . -B build/web -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/web
+
+      - name: Tests (WebAssembly, under Node)
+        run: |
+          source "$RUNNER_TEMP/emsdk/emsdk_env.sh"
+          node build/web/twill_tests.js
+
+      - name: Assemble the site
+        run: tools/make-site.sh
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: build/site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-24.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

@@ -1,0 +1,342 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Twill Studio: a piano-roll groovebox for handhelds</title>
+<meta name="description" content="A free, open-source piano-roll groovebox for PortMaster handhelds and your browser: 24 synth engines, a sampler, chorus, delay and reverb, written note by note with a d-pad.">
+<meta property="og:title" content="Twill Studio">
+<meta property="og:description" content="A free, open-source piano-roll groovebox for handhelds and your browser.">
+<meta property="og:image" content="https://liminalkid.github.io/TwillStudio/images/logo/twill-logo-dark-social-1280x640.png">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="images/logo/twill-logo-dark-square-512.png">
+<!-- The theme, before anything draws: the visitor's choice, else the system's. -->
+<script>
+  (function () {
+    var t = null;
+    try { t = localStorage.getItem('twill-theme'); } catch (e) {}
+    if (t !== 'light' && t !== 'dark') t = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    document.documentElement.setAttribute('data-theme', t);
+  })();
+</script>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<div class="strip">
+  <span class="chip">NEW</span>
+  <span>Version @VERSION@: the paper look, a logo and splash, and more from X and Y.</span>
+  <a href="https://github.com/LiminalKid/TwillStudio/releases/tag/v@VERSION@">What's new →</a>
+</div>
+
+<header class="topbar">
+  <a class="brand" href="#top" aria-label="Twill Studio, top of the page">
+    <canvas class="mark" width="29" height="29" aria-hidden="true"></canvas>
+    <span>TWILL STUDIO</span>
+  </a>
+  <nav class="tabs" aria-label="Sections">
+    <a href="#arrange">ARRANGE</a>
+    <a href="#roll">ROLL</a>
+    <a href="#sound">SOUND</a>
+    <a href="#mix">MIX</a>
+    <a href="#controls">CONTROLS</a>
+    <a href="#get">GET IT</a>
+  </nav>
+  <div class="transport" aria-hidden="true">
+    <span class="play-glyph">▶</span><span class="pos">1.1</span><span class="bpm">100 BPM</span>
+  </div>
+  <div class="theme" role="group" aria-label="Theme">
+    <button type="button" data-set-theme="light">PAPER</button>
+    <button type="button" data-set-theme="dark">GRAPHITE</button>
+  </div>
+</header>
+
+<main id="main">
+
+<section class="hero-wrap" id="top">
+<div class="hero">
+  <div class="hero-copy">
+    <canvas class="weave" aria-label="The Twill Studio logo: a swatch of twill weave above the words Twill Studio" role="img"></canvas>
+    <p class="eyebrow">FREE · OPEN SOURCE · VERSION @VERSION@</p>
+    <h1>A piano-roll groovebox for handhelds.</h1>
+    <p class="lede">Twenty-four synth engines, a sampler, chorus, delay and reverb, written note by
+      note with a d-pad. For PortMaster handhelds, and right here in your browser.</p>
+    <div class="ctas">
+      <a class="button primary" href="play/"><kbd>X</kbd>Play in your browser</a>
+      <a class="button" href="https://github.com/LiminalKid/TwillStudio/releases/latest/download/twill.zip"><kbd>↓</kbd>Download for PortMaster</a>
+    </div>
+    <p class="fine">PortMaster package, about 2 MB · 64-bit handhelds, 640×480 and up ·
+      <a href="https://github.com/LiminalKid/TwillStudio">Source on GitHub</a></p>
+  </div>
+  <div class="hero-device">
+    <div class="device" aria-hidden="true">
+      <div class="shoulders"><i></i><i></i></div>
+      <div class="screen">
+        <img class="on-light" src="images/screens/arrangement-stopped-light.png" alt="">
+        <img class="on-dark" src="images/screens/arrangement-stopped-dark.png" alt="">
+        <div class="playhead"><b></b></div>
+      </div>
+      <div class="controls-row">
+        <div class="dpad"><i></i><i></i></div>
+        <div class="minis"><i>SELECT</i><i>START</i></div>
+        <div class="face"><i>X</i><i>Y</i><i>A</i><i>B</i></div>
+      </div>
+    </div>
+    <p class="caption">The demo song, playing in the arrangement.</p>
+  </div>
+</div>
+</section>
+
+<section class="band" id="arrange">
+  <div class="band-copy">
+    <p class="eyebrow"><span class="num">01</span> ARRANGE</p>
+    <h2>Clips on a timeline.</h2>
+    <ul>
+      <li><b>Eight tracks,</b> each with its own instrument and colour.</li>
+      <li><b>Clips are shared.</b> Edit one copy and every placement of it follows.</li>
+      <li><b>Build the song with A and B:</b> add, stretch, move and duplicate clips, and loop a
+        region while you work on it.</li>
+      <li><b>Zoom and page</b> with the shoulder buttons, and play from anywhere.</li>
+    </ul>
+  </div>
+  <figure class="shot">
+    <img class="on-light" src="images/screens/arrangement-light.png" alt="The arrangement: six tracks of clips, drums, bass, chords, lead, pluck and pad, with the playhead in bar 3" loading="lazy">
+    <img class="on-dark" src="images/screens/arrangement-dark.png" alt="The arrangement: six tracks of clips, drums, bass, chords, lead, pluck and pad, with the playhead in bar 3" loading="lazy">
+  </figure>
+</section>
+
+<section class="band flip" id="roll">
+  <div class="band-copy">
+    <p class="eyebrow"><span class="num">02</span> ROLL</p>
+    <h2>Every note, by hand.</h2>
+    <ul>
+      <li><b>A piano roll made for a d-pad.</b> Add a note with A, stretch it, move it, select an
+        area with Y.</li>
+      <li><b>Notes carry expression:</b> velocity, length, probability and glide.</li>
+      <li><b>Parameter locks.</b> Any note can carry its own value for any sound parameter.</li>
+      <li><b>Automation lanes</b> under the notes, for the sound, the effects and the master.</li>
+      <li><b>Drum tracks</b> get a named row per sound.</li>
+    </ul>
+  </div>
+  <figure class="shot">
+    <img class="on-light" src="images/screens/roll-light.png" alt="The piano roll on the drum track: a named row per drum, with velocities in a lane below" loading="lazy">
+    <img class="on-dark" src="images/screens/roll-dark.png" alt="The piano roll on the drum track: a named row per drum, with velocities in a lane below" loading="lazy">
+  </figure>
+</section>
+
+<section class="band" id="sound">
+  <div class="band-copy">
+    <p class="eyebrow"><span class="num">03</span> SOUND</p>
+    <h2>Twenty-four engines and a sampler.</h2>
+    <ul>
+      <li><b>Synth engines</b> from virtual analog, FM and wavetable to formant, speech, plucked
+        string, string machine, chiptune and drums.</li>
+      <li><b>A sampler</b> that plays a sound pitched, looped or sliced, or as a kit of sixteen
+        pads. A drum kit comes built in; bring your own WAV files too.</li>
+      <li><b>Shape it:</b> a filter and drive after every sound, and envelopes and LFOs that can
+        move any parameter.</li>
+      <li><b>MIDI on handhelds and desktops:</b> play and record from a keyboard, send tracks to
+        outboard synths, and send clock.</li>
+    </ul>
+    <ul class="engines" aria-label="The synth engines">
+      <li>Virtual analog</li><li>Analog + filter</li><li>Waveshaper</li><li>Two-op FM</li>
+      <li>6-op FM ×3</li><li>Phase distortion</li><li>Formant</li><li>Additive</li>
+      <li>Wavetable</li><li>Wave terrain</li><li>Chords</li><li>String machine</li>
+      <li>Chiptune</li><li>Speech</li><li>Swarm</li><li>Filtered noise</li><li>Particles</li>
+      <li>Plucked string</li><li>Modal resonator</li><li>Bass drum</li><li>Snare drum</li><li>Hi-hat</li>
+    </ul>
+  </div>
+  <figure class="shot">
+    <img class="on-light" src="images/screens/sound-light.png" alt="The sound view: the sampler in kit mode, with its sixteen pads and their settings" loading="lazy">
+    <img class="on-dark" src="images/screens/sound-dark.png" alt="The sound view: the sampler in kit mode, with its sixteen pads and their settings" loading="lazy">
+  </figure>
+</section>
+
+<section class="band flip" id="mix">
+  <div class="band-copy">
+    <p class="eyebrow"><span class="num">04</span> MIX</p>
+    <h2>A strip per track.</h2>
+    <ul>
+      <li><b>Level, pan, mute and solo,</b> with a meter on every strip.</li>
+      <li><b>Three sends:</b> chorus, a tempo-synced ping-pong delay, and a big reverb.</li>
+      <li><b>Master EQ and a limiter,</b> so a loud song stays clean.</li>
+      <li><b>Render the song</b> to a WAV file when it's done.</li>
+    </ul>
+  </div>
+  <figure class="shot">
+    <img class="on-light" src="images/screens/mixer-light.png" alt="The mixer: a strip per track with meter, level, pan, sends, mute and solo, and the master" loading="lazy">
+    <img class="on-dark" src="images/screens/mixer-dark.png" alt="The mixer: a strip per track with meter, level, pan, sends, mute and solo, and the master" loading="lazy">
+  </figure>
+</section>
+
+<section class="band wide" id="controls">
+  <div class="band-head">
+    <p class="eyebrow"><span class="num">05</span> CONTROLS</p>
+    <h2>One set of moves, every screen.</h2>
+    <p class="lede">A adds and selects, B deletes, Y copies, X opens; hold a button and use the
+      d-pad to change what it holds. The hint bar at the bottom of the screen always shows what's
+      possible.</p>
+    <div class="switch" role="group" aria-label="Show the controls as">
+      <button type="button" data-keys="pad" aria-pressed="true">HANDHELD</button>
+      <button type="button" data-keys="keyboard" aria-pressed="false">KEYBOARD</button>
+    </div>
+  </div>
+  <div class="control-sheet" id="control-sheet"></div>
+</section>
+
+<section class="band try" id="play">
+  <div class="band-copy">
+    <p class="eyebrow"><span class="num">06</span> TRY IT</p>
+    <h2>Play it in your browser.</h2>
+    <p class="lede">The same app, compiled for the web. Nothing to install: use the keyboard, or
+      plug in a game controller. Your songs are kept in this browser.</p>
+    <div class="ctas">
+      <a class="button primary" href="play/"><kbd>X</kbd>Open Twill Studio</a>
+    </div>
+    <p class="fine">Works in current Chrome, Edge, Firefox and Safari on a computer. Sound starts
+      when you click.</p>
+  </div>
+  <a class="shot link" href="play/" aria-label="Open Twill Studio in your browser">
+    <img class="on-light" src="images/screens/roll-light.png" alt="" loading="lazy">
+    <img class="on-dark" src="images/screens/roll-dark.png" alt="" loading="lazy">
+    <span class="play-badge"><kbd>X</kbd>PLAY</span>
+  </a>
+</section>
+
+<section class="band wide" id="get">
+  <div class="band-head">
+    <p class="eyebrow"><span class="num">07</span> GET IT</p>
+    <h2>On a handheld.</h2>
+    <p class="lede">Twill Studio installs through PortMaster, which runs on most Linux handheld
+      systems.</p>
+  </div>
+  <ol class="steps">
+    <li><span class="num">01</span><b>Download</b> <a href="https://github.com/LiminalKid/TwillStudio/releases/latest/download/twill.zip">twill.zip</a>, the PortMaster package.</li>
+    <li><span class="num">02</span><b>Copy it</b> into PortMaster's <i>autoinstall</i> folder on the handheld's card.</li>
+    <li><span class="num">03</span><b>Open PortMaster.</b> It installs the zip when it starts.</li>
+    <li><span class="num">04</span><b>Start Twill Studio</b> from Ports. Menu + Start quits.</li>
+  </ol>
+  <dl class="spec">
+    <div><dt>NEEDS</dt><dd>A 64-bit (AArch64) handheld with a screen of 640×480 or more</dd></div>
+    <div><dt>TESTED ON</dt><dd>TrimUI Brick Pro and Anbernic RG28XX (KNULLI), Retroid Pocket 5 (ROCKNIX)</dd></div>
+    <div><dt>SAVES</dt><dd>Autosave next to the app; projects in <code>projects/</code>, WAV renders in <code>renders/</code></dd></div>
+    <div><dt>SAMPLES</dt><dd>WAV files in <code>samples/</code>, next to the app</dd></div>
+    <div><dt>DESKTOP</dt><dd>Builds on macOS and Linux from the <a href="https://github.com/LiminalKid/TwillStudio/blob/main/BUILDING.md">source</a></dd></div>
+  </dl>
+</section>
+
+<section class="band wide" id="status">
+  <div class="band-head">
+    <p class="eyebrow"><span class="num">08</span> STATUS</p>
+    <h2>Where it is.</h2>
+  </div>
+  <div class="status">
+    <div>
+      <h3><span class="dot ok"></span>WORKS TODAY</h3>
+      <ul>
+        <li>Arrangement, piano roll, sound and mixer</li>
+        <li>24 synth engines, the sampler and kits</li>
+        <li>Modulators, automation and parameter locks</li>
+        <li>Chorus, delay, reverb, master EQ and limiter</li>
+        <li>Projects, autosave and WAV renders</li>
+        <li>MIDI in and out on handhelds and desktops</li>
+        <li>The browser version</li>
+      </ul>
+    </div>
+    <div>
+      <h3><span class="dot next"></span>NEXT</h3>
+      <ul>
+        <li>A listing in PortMaster's catalogue (in testing now)</li>
+        <li>In the browser: songs, samples and renders in and out</li>
+        <li>More handhelds, as people try it</li>
+      </ul>
+    </div>
+    <div>
+      <h3><span class="dot no"></span>NOT PROMISED</h3>
+      <ul>
+        <li>Dates</li>
+        <li>MIDI in the browser</li>
+        <li>Touch screens</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="band wide" id="faq">
+  <div class="band-head">
+    <p class="eyebrow"><span class="num">09</span> QUESTIONS</p>
+    <h2>Asked, answered.</h2>
+  </div>
+  <div class="faq">
+    <details>
+      <summary>Is it free?</summary>
+      <p>Yes, and open source under the GNU GPL, version 3. The built-in drum kit's samples are
+        public domain (CC0). Music you make with Twill Studio is yours.</p>
+    </details>
+    <details>
+      <summary>What does it run on?</summary>
+      <p>64-bit Linux handhelds through PortMaster, with a screen of 640×480 or larger; current
+        web browsers on a computer; and macOS or Linux if you build it yourself.</p>
+    </details>
+    <details>
+      <summary>Do I need a controller in the browser?</summary>
+      <p>No. The keyboard works: arrows move, X is A, Z is B, S is X, A is Y, Q and W are L1 and
+        R1, 1 and 2 are L2 and R2, Enter is Start, Tab is Select and Esc is Menu. A game
+        controller works too.</p>
+    </details>
+    <details>
+      <summary>Where are my songs?</summary>
+      <p>On a handheld, next to the app: the last song autosaves, and saved projects go to
+        <code>projects/</code>. In the browser, they're kept in that browser's storage for this
+        site, so clearing the site's data clears them. A way to take them in and out of the
+        browser is next on the list.</p>
+    </details>
+    <details>
+      <summary>Can I use my own samples?</summary>
+      <p>Yes. Put WAV files in the <code>samples/</code> folder next to the app and choose them
+        from the sound view.</p>
+    </details>
+    <details>
+      <summary>Does it do MIDI?</summary>
+      <p>On handhelds and desktops: a MIDI keyboard plays and records the current track, a track
+        can play an outboard synth instead of its own sound, and the clock can go out. Not in the
+        browser yet.</p>
+    </details>
+    <details>
+      <summary>Where do I report a bug or ask for something?</summary>
+      <p>On <a href="https://github.com/LiminalKid/TwillStudio/issues">GitHub</a>.</p>
+    </details>
+  </div>
+</section>
+
+</main>
+
+<footer class="foot">
+  <div class="foot-brand">
+    <canvas class="mark" width="29" height="29" aria-hidden="true"></canvas>
+    <span>TWILL STUDIO</span>
+  </div>
+  <p>Free software under the GNU GPL, version 3. Version @VERSION@.</p>
+  <p class="credits">Synth engines and reverb adapted from Emilie Gillet's open-source eurorack
+    code (MIT). Fonts: Barlow Condensed and Inter (SIL Open Font License). WAV reading:
+    dr_wav (public domain).</p>
+  <p class="links">
+    <a href="https://github.com/LiminalKid/TwillStudio">GitHub</a>
+    <a href="https://github.com/LiminalKid/TwillStudio/releases">Releases</a>
+    <a href="https://github.com/LiminalKid/TwillStudio/issues">Issues</a>
+    <a href="play/">Play in your browser</a>
+  </p>
+  <p class="fine">© 2026 Liminal Kid</p>
+</footer>
+
+<div class="hintbar" aria-hidden="true">
+  <span><kbd>Q</kbd><kbd>W</kbd>PREV / NEXT</span>
+  <span><kbd>X</kbd>PLAY IN BROWSER</span>
+  <span><kbd>T</kbd>THEME</span>
+</div>
+
+<script src="logo.js"></script>
+<script src="site.js"></script>
+</body>
+</html>

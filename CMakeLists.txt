@@ -16,6 +16,10 @@ add_library(eurorack STATIC ${EURORACK_SOURCES})
 target_include_directories(eurorack SYSTEM PUBLIC third_party/eurorack)
 target_compile_definitions(eurorack PUBLIC TEST)
 target_compile_options(eurorack PRIVATE -w)  # upstream code, built as is
+if(EMSCRIPTEN)
+  # user_data.h calls printf without including stdio.h; other compilers' headers happen to bring it in.
+  target_compile_options(eurorack PRIVATE -include cstdio)
+endif()
 
 # Portable core: no OS or SDL headers in here (design §4).
 add_library(twill_core STATIC
@@ -72,27 +76,47 @@ target_link_libraries(twill_core PUBLIC eurorack Threads::Threads)
 target_compile_options(twill_core PRIVATE -Wall -Wextra -fno-exceptions -fno-rtti)
 
 # SDL2 platform. On macOS, prefer a package manager's SDL2 (Homebrew) over any SDL2.framework
-# installed in /Library/Frameworks.
+# installed in /Library/Frameworks. The web build uses Emscripten's own SDL2 port instead.
 set(CMAKE_FIND_FRAMEWORK LAST)
-find_package(SDL2 CONFIG QUIET)
-if(SDL2_FOUND)
-  set(TWILL_SDL2_TARGET SDL2::SDL2)
+if(EMSCRIPTEN)
+  add_library(sdl2_emscripten INTERFACE)
+  target_compile_options(sdl2_emscripten INTERFACE -sUSE_SDL=2)
+  target_link_options(sdl2_emscripten INTERFACE -sUSE_SDL=2)
+  # Emscripten's stack is 64 KB unless asked; the app is written for desktop stacks (8 MB), and
+  # reading a file alone takes 64 KB of it. Overflowing it corrupts memory without a word.
+  add_link_options(-sSTACK_SIZE=4MB)
+  set(TWILL_SDL2_TARGET sdl2_emscripten)
 else()
-  # Cross builds: headers and library come from the sysroot (see cmake/toolchains/).
-  find_path(SDL2_INCLUDE_DIR SDL.h PATH_SUFFIXES SDL2 REQUIRED)
-  find_library(SDL2_LIBRARY NAMES SDL2 SDL2-2.0 REQUIRED)
-  add_library(sdl2_imported UNKNOWN IMPORTED)
-  set_target_properties(sdl2_imported PROPERTIES
-    IMPORTED_LOCATION "${SDL2_LIBRARY}"
-    INTERFACE_INCLUDE_DIRECTORIES "${SDL2_INCLUDE_DIR}")
-  set(TWILL_SDL2_TARGET sdl2_imported)
+  find_package(SDL2 CONFIG QUIET)
+  if(SDL2_FOUND)
+    set(TWILL_SDL2_TARGET SDL2::SDL2)
+  else()
+    # Cross builds: headers and library come from the sysroot (see cmake/toolchains/).
+    find_path(SDL2_INCLUDE_DIR SDL.h PATH_SUFFIXES SDL2 REQUIRED)
+    find_library(SDL2_LIBRARY NAMES SDL2 SDL2-2.0 REQUIRED)
+    add_library(sdl2_imported UNKNOWN IMPORTED)
+    set_target_properties(sdl2_imported PROPERTIES
+      IMPORTED_LOCATION "${SDL2_LIBRARY}"
+      INTERFACE_INCLUDE_DIRECTORIES "${SDL2_INCLUDE_DIR}")
+    set(TWILL_SDL2_TARGET sdl2_imported)
+  endif()
 endif()
 
 add_executable(twill
   src/platform/sdl2/main.cpp
   src/platform/sdl2/Sdl2Platform.cpp
 )
-if(APPLE)
+if(EMSCRIPTEN)
+  # The web build (web/): a page with the app in a canvas, its files kept in the browser's
+  # IndexedDB, no MIDI yet. See BUILDING.md.
+  target_sources(twill PRIVATE src/platform/sdl2/SystemMidiNone.cpp src/platform/sdl2/OutputCompressorNone.cpp)
+  set_target_properties(twill PROPERTIES SUFFIX ".html")
+  # --profiling-funcs keeps function names, so a crash in someone's browser says where it was.
+  target_link_options(twill PRIVATE --profiling-funcs -sALLOW_MEMORY_GROWTH=1 -sINITIAL_MEMORY=64MB -lidbfs.js
+    --pre-js ${CMAKE_SOURCE_DIR}/web/pre.js --shell-file ${CMAKE_SOURCE_DIR}/web/shell.html)
+  set_property(TARGET twill APPEND PROPERTY LINK_DEPENDS
+    ${CMAKE_SOURCE_DIR}/web/pre.js ${CMAKE_SOURCE_DIR}/web/shell.html)
+elseif(APPLE)
   target_sources(twill PRIVATE src/platform/sdl2/SystemMidiMac.cpp src/platform/sdl2/OutputCompressorNone.cpp)
   target_link_libraries(twill PRIVATE "-framework CoreMIDI" "-framework CoreFoundation")
 else()
@@ -100,13 +124,15 @@ else()
 endif()
 target_link_libraries(twill PRIVATE twill_core ${TWILL_SDL2_TARGET})
 target_compile_options(twill PRIVATE -Wall -Wextra -fno-exceptions -fno-rtti)
-# Drawing benchmark, no display needed (runs over SSH on a device).
-add_executable(twill_bench src/tools/bench.cpp)
-target_link_libraries(twill_bench PRIVATE twill_core)
+if(NOT EMSCRIPTEN)
+  # Drawing benchmark, no display needed (runs over SSH on a device).
+  add_executable(twill_bench src/tools/bench.cpp)
+  target_link_libraries(twill_bench PRIVATE twill_core)
 
-# Macro-oscillator lab: renders every engine to WAV and benchmarks them (milestone M1).
-add_executable(twill_macro_lab src/tools/macro_lab.cpp)
-target_link_libraries(twill_macro_lab PRIVATE twill_core)
+  # Macro-oscillator lab: renders every engine to WAV and benchmarks them (milestone M1).
+  add_executable(twill_macro_lab src/tools/macro_lab.cpp)
+  target_link_libraries(twill_macro_lab PRIVATE twill_core)
+endif()
 
 # Headless tests (design §10). Run on the build machine with ctest, or copy to a device and run
 # there with --golden-dir pointing at a copy of tests/golden.
@@ -115,6 +141,10 @@ target_link_libraries(twill_tests PRIVATE twill_core)
 target_compile_definitions(twill_tests PRIVATE TWILL_GOLDEN_DIR="${CMAKE_SOURCE_DIR}/tests/golden")
 enable_testing()
 add_test(NAME twill_tests COMMAND twill_tests)
+if(EMSCRIPTEN)
+  # Run with Node, on the real file system (the golden files): node build/web/twill_tests.js
+  target_link_options(twill_tests PRIVATE -sNODERAWFS=1 -sENVIRONMENT=node -sALLOW_MEMORY_GROWTH=1)
+endif()
 
 if(TWILL_HANDHELD)
   target_compile_definitions(twill PRIVATE TWILL_HANDHELD=1)

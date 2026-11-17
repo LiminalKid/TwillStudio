@@ -17,9 +17,22 @@
 
 #include <algorithm>
 
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#include <emscripten/html5.h>
+#endif
+
 namespace twill {
 
 namespace {
+
+// The web build keeps its files in the browser's IndexedDB, mounted at /twill (web/pre.js). A
+// write lands in memory; this copies it to IndexedDB (web/pre.js runs one copy at a time).
+void persist() {
+#ifdef __EMSCRIPTEN__
+  EM_ASM({ if (Module.twillPersist) Module.twillPersist(); });
+#endif
+}
 
 // Which way a portrait panel is mounted, as the kernel has it: the console rotation on the boot
 // command line (fbcon=rotate:1 or 3), or the DRM panel's orientation. 0 when it doesn't say.
@@ -96,6 +109,9 @@ const KeyBinding kKeys[] = {
     {SDLK_q, kL},         {SDLK_w, kR},           {SDLK_1, kL2},       {SDLK_2, kR2},
     {SDLK_RETURN, kStart}, {SDLK_SPACE, kStart},  {SDLK_TAB, kSelect}, {SDLK_RSHIFT, kSelect},
     {SDLK_ESCAPE, kMenu},
+    // The keypad's arrows. Safari reports the Mac's arrow keys as keypad keys (macOS flags them
+    // that way), and SDL's web port passes that on.
+    {SDLK_KP_8, kUp},     {SDLK_KP_2, kDown},     {SDLK_KP_4, kLeft},  {SDLK_KP_6, kRight},
 };
 
 bool env_flag(const char* name) {
@@ -127,17 +143,20 @@ bool Sdl2Platform::init() {
     log("SDL_Init failed: %s", SDL_GetError());
     return false;
   }
-  // Handhelds keep data next to the app (the Ports folder); desktops use the per-user folder.
-  if (handheld_) {
-    char cwd[4096];
-    data_dir_ = getcwd(cwd, sizeof cwd) ? std::string(cwd) + "/" : "./";
-  } else if (char* pref = SDL_GetPrefPath("Twill Studio", "Twill Studio")) {
+  // Handhelds keep data next to the app (the Ports folder); desktops use the per-user folder; the
+  // web build, the folder web/pre.js keeps in the browser's storage.
+#ifdef __EMSCRIPTEN__
+  data_dir_ = "/twill/";
+#else
+  char* pref = handheld_ ? nullptr : SDL_GetPrefPath("Twill Studio", "Twill Studio");
+  if (pref) {
     data_dir_ = pref;
     SDL_free(pref);
   } else {
     char cwd[4096];
     data_dir_ = getcwd(cwd, sizeof cwd) ? std::string(cwd) + "/" : "./";
   }
+#endif
   log("SDL %d.%d.%d, video driver %s, audio driver %s", SDL_MAJOR_VERSION, SDL_MINOR_VERSION,
       SDL_PATCHLEVEL, SDL_GetCurrentVideoDriver(), SDL_GetCurrentAudioDriver());
 
@@ -151,7 +170,11 @@ bool Sdl2Platform::init() {
   } else {
     window_ = SDL_CreateWindow("Twill Studio", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1280,
                                800, SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_SHOWN);
+#ifdef __EMSCRIPTEN__
+    name_ = "SDL2 web";
+#else
     name_ = "SDL2 desktop";
+#endif
   }
   if (!window_) {
     log("SDL_CreateWindow failed: %s", SDL_GetError());
@@ -171,6 +194,7 @@ bool Sdl2Platform::init() {
   log("renderer %s%s", ri.name, (ri.flags & SDL_RENDERER_PRESENTVSYNC) ? " (vsync)" : "");
   SDL_ShowCursor(handheld_ ? SDL_DISABLE : SDL_ENABLE);
   update_size();
+  follow_page_size();
 
   midi_ = make_system_midi();
   if (midi_) log("MIDI: %s", midi_->describe().c_str());
@@ -382,8 +406,25 @@ void Sdl2Platform::poll_input(InputState& out) {
         break;
     }
   }
+  follow_page_size();
   out.held = keys_ | read_pad();
   out.quit_requested = quit_;
+}
+
+// The web build: the page lays out the canvas (web/shell.html), and the app draws at the size the
+// page gives it, in real pixels, rather than drawing at a fixed size for the browser to scale.
+void Sdl2Platform::follow_page_size() {
+#ifdef __EMSCRIPTEN__
+  double cw = 0, ch = 0;
+  if (emscripten_get_element_css_size("#canvas", &cw, &ch) != EMSCRIPTEN_RESULT_SUCCESS) return;
+  const int w = int(cw), h = int(ch);
+  int ww = 0, wh = 0;
+  SDL_GetWindowSize(window_, &ww, &wh);
+  if (w > 0 && h > 0 && (w != ww || h != wh)) {
+    SDL_SetWindowSize(window_, w, h);
+    update_size();
+  }
+#endif
 }
 
 bool Sdl2Platform::audio_open(int rate, int block, AudioCallback cb, void* user) {
@@ -396,11 +437,19 @@ bool Sdl2Platform::audio_open(int rate, int block, AudioCallback cb, void* user)
   // Handhelds get longer blocks than asked for: about 21 ms of output latency, but room for the
   // scheduling jitter of a small Linux system (256 frames underran on the TrimUI Brick Pro).
   if (handheld_) block = std::max(block, 512);
+#ifdef __EMSCRIPTEN__
+  // In a browser the audio is made on the same thread as the drawing, between frames, so it needs
+  // enough in hand to ride out a frame or two: 2048 frames is about 43 ms.
+  block = std::max(block, 2048);
+  // The engine runs at 48 kHz; where the browser's audio runs at another rate, SDL converts.
+  const int allow = SDL_AUDIO_ALLOW_SAMPLES_CHANGE;
+#else
+  const int allow = SDL_AUDIO_ALLOW_FREQUENCY_CHANGE | SDL_AUDIO_ALLOW_SAMPLES_CHANGE;
+#endif
   want.samples = Uint16(block);
   want.callback = &Sdl2Platform::sdl_audio_callback;
   want.userdata = this;
-  audio_dev_ = SDL_OpenAudioDevice(nullptr, 0, &want, &have,
-                                   SDL_AUDIO_ALLOW_FREQUENCY_CHANGE | SDL_AUDIO_ALLOW_SAMPLES_CHANGE);
+  audio_dev_ = SDL_OpenAudioDevice(nullptr, 0, &want, &have, allow);
   if (!audio_dev_) {
     log("SDL_OpenAudioDevice failed: %s", SDL_GetError());
     return false;
@@ -460,6 +509,7 @@ bool Sdl2Platform::write_file(const char* name, const std::vector<uint8_t>& data
   ok = std::fclose(f) == 0 && ok;
   if (ok) ok = std::rename(tmp.c_str(), path.c_str()) == 0;
   if (!ok) std::remove(tmp.c_str());
+  if (ok) persist();
   return ok;
 }
 
@@ -491,6 +541,7 @@ bool Sdl2Platform::make_dir(const char* path) {
       struct stat st;
       if (stat(part.c_str(), &st) != 0 && mkdir(part.c_str(), 0755) != 0) return false;
     }
+  persist();
   return true;
 }
 

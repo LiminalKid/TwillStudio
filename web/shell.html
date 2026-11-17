@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Play Twill Studio</title>
+<link rel="icon" href="../images/logo/twill-logo-dark-square-512.png">
+<script>
+  // The site's theme (site/site.js keeps it), else the system's. The app has its own, in its settings.
+  (function () {
+    var t = null;
+    try { t = localStorage.getItem('twill-theme'); } catch (e) {}
+    if (t !== 'light' && t !== 'dark') t = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    document.documentElement.setAttribute('data-theme', t);
+  })();
+</script>
+<style>
+  /* The site's look (site/style.css): paper and ink, or graphite. The fonts come from the site;
+     on a local build without them, the fallbacks do. */
+  @font-face { font-family: "Barlow Condensed"; font-weight: 700; font-display: swap;
+    src: url("../fonts/BarlowCondensed-Bold.ttf") format("truetype"); }
+  @font-face { font-family: "Inter"; font-weight: 400; font-display: swap;
+    src: url("../fonts/Inter-Regular.ttf") format("truetype"); }
+  :root { --bg: #F5EFE1; --text: #151412; --dim: #71695A; --rule: #D3C9B3; --block: #151412; --block-text: #F5EFE1;
+    --cond: "Barlow Condensed", "Arial Narrow", system-ui, sans-serif; --sans: "Inter", system-ui, -apple-system, sans-serif; }
+  :root[data-theme="dark"] { --bg: #1B1B1D; --text: #ECEBE7; --dim: #9B9993; --rule: #36363A; --block: #ECEBE7; --block-text: #1B1B1D; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 15px/1.4 var(--sans); }
+  /* The app takes the room the window has left between the bar and the key list, and draws at that
+     size (the app follows the canvas's size on the page; see Sdl2Platform::follow_page_size). */
+  .page { display: flex; flex-direction: column; height: 100vh; height: 100dvh; }
+  .bar { display: flex; align-items: center; gap: 16px; height: 52px; padding: 0 16px; flex: none;
+    border-bottom: 2px solid var(--text); font: 700 20px/1 var(--cond); letter-spacing: 0.06em; }
+  .bar a { color: inherit; text-decoration: none; }
+  .bar a:hover { text-decoration: underline; text-underline-offset: 3px; }
+  .bar .where { color: var(--dim); }
+  main { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 14px 16px 12px; min-height: 0; }
+  .stage { position: relative; flex: 1 1 auto; width: min(100%, 1440px); min-height: 320px; max-height: 960px; }
+  #canvas { position: absolute; inset: 0; width: 100% !important; height: 100% !important; display: block; outline: none; }
+  #start { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    background: rgba(27, 27, 29, 0.5); border: 0; cursor: pointer; }
+  #start span { background: var(--block); color: var(--block-text); padding: 14px 22px 13px; font: 700 24px/1 var(--cond);
+    letter-spacing: 0.1em; box-shadow: 6px 6px 0 #E58A55; }
+  #start[hidden] { display: none; }
+  #status { color: var(--dim); min-height: 1.4em; max-width: 1440px; text-align: center; }
+  .trace { font: 12px/1.4 ui-monospace, Menlo, monospace; white-space: pre-wrap; user-select: all; text-align: left; }
+  .keys { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px 16px; color: var(--dim); max-width: 1440px;
+    font: 700 16px/1 var(--cond); letter-spacing: 0.06em; text-transform: uppercase; }
+  .keys span { display: inline-flex; align-items: center; gap: 4px; }
+  .note { color: var(--dim); font-size: 13px; text-align: center; }
+  kbd { display: inline-flex; align-items: center; justify-content: center; min-width: 1.7em; height: 1.5em; padding: 0 0.35em;
+    background: var(--block); color: var(--block-text); border-radius: 2px; font: 700 15px/1 var(--cond); }
+</style>
+</head>
+<body>
+<div class="page">
+  <header class="bar">
+    <a href="../">← TWILL STUDIO</a>
+    <span class="where">PLAY IN YOUR BROWSER</span>
+  </header>
+  <main>
+    <div class="stage">
+      <canvas id="canvas" tabindex="0" oncontextmenu="event.preventDefault()"></canvas>
+      <button id="start" hidden><span>CLICK TO PLAY</span></button>
+    </div>
+    <div id="status">Loading…</div>
+    <div class="keys">
+      <span><kbd>←↑↓→</kbd>move</span>
+      <span><kbd>X</kbd>A</span><span><kbd>Z</kbd>B</span><span><kbd>S</kbd>X</span><span><kbd>A</kbd>Y</span>
+      <span><kbd>Q</kbd><kbd>W</kbd>L1 / R1</span><span><kbd>1</kbd><kbd>2</kbd>L2 / R2</span>
+      <span><kbd>Enter</kbd>Start</span><span><kbd>Tab</kbd>Select</span><span><kbd>Esc</kbd>Menu</span>
+    </div>
+    <div class="note">A game controller works too. Your songs are kept in this browser.</div>
+  </main>
+</div>
+<script>
+  // The build these files belong to; tools/make-site.sh fills it in, so a browser can't pair a cached
+  // twill.wasm from one build with twill.js from another. Left as is, it's a local build.
+  var TWILL_BUILD = '@TWILL_BUILD@';
+  var TWILL_STAMP = TWILL_BUILD.charAt(0) === '@' ? '' : '?v=' + TWILL_BUILD;
+
+  // Browsers start audio suspended until the page is clicked or a key pressed. Keep every audio
+  // context the app makes so the first click or key can start them.
+  (function () {
+    var AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    var made = [];
+    function Tracked(options) { var c = new AC(options); made.push(c); return c; }
+    Tracked.prototype = AC.prototype;
+    window.AudioContext = Tracked;
+    window.webkitAudioContext = Tracked;
+    window.twillResumeAudio = function () {
+      made.forEach(function (c) { if (c.state !== 'running') c.resume(); });
+    };
+  })();
+
+  var canvas = document.getElementById('canvas');
+  var start = document.getElementById('start');
+  var statusEl = document.getElementById('status');
+  function begin() {
+    start.hidden = true;
+    window.twillResumeAudio && window.twillResumeAudio();
+    canvas.focus();
+  }
+  start.addEventListener('click', begin);
+  canvas.addEventListener('pointerdown', begin);
+  window.addEventListener('keydown', function () { window.twillResumeAudio && window.twillResumeAudio(); });
+
+  var Module = {
+    canvas: canvas,
+    locateFile: function (path, prefix) { return prefix + path + TWILL_STAMP; },
+    print: function (t) { console.log(t); },
+    printErr: function (t) { console.log(t); },
+    setStatus: function (t) {
+      statusEl.textContent = t ? t.replace(/\(\d+\/\d+\)/, '') : '';
+    },
+    onRuntimeInitialized: function () {
+      statusEl.textContent = '';
+      start.hidden = false;
+    },
+    twillStopped: function () {
+      statusEl.textContent = 'Twill Studio has stopped. Reload the page to start it again.';
+    },
+  };
+  // Show what went wrong, so a report can say.
+  function failed(what) {
+    statusEl.textContent = 'Something went wrong (' + what + '). Reload the page to try again.';
+  }
+  window.addEventListener('error', function (e) {
+    failed((e.message || 'error') + (e.filename ? ' at ' + e.filename.split('/').pop() + ':' + e.lineno : ''));
+    // Where it happened, for a bug report: the first few calls, by function name.
+    var stack = e.error && e.error.stack ? String(e.error.stack).split('\n').slice(1, 9) : [];
+    if (stack.length) {
+      var pre = document.createElement('pre');
+      pre.className = 'trace';
+      pre.textContent = stack.map(function (l) { return l.trim(); }).join('\n');
+      statusEl.appendChild(pre);
+    }
+  });
+  window.addEventListener('unhandledrejection', function (e) {
+    failed(String(e.reason && e.reason.message || e.reason));
+  });
+  Module.onAbort = function (what) { failed(String(what)); };
+</script>
+{{{ SCRIPT }}}
+</body>
+</html>

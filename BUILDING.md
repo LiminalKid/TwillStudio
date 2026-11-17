@@ -24,6 +24,16 @@ WAV renders to `renders/`, and the factory drum kit (built into the app from `as
 For PortMaster, `tools/make-portmaster-zip.sh` packages that build as `build/portmaster/twill.zip`
 (drop it in PortMaster's autoinstall folder).
 
+**Web** (Emscripten: `brew install emscripten`):
+
+    emcmake cmake -S . -B build/web -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build build/web
+    cd build/web && python3 -m http.server 8000   # then open http://localhost:8000/twill.html
+
+Browsers load WebAssembly only from a server, not from a file. The page around the app is
+`web/shell.html`; `web/pre.js` keeps the app's files in the browser's IndexedDB. If Emscripten
+complains about its Python, set `EMSDK_PYTHON` to Python 3.10 or later; if it can't write its
+cache, set `EM_CACHE` to a folder you own.
+
 ## Test hooks
 
 - `TWILL_SCREENSHOT=frame.ppm` saves a frame after about a second and quits.
@@ -58,7 +68,20 @@ GitHub's AArch64 Linux machines for every push to `main`. A version tag publishe
 3. The workflow checks the tag matches the version, builds, tests, and publishes "Twill Studio x.y.z"
    with `twill.zip` (the PortMaster package) attached.
 
+## The website
+
+`site/` holds the landing page; `tools/make-site.sh` puts it together with the fonts, the logo and
+the web build (as `play/`) in `build/site`:
+
+    tools/make-site.sh
+    cd build/site && python3 -m http.server 8000   # then open http://localhost:8000/
+
+`.github/workflows/pages.yml` does the same on GitHub for every push to `main`, runs the web build's
+tests under Node, and publishes the result with GitHub Pages. The screenshots in
+`site/images/screens/` are the app's own frames at 1024 x 768, in both themes.
+
 ## The logo
 
 `tools/make-logo.py` (needs Pillow) draws the logo and writes the launch splash's pixels
-(`src/app/gen/logo.cpp`), PortMaster's cover and the images in `Docs/images/logo/`.
+(`src/app/gen/logo.cpp`), PortMaster's cover, the images in `Docs/images/logo/` and the website's
+copy of its pixels (`site/logo.js`).

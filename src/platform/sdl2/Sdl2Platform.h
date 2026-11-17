@@ -56,6 +56,7 @@ class Sdl2Platform : public Platform {
  private:
   static void sdl_audio_callback(void* user, Uint8* stream, int len);
   void open_controller(int device_index);
+  void follow_page_size();
   void update_size();
   bool pad_map_from_frontend(const char* joystick_name);
   uint32_t read_pad() const;

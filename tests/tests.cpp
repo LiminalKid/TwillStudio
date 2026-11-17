@@ -399,6 +399,9 @@ void test_undo_redo() {
 
 void test_snapshot_handoff_under_load() {
   // The UI thread edits and submits snapshots as fast as it can while the audio thread renders.
+#ifdef __EMSCRIPTEN__
+  return;  // the web build has one thread, so there is no hand-off to race
+#endif
   twill::Project p = make_project();
   twill::EditHistory h(p);
   twill::Engine e(16);
@@ -1310,6 +1313,9 @@ void test_midi_sender_timing() {
 
 // The sender's own thread, with audio rendered at real-time pace on another: every note goes out.
 void test_midi_sender_thread() {
+#ifdef __EMSCRIPTEN__
+  return;  // no threads in the web build (and no MIDI yet)
+#endif
   twill::Project p = make_project();
   p.tracks[0].instrument = twill::InstrumentType::MidiOut;
   p.clips[0].notes = {note_at(0, 60, Q / 8), note_at(Q / 4, 62, Q / 8)};  // 0 and 125 ms
