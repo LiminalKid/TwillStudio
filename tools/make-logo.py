@@ -34,7 +34,8 @@ LIGHT = {BG: 0xF5EFE1, PAPER: 0x151412, ORANGE: 0xE58A55, GREEN: 0x7DAE88}
 LIGHT_TEXTURE = 0xEFE8D7
 # Sizes for Docs/images/logo/: name, width, height, and how much of the image the logo may fill.
 SIZES = [("square-512", 512, 512, 0.75), ("square-1024", 1024, 1024, 0.75),
-         ("wide-1920x1080", 1920, 1080, 0.75), ("social-1280x640", 1280, 640, 0.8)]
+         ("wide-1920x1080", 1920, 1080, 0.75), ("social-1280x640", 1280, 640, 0.8),
+         ("cover-630x500", 630, 500, 0.8)]
 
 # The swatch, in cells (one cell = 2 logo pixels).
 THREAD, GAP, THREADS, FRINGE = 3, 1, 5, 5

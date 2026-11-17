@@ -8,7 +8,8 @@
 Twill is a portable groovebox with built-in synthesizer and sample instrument support. Songs are edited using a piano roll. It is being designed and coded on a TrimUI Brick Pro running KNULLI, but the goal is for it to work on any similar device via the PortMaster standard.
 
 **[Play it in your browser](https://liminalkid.github.io/TwillStudio/play/)**, or see
-[the website](https://liminalkid.github.io/TwillStudio/).
+[the website](https://liminalkid.github.io/TwillStudio/). It's also on
+[itch.io](https://liminalkid.itch.io/twill-studio).
 
 The design for this synth is in the [Docs/DESIGN.md](Docs/DESIGN.md) file.
 

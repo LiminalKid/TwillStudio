@@ -80,6 +80,10 @@ the web build (as `play/`) in `build/site`:
 tests under Node, and publishes the result with GitHub Pages. The screenshots in
 `site/images/screens/` are the app's own frames at 1024 x 768, in both themes.
 
+For itch.io, `tools/make-itch.sh` packs the web build on its own, with its fonts, as
+`build/twill-web-itch.zip`: upload it as an HTML file to be played in the browser (a 1024 x 768
+viewport works well). The page's cover is `Docs/images/logo/twill-logo-dark-cover-630x500.png`.
+
 ## The logo
 
 `tools/make-logo.py` (needs Pillow) draws the logo and writes the launch splash's pixels
