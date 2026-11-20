@@ -79,10 +79,11 @@ GitHub's AArch64 Linux machines for every push to `main`. A version tag publishe
 2. Tag that commit with the release notes as the tag's message, and push the tag:
    `git tag -a vx.y.z -m "notes"` then `git push origin vx.y.z`.
 3. The workflow checks the tag matches both versions, builds, tests, and publishes "Twill Studio x.y.z"
-   with `twill.zip` (the PortMaster package) and `TwillStudio.pak.zip` (the NextUI pak) attached.
+   with `twill.zip` (the PortMaster package), `TwillStudio.pak.zip` (the NextUI pak) and
+   `TwillStudio-TrimUI.zip` (for the TrimUI Brick's and Smart Pro's own menu) attached.
    The Pak Store picks the new version up from `pak.json` once the snapshot reaches GitHub's `main`.
 4. The same workflow then pushes the web version, `twill.zip` and the pak to itch.io with butler
-   (channels `web`, `portmaster` and `nextui-pak`), when the repository has the secret
+   (channels `web`, `portmaster`, `nextui-pak` and `trimui-stock`), when the repository has the secret
    `BUTLER_API_KEY`.
 
 ## The website

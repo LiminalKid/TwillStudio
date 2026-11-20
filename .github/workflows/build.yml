@@ -63,6 +63,7 @@ jobs:
         run: |
           tools/make-portmaster-zip.sh
           tools/make-nextui-pak.sh
+          tools/make-trimui-app.sh
 
       - uses: actions/upload-artifact@v4
         with:
@@ -73,6 +74,11 @@ jobs:
         with:
           name: twill-nextui
           path: build/nextui/TwillStudio.pak.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: twill-trimui
+          path: build/trimui/TwillStudio-TrimUI.zip
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
@@ -98,21 +104,26 @@ jobs:
         with:
           name: twill-nextui
 
+      - uses: actions/download-artifact@v4
+        with:
+          name: twill-trimui
+
       - name: Release
         env:
           GH_TOKEN: ${{ github.token }}
         # The notes are the tag's message. The checkout above fetches the tagged commit without the tag
         # itself, so fetch the tag. twill.zip is the name PortMaster installs it under;
-        # TwillStudio.pak.zip is pak.json's release_filename, which the Pak Store downloads.
+        # TwillStudio.pak.zip is pak.json's release_filename, which the Pak Store downloads;
+        # TwillStudio-TrimUI.zip is for the TrimUI Brick's and Smart Pro's own menu.
         run: |
           git fetch --force origin "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
           git tag -l --format='%(contents)' "$GITHUB_REF_NAME" > notes.md
           test -s notes.md || { echo "The tag has no message: use git tag -a"; exit 1; }
-          gh release create "$GITHUB_REF_NAME" twill.zip TwillStudio.pak.zip \
+          gh release create "$GITHUB_REF_NAME" twill.zip TwillStudio.pak.zip TwillStudio-TrimUI.zip \
             --title "Twill Studio ${GITHUB_REF_NAME#v}" --notes-file notes.md --verify-tag
 
   # On a version tag, also updates the itch.io page (liminalkid.itch.io/twill-studio) with butler,
-  # itch.io's uploader: the web version, played in the page, and the two handheld packages, each on
+  # itch.io's uploader: the web version, played in the page, and the three handheld packages, each on
   # its own channel so a new push replaces the last one. Needs the repository secret BUTLER_API_KEY
   # (an itch.io API key); without it the job does nothing. Running this workflow by hand (Actions >
   # Build > Run workflow) on main uploads main's build under CMakeLists.txt's version.
@@ -157,6 +168,11 @@ jobs:
         with:
           name: twill-nextui
 
+      - uses: actions/download-artifact@v4
+        if: env.BUTLER_API_KEY != ''
+        with:
+          name: twill-trimui
+
       - name: Push to itch.io
         if: env.BUTLER_API_KEY != ''
         run: |
@@ -167,3 +183,4 @@ jobs:
           "$B" push build/twill-web-itch.zip "$ITCH_GAME:web" --userversion "$V"
           "$B" push twill.zip "$ITCH_GAME:portmaster" --userversion "$V"
           "$B" push TwillStudio.pak.zip "$ITCH_GAME:nextui-pak" --userversion "$V"
+          "$B" push TwillStudio-TrimUI.zip "$ITCH_GAME:trimui-stock" --userversion "$V"
