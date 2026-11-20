@@ -81,6 +81,9 @@ GitHub's AArch64 Linux machines for every push to `main`. A version tag publishe
 3. The workflow checks the tag matches both versions, builds, tests, and publishes "Twill Studio x.y.z"
    with `twill.zip` (the PortMaster package) and `TwillStudio.pak.zip` (the NextUI pak) attached.
    The Pak Store picks the new version up from `pak.json` once the snapshot reaches GitHub's `main`.
+4. The same workflow then pushes the web version, `twill.zip` and the pak to itch.io with butler
+   (channels `web`, `portmaster` and `nextui-pak`), when the repository has the secret
+   `BUTLER_API_KEY`.
 
 ## The website
 
@@ -95,8 +98,8 @@ tests under Node, and publishes the result with GitHub Pages. The screenshots in
 `site/images/screens/` are the app's own frames at 1024 x 768, in both themes.
 
 For itch.io, `tools/make-itch.sh` packs the web build on its own, with its fonts, as
-`build/twill-web-itch.zip`: upload it as an HTML file to be played in the browser (a 1024 x 768
-viewport works well). The page's cover is `Docs/images/logo/twill-logo-dark-cover-630x500.png`.
+`build/twill-web-itch.zip`. Releases upload it themselves (above); on the itch.io page its upload is
+marked to be played in the browser, with a 1024 x 768 viewport. The page's cover is `Docs/images/logo/twill-logo-dark-cover-630x500.png`.
 
 ## The logo
 

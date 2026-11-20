@@ -110,3 +110,60 @@ jobs:
           test -s notes.md || { echo "The tag has no message: use git tag -a"; exit 1; }
           gh release create "$GITHUB_REF_NAME" twill.zip TwillStudio.pak.zip \
             --title "Twill Studio ${GITHUB_REF_NAME#v}" --notes-file notes.md --verify-tag
+
+  # On a version tag, also updates the itch.io page (liminalkid.itch.io/twill-studio) with butler,
+  # itch.io's uploader: the web version, played in the page, and the two handheld packages, each on
+  # its own channel so a new push replaces the last one. Needs the repository secret BUTLER_API_KEY
+  # (an itch.io API key); without it the job does nothing. Running this workflow by hand (Actions >
+  # Build > Run workflow) on main uploads main's build under CMakeLists.txt's version.
+  itch:
+    if: >-
+      always() && needs.build.result == 'success' && needs.release.result != 'failure' &&
+      (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch')
+    needs: [build, release]
+    runs-on: ubuntu-24.04
+    env:
+      BUTLER_API_KEY: ${{ secrets.BUTLER_API_KEY }}
+      EMSCRIPTEN_VERSION: 7.0.0  # as in pages.yml
+      ITCH_GAME: liminalkid/twill-studio
+    steps:
+      - uses: actions/checkout@v4
+        if: env.BUTLER_API_KEY != ''
+
+      - name: Emscripten
+        if: env.BUTLER_API_KEY != ''
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q ninja-build zip
+          git clone -q --depth 1 https://github.com/emscripten-core/emsdk.git "$RUNNER_TEMP/emsdk"
+          cd "$RUNNER_TEMP/emsdk"
+          ./emsdk install "$EMSCRIPTEN_VERSION"
+          ./emsdk activate "$EMSCRIPTEN_VERSION"
+
+      - name: Web version for itch.io
+        if: env.BUTLER_API_KEY != ''
+        run: |
+          source "$RUNNER_TEMP/emsdk/emsdk_env.sh"
+          emcmake cmake -S . -B build/web -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/web --target twill
+          tools/make-itch.sh
+
+      - uses: actions/download-artifact@v4
+        if: env.BUTLER_API_KEY != ''
+        with:
+          name: twill-portmaster
+
+      - uses: actions/download-artifact@v4
+        if: env.BUTLER_API_KEY != ''
+        with:
+          name: twill-nextui
+
+      - name: Push to itch.io
+        if: env.BUTLER_API_KEY != ''
+        run: |
+          curl -sSfL -o butler.zip https://broth.itch.zone/butler/linux-amd64/LATEST/archive/default
+          unzip -q butler.zip -d "$RUNNER_TEMP/butler" && chmod +x "$RUNNER_TEMP/butler/butler"
+          B="$RUNNER_TEMP/butler/butler"
+          V=$(sed -n 's/^project(TwillStudio VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)
+          "$B" push build/twill-web-itch.zip "$ITCH_GAME:web" --userversion "$V"
+          "$B" push twill.zip "$ITCH_GAME:portmaster" --userversion "$V"
+          "$B" push TwillStudio.pak.zip "$ITCH_GAME:nextui-pak" --userversion "$V"
