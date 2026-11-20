@@ -63,6 +63,13 @@ class Engine {
   float take_track_peak(int track) { return track < kMaxTracks ? track_peak_[track].exchange(0) : 0; }
   float take_master_peak() { return master_peak_.exchange(0); }
   float compressor_reduction_db() const { return comp_gr_.load(); }  // the master compressor's, now
+  // Audio load: the time a callback takes to make its block, as a share of the time the block lasts
+  // (1 = only just in time). Averaged over about a second; the highest since the last take; the
+  // highest ever; and how many callbacks took longer than their block lasts (each a dropout).
+  float load_average() const { return load_avg_.load(std::memory_order_relaxed); }
+  float take_load_peak() { return load_peak_.exchange(0); }
+  float load_highest() const { return load_max_.load(std::memory_order_relaxed); }
+  uint32_t late_blocks() const { return late_.load(std::memory_order_relaxed); }
   // Plays a note on a track now, whether or not the transport is running.
   void audition(int track, uint8_t pitch, float seconds);
   // Plays a sample as it is (the sample browser). The caller keeps it alive until it has finished
@@ -83,6 +90,8 @@ class Engine {
   };
   bool pop_midi_out(MidiEvent& e) { return midi_out_.pop(e); }
   void set_observer(Observer* o) { observer_ = o; }  // set before rendering starts
+  // Offline stems: no master EQ, compressor, level or limiter. Set before rendering starts.
+  void set_master_bypass(bool on) { master_bypass_ = on; }
 
   // Audio thread. Interleaved stereo.
   void render(float* out, int frames);
@@ -174,6 +183,9 @@ class Engine {
   std::atomic<float> track_peak_[kMaxTracks] = {};
   std::atomic<float> master_peak_{0};
   std::atomic<float> comp_gr_{0};
+  std::atomic<float> load_avg_{0}, load_peak_{0}, load_max_{0};
+  std::atomic<uint32_t> late_{0};
+  void render_block(float* out, int frames);
   Observer* observer_ = nullptr;
 
   // Audio thread.
@@ -188,6 +200,7 @@ class Engine {
   uint64_t clock_ = 0;         // samples rendered since start
   uint32_t rng_ = 0x2545F491;  // for note probability; fixed seed so renders repeat exactly
   std::unique_ptr<Effects> effects_;
+  bool master_bypass_ = false;
   const SampleData* preview_ = nullptr;
   int preview_pos_ = 0;
   // Automation: each track's lane values at the current block (none while stopped).

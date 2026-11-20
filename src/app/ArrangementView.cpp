@@ -93,11 +93,15 @@ void ArrangementView::open_track_settings(int track, int select_row) {
   App& app = app_;
   std::vector<InspectorField> fields;
   const InstrumentType instrument = app.project().tracks[size_t(track)].instrument;
+  // Name: Left/Right step through part names, A spells one out.
+  fields.push_back({"Name", [&app, track] { return app.project().tracks[size_t(track)].name; },
+                    [&app, track](int step, bool) { app.step_track_name(track, step); },
+                    [&app, track] { app.edit_track_name(track); }});
   fields.push_back({"Engine", [&app, track] { return std::string(App::sound_name(app.project().tracks[size_t(track)])); },
                     [this, &app, track, instrument](int step, bool) {
                       app.step_sound(track, step);
                       // Past the synth engines to the sampler (or back): its settings differ.
-                      if (app.project().tracks[size_t(track)].instrument != instrument) open_track_settings(track);
+                      if (app.project().tracks[size_t(track)].instrument != instrument) open_track_settings(track, 1);
                     }});
   if (instrument != InstrumentType::Macro)
     fields.push_back({"Sound settings", [] { return std::string("press A"); }, nullptr, [&app] {
@@ -107,6 +111,10 @@ void ArrangementView::open_track_settings(int track, int select_row) {
   for (const ParamInfo& info : macro_params()) {
     if (instrument != InstrumentType::Macro) break;
     if (info.id == kParamEngine) continue;
+    // The low-pass gate's settings do nothing while the ADSR is the amplifier.
+    if ((info.id == kParamDecay || info.id == kParamLpgColour) &&
+        app.project().tracks[size_t(track)].tone.amp_mode == 1)
+      continue;
     const ParamId id = info.id;
     const float span = info.max - info.min;
     fields.push_back({info.name,

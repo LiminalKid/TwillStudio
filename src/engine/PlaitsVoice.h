@@ -26,6 +26,9 @@ struct MacroParams {
   float morph_amount = 0;    // -1..1, internal envelope to morph
   bool use_lpg = true;       // true: each trigger runs the internal low-pass gate envelope
   float level = 1;           // used only when use_lpg is false (an external envelope drives it)
+  // Without the gate (the ADSR in charge): the ADSR's level, 0-1, which the FM, timbre and morph
+  // amounts then follow in place of the internal decay envelope.
+  float envelope = 0;
 };
 
 class PlaitsVoice {

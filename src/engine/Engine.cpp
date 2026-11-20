@@ -630,6 +630,21 @@ void Engine::update_modulators(Voice& v, const SnapTrack& t) {
 }
 
 void Engine::render(float* out, int frames) {
+  // Timed as a whole, so the load counts everything the callback does.
+  const auto t0 = std::chrono::steady_clock::now();
+  render_block(out, frames);
+  if (frames <= 0) return;
+  const double took = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  const float load = float(took * kSampleRate / frames);
+  const float a = 1.0f - std::exp(-float(frames) / kSampleRate);  // about a second
+  load_avg_.store(load_avg_.load(std::memory_order_relaxed) + (load - load_avg_.load(std::memory_order_relaxed)) * a,
+                  std::memory_order_relaxed);
+  if (load > load_peak_.load(std::memory_order_relaxed)) load_peak_.store(load, std::memory_order_relaxed);
+  if (load > load_max_.load(std::memory_order_relaxed)) load_max_.store(load, std::memory_order_relaxed);
+  if (load > 1) late_.fetch_add(1, std::memory_order_relaxed);
+}
+
+void Engine::render_block(float* out, int frames) {
   Command cmd;
   Snapshot* s;
   while (incoming_.pop(s)) {
@@ -814,6 +829,7 @@ void Engine::render(float* out, int frames) {
         // a plain amplifier: the gate's own slow closing would otherwise smooth the envelope away
         // (a retriggered note's attack, for one, would be inaudible).
         p.level = 1;
+        p.envelope = env_to;  // what the FM, timbre and morph amounts follow
         v.params = p;
         v.synth.render(p, main, aux, n);
         for (int i = 0; i < n; ++i) {
@@ -897,9 +913,11 @@ void Engine::render(float* out, int frames) {
     // Master, a grid block at a time so automation lands the same at any callback size: EQ
     // (bypassed when flat), compressor, then level and the limiter.
     float* block = out + 2 * pos;
-    effects_->master_eq(mix_, block, n);
-    effects_->master_compressor(mix_, block, n);
-    effects_->master_out(mix_, block, n);
+    if (!master_bypass_) {
+      effects_->master_eq(mix_, block, n);
+      effects_->master_compressor(mix_, block, n);
+      effects_->master_out(mix_, block, n);
+    }
     for (int i = 0; i < 2 * n; ++i) master_peak = std::max(master_peak, std::fabs(block[i]));
     clock_ += uint64_t(n);
     pos += n;

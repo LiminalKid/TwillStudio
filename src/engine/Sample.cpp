@@ -205,4 +205,26 @@ std::vector<uint8_t> encode_wav16(const float* stereo, int frames, int sample_ra
   return out;
 }
 
+std::vector<uint8_t> encode_wav_float(const float* stereo, int frames, int sample_rate) {
+  std::vector<uint8_t> out;
+  auto u32 = [&](uint32_t v) { for (int i = 0; i < 4; ++i) out.push_back(uint8_t(v >> (8 * i))); };
+  auto u16 = [&](uint16_t v) { out.push_back(uint8_t(v)); out.push_back(uint8_t(v >> 8)); };
+  const uint32_t bytes = uint32_t(frames) * 8;
+  out.insert(out.end(), {'R', 'I', 'F', 'F'});
+  u32(4 + 26 + 12 + 8 + bytes);
+  // WAVE_FORMAT_IEEE_FLOAT: an 18-byte fmt chunk and a fact chunk, as the format asks.
+  out.insert(out.end(), {'W', 'A', 'V', 'E', 'f', 'm', 't', ' '});
+  u32(18); u16(3); u16(2); u32(uint32_t(sample_rate)); u32(uint32_t(sample_rate) * 8); u16(8); u16(32); u16(0);
+  out.insert(out.end(), {'f', 'a', 'c', 't'});
+  u32(4); u32(uint32_t(frames));
+  out.insert(out.end(), {'d', 'a', 't', 'a'});
+  u32(bytes);
+  for (int i = 0; i < frames * 2; ++i) {
+    uint32_t bits;
+    std::memcpy(&bits, &stereo[i], 4);
+    u32(bits);
+  }
+  return out;
+}
+
 }  // namespace twill

@@ -1,0 +1,7 @@
+{
+"label":"Twill Studio",
+"icon":"",
+"icontop":"icon.png",
+"launch":"launch.sh",
+"description":"A piano-roll groovebox"
+}

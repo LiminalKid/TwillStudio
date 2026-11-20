@@ -70,6 +70,22 @@ void PlaitsVoice::render_block(const MacroParams& p) {
   rendered_high_ = mod.trigger > 0;
   mod.level_patched = !p.use_lpg;
   mod.level = p.level;
+  if (!p.use_lpg) {
+    // The ADSR in place of the internal envelope, as if patched into the FM, timbre and morph
+    // inputs; the frequency one curved and scaled like the internal envelope (squared, 48 semitones).
+    // Two engines use those amounts for something else, kept as they are: speech's FM and morph
+    // amounts (prosody and speed) and chiptune's timbre amount (its own envelope's shape).
+    const float e = p.envelope;
+    if (p.engine != 15) {
+      mod.frequency_patched = mod.morph_patched = true;
+      mod.frequency = e * e * 48.0f;
+      mod.morph = e;
+    }
+    if (p.engine != 7) {
+      mod.timbre_patched = true;
+      mod.timbre = e;
+    }
+  }
 
   plaits::Voice::Frame frames[kBlockSize];
   voice_->Render(patch, mod, frames, kBlockSize);

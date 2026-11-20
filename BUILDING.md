@@ -24,6 +24,18 @@ WAV renders to `renders/`, and the factory drum kit (built into the app from `as
 For PortMaster, `tools/make-portmaster-zip.sh` packages that build as `build/portmaster/twill.zip`
 (drop it in PortMaster's autoinstall folder).
 
+For NextUI, `tools/make-nextui-pak.sh` packages the same build as a Tools pak,
+`build/nextui/TwillStudio.pak.zip`: unzip it into `Tools/tg5040/Twill Studio.pak/` on the SD card,
+or install it from the Pak Store, which reads `pak.json` at the top of this repository. The pak's
+`launch.sh` (in `packaging/nextui/`) keeps songs in `TwillStudio/` at the top of the card, uses the
+device's own SDL2 from `/usr/trimui/lib`, maps the built-in pad, and runs the CPU at full speed
+while Twill is open.
+
+For the TrimUI Brick's stock menu, `tools/make-trimui-app.sh` packages the same build and launcher
+as `build/trimui/TwillStudio-TrimUI.zip`, holding `Apps/Twill/` (with the menu's `config.json` and
+icon from `packaging/trimui/`): unzip it at the top of the SD card and Twill Studio appears under
+Apps. Songs go in the same `TwillStudio/` folder as with NextUI.
+
 **Web** (Emscripten: `brew install emscripten`):
 
     emcmake cmake -S . -B build/web -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build build/web
@@ -62,11 +74,13 @@ Both run over SSH on a handheld: copy them from `build/knulli/` to the device's 
 GitHub Actions (`.github/workflows/build.yml`) builds the handheld version and runs the tests on
 GitHub's AArch64 Linux machines for every push to `main`. A version tag publishes a release:
 
-1. Set the version in `CMakeLists.txt` (`project(TwillStudio VERSION x.y.z)`) and push it.
+1. Set the version in `CMakeLists.txt` (`project(TwillStudio VERSION x.y.z)`) and in `pak.json`
+   (`"version": "vx.y.z"`), and push it.
 2. Tag that commit with the release notes as the tag's message, and push the tag:
    `git tag -a vx.y.z -m "notes"` then `git push origin vx.y.z`.
-3. The workflow checks the tag matches the version, builds, tests, and publishes "Twill Studio x.y.z"
-   with `twill.zip` (the PortMaster package) attached.
+3. The workflow checks the tag matches both versions, builds, tests, and publishes "Twill Studio x.y.z"
+   with `twill.zip` (the PortMaster package) and `TwillStudio.pak.zip` (the NextUI pak) attached.
+   The Pak Store picks the new version up from `pak.json` once the snapshot reaches GitHub's `main`.
 
 ## The website
 

@@ -326,7 +326,7 @@ void EditHistory::move_track(int from, int to) {
 void EditHistory::clear_track(int track) {
   if (track < 0 || track >= int(p_.tracks.size())) return;
   Track fresh;
-  fresh.name = "Track " + std::to_string(track + 1);
+  fresh.name = "Synth";  // a fresh track is a synth, wherever it sits
   fresh.colour = p_.tracks[size_t(track)].colour;
   begin_group();
   set_arrangement(track, {});

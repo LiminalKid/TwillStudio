@@ -23,6 +23,7 @@
 #include "app/MidiSender.h"
 #include "engine/Effects.h"
 #include "engine/Engine.h"
+#include "engine/PlaitsVoice.h"
 #include "engine/Sample.h"
 #include "model/Edit.h"
 #include "model/ProjectFile.h"
@@ -1908,8 +1909,9 @@ void test_ui_move_and_clear_track() {
   ui.tap(twill::kLeft);  // Kick's header
   ui.tap(twill::kDown);  // Snare's
   CHECK(ui.app.track() == 1);
-  ui.tap(twill::kX);     // Snare's settings
-  ui.tap(twill::kUp);    // from the top round to the last rows: Clear track,
+  ui.tap(twill::kX);     // Snare's settings, on Engine
+  ui.tap(twill::kUp);    // Name,
+  ui.tap(twill::kUp);    // then from the top round to the last rows: Clear track,
   ui.tap(twill::kUp);    // then Position
   const uint32_t colour = ui.app.project().tracks[1].colour;
   ui.tap(twill::kRight);  // one place down
@@ -1926,7 +1928,7 @@ void test_ui_move_and_clear_track() {
   ui.tap(twill::kA);
   const twill::Track& t = ui.app.project().tracks[size_t(last)];
   CHECK(t.arrangement.empty());
-  CHECK(t.name == "Track " + std::to_string(last + 1));
+  CHECK(t.name == "Synth");
   CHECK(t.colour == colour);
   // Clearing is one undo step, and so is each move.
   CHECK(ui.app.history().undo());
@@ -2121,12 +2123,81 @@ void test_ui_project_tempo() {
   CHECK(ui.app.project().tempo == tempo + 11);
 }
 
+// With the ADSR as the amplifier, the FM, timbre and morph amounts follow the ADSR, not the
+// internal decay envelope: Decay changes nothing, and the ADSR's level does.
+void test_adsr_drives_modulation_amounts() {
+  auto render = [](float decay, float envelope) {
+    twill::PlaitsVoice::seed_random(1);
+    twill::PlaitsVoice v;
+    twill::MacroParams p;
+    p.engine = 8;
+    p.note = 48;
+    p.decay = decay;
+    p.timbre_amount = p.morph_amount = 0.8f;
+    p.fm_amount = 0.4f;
+    p.use_lpg = false;
+    p.envelope = envelope;
+    std::vector<float> out(24000), aux(24000);
+    v.note_on();
+    v.render(p, out.data(), aux.data(), int(out.size()));
+    return out;
+  };
+  CHECK(render(0.1f, 0.7f) == render(0.9f, 0.7f));
+  CHECK(render(0.5f, 0.2f) != render(0.5f, 0.9f));
+}
+
+// The audio load: measured around every callback, as a share of the time its block lasts.
+void test_audio_load() {
+  twill::NullPlatform platform(1024, 768, 2);
+  twill::App app(platform);
+  app.start();
+  CHECK(app.engine().load_highest() == 0);
+  std::vector<float> buf(2 * 512);
+  for (int i = 0; i < 20; ++i) app.engine().render(buf.data(), 512);
+  const float avg = app.engine().load_average(), peak = app.engine().take_load_peak();
+  CHECK(avg > 0 && peak > 0 && peak <= app.engine().load_highest());
+  CHECK(app.engine().take_load_peak() == 0);  // taking it starts it again
+  CHECK(app.load_text().find("%, peaks ") != std::string::npos);
+  app.stop();
+}
+
+void test_ui_track_names() {
+  UiDriver ui;
+  ui.tap(twill::kLeft);  // Kick's header
+  ui.tap(twill::kX);     // its settings, on Engine
+  ui.tap(twill::kUp);    // Name
+  ui.tap(twill::kRight);  // the next part name after Kick
+  CHECK(ui.app.project().tracks[0].name == "Snare");
+  ui.tap(twill::kB, twill::kSelect);  // a rename is undoable
+  CHECK(ui.app.project().tracks[0].name == "Kick");
+  ui.tap(twill::kA);  // spell one out
+  CHECK(!ui.app.inspector_open());
+  ui.tap(twill::kY);  // the cursor is past the end: nothing to delete
+  ui.tap(twill::kLeft);
+  ui.tap(twill::kY);  // "Kic"
+  ui.tap(twill::kA);  // done: back in the panel
+  CHECK(ui.app.project().tracks[0].name == "Kic");
+  CHECK(ui.app.inspector_open());
+  ui.tap(twill::kA);
+  ui.tap(twill::kX);  // a part name in place of the draft
+  ui.tap(twill::kB);  // cancel keeps the old name
+  CHECK(ui.app.project().tracks[0].name == "Kic");
+  ui.tap(twill::kA);
+  ui.tap(twill::kX);  // "Kic" isn't a part name, so the list starts again: Drums
+  ui.tap(twill::kA);
+  CHECK(ui.app.project().tracks[0].name == "Drums");
+  // Part names match whatever their case, and the list goes round.
+  CHECK(twill::App::next_role_name("bass", 1) == "Sub");
+  CHECK(twill::App::next_role_name("Drums", -1) == "FX");
+}
+
 void test_ui_inspector_scrolls() {
   UiDriver ui;
   ui.tap(twill::kLeft);  // Kick's header
   ui.tap(twill::kX);     // its settings: more fields than fit at 1024 x 768
   CHECK(ui.app.inspector_open());
   CHECK(ui.app.inspector_scroll() == 0);
+  ui.tap(twill::kUp);    // Name, the first field
   ui.tap(twill::kUp);    // wraps to the last field, which scrolls into view
   CHECK(ui.app.inspector_scroll() > 0);
   ui.tap(twill::kDown);  // back to the first
@@ -2202,6 +2273,26 @@ void test_ui_project_files() {
     const double seconds = (it->second.size() - 44) / 4.0 / 48000;
     CHECK_MSG(std::fabs(seconds - (32 * 60.0 / 112 + 3)) < 0.01, "render is %.2f s", seconds);
   }
+
+  // Stems: one 32-bit float WAV per track that plays, all as long as the song's render. A muted
+  // track has none.
+  auto& tracks = ui.app.project().tracks;
+  tracks[1].mute = true;
+  int expected = 0;
+  for (const twill::Track& t : tracks) expected += !t.mute && !t.arrangement.empty();
+  CHECK(ui.app.render_stems() == expected);
+  int found = 0;
+  for (const auto& f : ui.platform.files) {
+    if (f.first.rfind("renders/Eemo stems/", 0) != 0) continue;
+    ++found;
+    const std::vector<uint8_t>& b = f.second;
+    CHECK(b.size() > 58 && b[20] == 3 && b[34] == 32);  // IEEE float, 32 bits
+    const double seconds = (b.size() - 58) / 8.0 / 48000;
+    CHECK_MSG(std::fabs(seconds - (32 * 60.0 / 112 + 3)) < 0.01, "stem %s is %.2f s", f.first.c_str(), seconds);
+  }
+  CHECK(found == expected && expected > 0);
+  CHECK(ui.platform.files.count("renders/Eemo stems/01 " + tracks[0].name + ".wav") == 1);
+  CHECK(ui.platform.files.count("renders/Eemo stems/02 " + tracks[1].name + ".wav") == 0);
 }
 
 void test_ui_midi_record_and_clock() {
@@ -2349,6 +2440,8 @@ int main(int argc, char** argv) {
       {"midi_sender_timing", test_midi_sender_timing},
       {"midi_sender_thread", test_midi_sender_thread},
       {"live_notes", test_live_notes},
+      {"audio_load", test_audio_load},
+      {"adsr_drives_modulation_amounts", test_adsr_drives_modulation_amounts},
       {"ui_roll_add_move_resize_delete_undo", test_ui_roll_add_move_resize_delete_undo},
       {"ui_roll_fine_nudge", test_ui_roll_fine_nudge},
       {"ui_copy_paste", test_ui_copy_paste},
@@ -2370,6 +2463,7 @@ int main(int argc, char** argv) {
       {"ui_menu_opens_project", test_ui_menu_opens_project},
       {"ui_dark_mode_setting", test_ui_dark_mode_setting},
       {"ui_move_and_clear_track", test_ui_move_and_clear_track},
+      {"ui_track_names", test_ui_track_names},
       {"ui_add_note_on_midi_out_track", test_ui_add_note_on_midi_out_track},
       {"ui_keyboard_into_midi_out_track", test_ui_keyboard_into_midi_out_track},
       {"ui_inspector_scrolls", test_ui_inspector_scrolls},

@@ -72,6 +72,8 @@ bool App::start() {
 }
 
 void App::stop() {
+  // For anyone reporting dropouts: the log says how close the audio came to its limit.
+  p_.log("audio load: highest %.0f%%, %u blocks late", engine_->load_highest() * 100, unsigned(engine_->late_blocks()));
   autosave(true);
   p_.audio_close();
   midi_sender_.reset();
@@ -249,11 +251,28 @@ void App::open_about() {
   fields.push_back(row("Built", TWILL_BUILD_DATE));
   const AudioInfo ai = p_.audio_info();
   fields.push_back(row("Audio", std::to_string(ai.sample_rate) + " Hz, " + std::to_string(ai.block_frames) + " frames"));
+  // Live: how long the audio takes to make, as a share of the time it has.
+  fields.push_back({"Audio load", [this] { return load_text(); }, nullptr});
+  fields.push_back({"Since start", [this] {
+                      char b[48];
+                      std::snprintf(b, sizeof b, "highest %.0f%%, %u late", engine_->load_highest() * 100,
+                                    unsigned(engine_->late_blocks()));
+                      return std::string(b);
+                    }, nullptr});
   fields.push_back(row("Screen", std::to_string(size_.w) + " x " + std::to_string(size_.h)));
   // Free software: the GPL asks an interactive program to say so, and that there's no warranty.
   fields.push_back(row("License", "GPL-3.0, no warranty"));
   fields.push_back(row("Factory kit", "CC0, public domain"));
   open_inspector("About Twill Studio", std::move(fields));
+  inspector_live_ = true;
+}
+
+std::string App::load_text() {
+  float peak = 0;
+  for (float p : load_peaks_) peak = std::max(peak, p);
+  char b[40];
+  std::snprintf(b, sizeof b, "%.0f%%, peaks %.0f%%", engine_->load_average() * 100, peak * 100);
+  return b;
 }
 
 void App::open_controls() {
@@ -322,6 +341,7 @@ void App::add_project_fields(std::vector<InspectorField>& fields) {
   fields.push_back({"Name", [this] { return project_.name; }, nullptr, [this] {
                       close_inspector();
                       name_edit_ = true;
+                      name_track_ = -1;
                       name_draft_ = project_.name;
                       name_cursor_ = int(name_draft_.size());
                       invalidate_all();
@@ -375,6 +395,12 @@ void App::add_project_fields(std::vector<InspectorField>& fields) {
   fields.push_back({"Render to WAV", [] { return std::string("press A"); }, nullptr, [this] {
                       message("Rendering...");
                       if (render_song_to_wav()) message("Saved renders/" + file_safe(project_.name) + ".wav");
+                    }});
+  fields.push_back({"Render stems", [] { return std::string("press A"); }, nullptr, [this] {
+                      message("Rendering stems...");
+                      const int n = render_stems();
+                      if (n > 0) message("Saved " + std::to_string(n) + " stems to renders/" + file_safe(project_.name) + " stems");
+                      else message("No tracks to render");
                     }});
 }
 
@@ -436,14 +462,16 @@ void App::new_project() {
   Project p;
   p.name = auto_names_ ? fresh_song_name() : "Untitled";
   p.loop = false;
-  // Track 1 is the factory drum kit; the rest are macro oscillators set up for parts: virtual analog
-  // (bass), wavetable, formant, plucked string, string machine, two-op FM, analog + filter.
+  // Track 1 is the factory drum kit; the rest are macro oscillators set up for parts, and named for
+  // them: virtual analog (bass), wavetable (chords), formant (lead), plucked string, string machine
+  // (pad), two-op FM (keys), analog + filter.
   p.tracks.push_back(factory_kit_track());
   const int engines[7] = {8, 13, 11, 19, 6, 10, 0};
   const int voices[7] = {1, 3, 1, 3, 3, 3, 1};
+  const char* names[7] = {"Bass", "Chords", "Lead", "Pluck", "Pad", "Keys", "Synth"};
   for (int i = 0; i < 7 && i + 1 < p_.max_tracks(); ++i) {
     Track t;
-    t.name = "Track " + std::to_string(i + 2);
+    t.name = names[i];
     t.colour = uint32_t(i + 1);
     t.macro.engine = engines[i];
     t.voices = voices[i];
@@ -452,12 +480,13 @@ void App::new_project() {
   replace_project(std::move(p));
 }
 
-bool App::render_song_to_wav() {
+std::vector<float> App::render_offline(const Project& song, bool master) {
   // Offline, on a separate engine: the whole song once, plus a few seconds for tails.
   const Tick end = std::max<Tick>(4 * kTicksPerQuarter, project_.song_end());
-  Project p = project_;
+  Project p = song;
   p.loop = false;
   Engine e(std::max(16, p_.max_voices()));
+  e.set_master_bypass(!master);
   e.submit(build_snapshot(p, p_.max_tracks(), 1, [this](const std::string& path) { return load_sample(path).get(); }));
   e.locate(0);
   e.play();
@@ -465,6 +494,41 @@ bool App::render_song_to_wav() {
   const int frames = int(seconds * Engine::kSampleRate);
   std::vector<float> out(size_t(frames) * 2);
   for (int pos = 0; pos < frames; pos += 256) e.render(&out[size_t(pos) * 2], std::min(256, frames - pos));
+  return out;
+}
+
+int App::render_stems() {
+  const int n = std::min(int(project_.tracks.size()), p_.max_tracks());
+  bool any_solo = false;
+  for (int i = 0; i < n; ++i) any_solo |= project_.tracks[size_t(i)].solo;
+  const std::string folder = std::string(kRendersFolder) + "/" + file_safe(project_.name) + " stems";
+  int written = 0;
+  for (int k = 0; k < n; ++k) {
+    const Track& t = project_.tracks[size_t(k)];
+    // Only what the mix plays: not muted (or left out by a solo), with clips, and making sound.
+    if (t.mute || (any_solo && !t.solo) || t.arrangement.empty() || t.instrument == InstrumentType::MidiOut) continue;
+    Project p = project_;
+    for (int i = 0; i < int(p.tracks.size()); ++i) {
+      p.tracks[size_t(i)].solo = false;
+      p.tracks[size_t(i)].mute = i != k;
+    }
+    const std::vector<float> out = render_offline(p, false);
+    if (written == 0) p_.make_dir(folder.c_str());
+    char num[8];
+    std::snprintf(num, sizeof num, "%02d ", k + 1);
+    const std::string path = folder + "/" + num + file_safe(t.name) + ".wav";
+    if (!p_.write_file(path.c_str(), encode_wav_float(out.data(), int(out.size() / 2)))) {
+      message("Couldn't write " + path);
+      return written;
+    }
+    ++written;
+  }
+  return written;
+}
+
+bool App::render_song_to_wav() {
+  const std::vector<float> out = render_offline(project_, true);
+  const int frames = int(out.size() / 2);
   p_.make_dir(kRendersFolder);
   const std::string path = std::string(kRendersFolder) + "/" + file_safe(project_.name) + ".wav";
   if (!p_.write_file(path.c_str(), encode_wav16(out.data(), frames))) {
@@ -601,8 +665,11 @@ void App::handle_name_edit() {
   if (in.pressed_or_repeat(kRight) && name_cursor_ < 31) ++name_cursor_;
   if (in.pressed_or_repeat(kLeft) && name_cursor_ > 0) --name_cursor_;
   if (in.pressed(kY)) name_draft_.erase(size_t(name_cursor_), 1);  // delete the character
-  if (in.pressed(kX)) {  // a made-up name in place of this one
-    name_draft_ = fresh_song_name();
+  const bool track = name_track_ >= 0 && name_track_ < int(project_.tracks.size());
+  if (in.pressed(kX)) {  // a song: a made-up name; a track: the next part name
+    std::string draft = name_draft_;
+    while (!draft.empty() && draft.back() == ' ') draft.pop_back();
+    name_draft_ = track ? next_role_name(draft, 1) : fresh_song_name();
     name_cursor_ = int(name_draft_.size());
   }
   if (in.pressed(kA) || in.pressed(kB)) {
@@ -610,19 +677,67 @@ void App::handle_name_edit() {
       std::string name = name_draft_;
       while (!name.empty() && name.back() == ' ') name.pop_back();
       while (!name.empty() && name.front() == ' ') name.erase(name.begin());
-      if (!name.empty()) project_.name = name;  // a name isn't an undoable edit
-      ++transport_changes_;
-      last_edit_us_ = p_.micros();
-      saved_revision_ = ~0ull;  // autosave the new name
+      if (!name.empty() && track) {
+        Track t = project_.tracks[size_t(name_track_)];
+        if (t.name != name) {
+          t.name = name;
+          history_.change_track(name_track_, t);
+        }
+      } else if (!name.empty()) {
+        project_.name = name;  // a song's name isn't an undoable edit
+        ++transport_changes_;
+        last_edit_us_ = p_.micros();
+        saved_revision_ = ~0ull;  // autosave the new name
+      }
     }
     name_edit_ = false;
+    if (track) arrangement_->open_track_settings(name_track_, 0);  // back to the panel, on the Name row
   }
+  invalidate_all();
+}
+
+const std::vector<std::string>& App::role_names() {
+  static const std::vector<std::string> names = {
+      "Drums", "Kick",  "Snare", "Hats",    "Perc",  "Bass",  "Sub",   "Chords", "Keys", "Piano",
+      "Organ", "Pad",   "Strings", "Lead",  "Pluck", "Arp",   "Rep",   "Bells",  "Brass", "Vox",
+      "Choir",
+      "Synth", "Drone", "Noise", "FX",
+  };
+  return names;
+}
+
+std::string App::next_role_name(const std::string& name, int step) {
+  const auto& names = role_names();
+  const int n = int(names.size());
+  int at = -1;
+  for (int i = 0; i < n; ++i)
+    if (caps(names[size_t(i)]) == caps(name)) at = i;
+  // A name not in the list starts the list from its beginning (or, going back, its end).
+  const int next = at < 0 ? (step > 0 ? 0 : n - 1) : (at + step + n) % n;
+  return names[size_t(next)];
+}
+
+void App::step_track_name(int track, int step) {
+  if (track < 0 || track >= int(project_.tracks.size())) return;
+  Track t = project_.tracks[size_t(track)];
+  t.name = next_role_name(t.name, step);
+  history_.change_track(track, t);
+}
+
+void App::edit_track_name(int track) {
+  if (track < 0 || track >= int(project_.tracks.size())) return;
+  close_inspector();
+  name_edit_ = true;
+  name_track_ = track;
+  name_draft_ = project_.tracks[size_t(track)].name;
+  name_cursor_ = int(name_draft_.size());
   invalidate_all();
 }
 
 void App::draw_name_edit(Canvas& c) {
   const Rect r = inspector_rect_;
-  draw_panel_frame(c, "PROJECT NAME");
+  const bool track = name_track_ >= 0;
+  draw_panel_frame(c, track ? "TRACK NAME" : "PROJECT NAME");
   const Font& f = Font::get(FontFace::Regular, u(kPanelText));
   const Font& big = Font::get(FontFace::SemiBold, u(20));
   const Font& faint = Font::get(FontFace::Regular, u(14));
@@ -671,8 +786,8 @@ void App::draw_name_edit(Canvas& c) {
   }
   c.set_clip(saved);
   int ty = y + int(u(56));
-  for (const char* line : {"Up/Down: change letter", "Left/Right: move", "Y: delete letter", "X: make up a name",
-                           "A: done   B: cancel"}) {
+  for (const char* line : {"Up/Down: change letter", "Left/Right: move", "Y: delete letter",
+                           track ? "X: next part name" : "X: make up a name", "A: done   B: cancel"}) {
     c.text(f, r.x + u(12), ty, line, theme_.text_secondary);
     ty += int(u(20));
   }
@@ -771,6 +886,7 @@ void App::step_sound(int track, int step) {
 void App::open_inspector(std::string title, std::vector<InspectorField> fields) {
   inspector_title_ = std::move(title);
   inspector_fields_ = std::move(fields);
+  inspector_live_ = false;
   inspector_sel_ = 0;
   inspector_scroll_ = 0;
   while (inspector_sel_ + 1 < int(inspector_fields_.size()) && inspector_fields_[size_t(inspector_sel_)].heading)
@@ -918,6 +1034,13 @@ bool App::frame(const InputState& state, Canvas& canvas) {
   input_.update(state.held, now);
   if (state.quit_requested) quit_ = true;
   if (canvas.width() != size_.w || canvas.height() != size_.h) layout(canvas);
+  // Twice a second: the audio load's peak into the last 3 s, and a live panel redrawn to show it.
+  if (now - live_redraw_us_ >= 500000) {
+    live_redraw_us_ = now;
+    load_slot_ = (load_slot_ + 1) % 6;
+    load_peaks_[load_slot_] = engine_->take_load_peak();
+    if (inspector_open() && inspector_live_) invalidate(inspector_rect_);
+  }
 
   handle_global();
   // While Select or Menu is held, buttons belong to the global chords above, not the view.

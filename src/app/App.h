@@ -75,6 +75,12 @@ class App {
   bool auto_names() const { return auto_names_; }
   void set_auto_names(bool on);
   std::string fresh_song_name();  // one no saved project has
+  // Track names: a list of parts to step through ("Drums", "Bass", "Lead"...), and the editor for
+  // a name of one's own. Both are undoable.
+  static const std::vector<std::string>& role_names();
+  static std::string next_role_name(const std::string& name, int step);
+  void step_track_name(int track, int step);
+  void edit_track_name(int track);
   const InputTracker& input() const { return input_; }
   float u(float units) const { return units * scale_; }
   float scale_value() const { return scale_; }
@@ -117,6 +123,8 @@ class App {
   Rect content_rect() const { return content_; }
   void open_inspector(std::string title, std::vector<InspectorField> fields);
   bool inspector_open() const { return !inspector_fields_.empty(); }
+  // The audio load as the About panel shows it: "45%, peaks 71%" (peaks over the last 3 s).
+  std::string load_text();
   const std::string& inspector_title() const { return inspector_title_; }
   int inspector_scroll() const { return inspector_scroll_; }  // first row shown
   void close_inspector();
@@ -131,6 +139,11 @@ class App {
   bool load_project_file(const std::string& name);
   void new_project();
   bool render_song_to_wav();
+  // Each track that plays in the mix as its own 32-bit float WAV, with its share of the chorus,
+  // delay and reverb but none of the master section, so that they add up to the mix before it:
+  // renders/<song> stems/01 Drums.wav and so on, all the same length. Returns how many it wrote.
+  int render_stems();
+  std::vector<float> render_offline(const Project& song, bool master);  // the song's length + 3 s
   bool has_unsaved_changes();  // compared with its file in projects/ (true if it has none)
 
   // Samples, by path (relative to the data folder unless absolute), loaded once and kept while the
@@ -217,6 +230,10 @@ class App {
   // Layout and drawing.
   Size size_;
   Rect top_bar_, content_, hint_bar_, inspector_rect_;
+  bool inspector_live_ = false;  // its values change by themselves (the About panel's audio load)
+  uint64_t live_redraw_us_ = 0;
+  float load_peaks_[6] = {};     // the engine's peak load, a slot per half second
+  int load_slot_ = 0;
   std::vector<Rect> dirty_;
   std::string top_text_cache_, hint_cache_;
   std::string message_;
@@ -224,6 +241,7 @@ class App {
 
   // Name editing (a character at a time, with the d-pad).
   bool name_edit_ = false;
+  int name_track_ = -1;  // the track being named; -1: the song
   std::string name_draft_;
   int name_cursor_ = 0;
   // Discard confirmations.

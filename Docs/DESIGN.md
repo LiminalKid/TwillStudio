@@ -176,9 +176,12 @@ fixed-size arrays with the UI. Instead:
   above -30 dB, the top bar shows "Voices full" (in place of "Playing") for 1.5 s. The demo song
   steals only quieter tails, so it never shows.
 - *As built:* a project always has the platform's number of tracks; they aren't added or deleted.
-  The track settings panel (X on a track's name) has **Position** (Left/Right moves the track one
-  place, R + Left/Right to the top or the end) and **Clear track** (no clips, default sound, named
-  for its place). Both are single undo steps. A track's colour is its own (an index into the
+  The track settings panel (X on a track's name) opens on Engine, under **Name**: Left/Right steps
+  through a list of part names (Drums, Bass, Chords, Lead...), and A opens the letter editor the
+  song's name uses, where X gives the next part name. It has **Position** (Left/Right moves the
+  track one place, R + Left/Right to the top or the end) and **Clear track** (no clips, default
+  sound, named "Synth"). Renames, moves and clearing are single undo steps. Names say what a track
+  is for, never where it is: new songs name their tracks for the parts they're set up for. A track's colour is its own (an index into the
   theme's set, saved in the file), so it keeps it when moved.
 
 ### Voices and polyphony
@@ -244,7 +247,12 @@ plus 4 **modulator** slots.
     own envelope and low-pass gate shape the sound, as on the module. It must be a held gate, not a
     short pulse: the six-op FM engines sustain their DX7-style envelopes only while the gate is high,
     and with a pulse most of their patches are silent (found in M1).
-  - **ADSR:** our amp envelope drives `level`, so note length and release behave like a normal synth.
+  - **ADSR:** the low-pass gate is held open and our amp envelope is applied after the voice, as a
+    plain amplifier, so note length and release behave like a normal synth. The ADSR also takes the
+    internal envelope's place for the three modulation amounts (fed in as if patched into the FM,
+    timbre and morph inputs), except where two engines use those amounts for something else:
+    speech's FM and morph amounts and chiptune's timbre amount. Decay and LPG colour then do
+    (almost) nothing, so the sound view shows them only with the gate, under Amp.
 
 #### Sampler
 
@@ -558,8 +566,14 @@ autosave a few seconds after each change and when quitting.
   under the cursor; A switches mute and solo; B resets; X opens the effect settings.
 - **Project panel** (X on an empty bar in the arrangement): tempo, key, scale, name (edited a letter
   at a time with the d-pad), Save, Load, New project, MIDI clock out, the MIDI devices found, and
-  Render to WAV. Projects go to `projects/<name>.fluo`, renders to `renders/<name>.wav`. Loading or
-  starting anew with unsaved changes asks for a second press.
+  Render to WAV and Render stems. Projects go to `projects/<name>.twill`, renders to
+  `renders/<name>.wav`. Stems go to `renders/<name> stems/` as `01 Drums.wav` and so on: one 32-bit
+  float WAV per track the mix plays (respecting mute and solo; MIDI out tracks have none), each with
+  its own share of the chorus, delay and reverb and none of the master section (EQ, compressor,
+  level, limiter), all the song's length plus 3 s. They add up to the mix before the master in
+  level and sound, though not sample for sample: rendered alone, a track's notes can land on voices
+  whose oscillators sit at other phases, and noise-based engines draw other random numbers. Loading
+  or starting anew with unsaved changes asks for a second press.
 - **MIDI:** notes from any connected keyboard play the current track. "Record from MIDI" in the
   settings panel arms recording ("Rec" in the top bar): while playing, notes are recorded into the open clip, snapped to 1/16.
   MIDI clock (24 per beat) with start and stop goes out when switched on. *Polish round:* the

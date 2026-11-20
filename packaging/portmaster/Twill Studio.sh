@@ -12,11 +12,11 @@ else
   controlfolder="/roms/ports/PortMaster"
 fi
 
-source $controlfolder/control.txt
+source "$controlfolder/control.txt"
 [ -f "${controlfolder}/mod_${CFW_NAME}.txt" ] && source "${controlfolder}/mod_${CFW_NAME}.txt"
 get_controls
 
-GAMEDIR=/$directory/ports/twill
+GAMEDIR="/$directory/ports/twill"
 BINARY=twill.${DEVICE_ARCH}
 
 cd "$GAMEDIR" || exit 1
@@ -24,6 +24,8 @@ cd "$GAMEDIR" || exit 1
 > "$GAMEDIR/log.txt" && exec > >(tee "$GAMEDIR/log.txt") 2>&1
 
 export SDL_GAMECONTROLLERCONFIG="$sdl_controllerconfig"
+
+$ESUDO chmod +x "$GAMEDIR/$BINARY"
 
 $GPTOKEYB2 "$BINARY" > /dev/null 2>&1 &
 

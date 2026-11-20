@@ -157,8 +157,14 @@ bool Sdl2Platform::init() {
     data_dir_ = getcwd(cwd, sizeof cwd) ? std::string(cwd) + "/" : "./";
   }
 #endif
-  log("SDL %d.%d.%d, video driver %s, audio driver %s", SDL_MAJOR_VERSION, SDL_MINOR_VERSION,
-      SDL_PATCHLEVEL, SDL_GetCurrentVideoDriver(), SDL_GetCurrentAudioDriver());
+  // The SDL running, which on a handheld is the system's own; the one built against, if different.
+  SDL_version run;
+  SDL_GetVersion(&run);
+  char built[24] = "";
+  if (run.major != SDL_MAJOR_VERSION || run.minor != SDL_MINOR_VERSION || run.patch != SDL_PATCHLEVEL)
+    std::snprintf(built, sizeof built, " (built with %d.%d.%d)", SDL_MAJOR_VERSION, SDL_MINOR_VERSION, SDL_PATCHLEVEL);
+  log("SDL %d.%d.%d%s, video driver %s, audio driver %s", run.major, run.minor, run.patch, built,
+      SDL_GetCurrentVideoDriver(), SDL_GetCurrentAudioDriver());
 
   if (handheld_) {
     // Use the panel's own mode: the highest resolution the device offers.
@@ -444,7 +450,10 @@ bool Sdl2Platform::audio_open(int rate, int block, AudioCallback cb, void* user)
   // The engine runs at 48 kHz; where the browser's audio runs at another rate, SDL converts.
   const int allow = SDL_AUDIO_ALLOW_SAMPLES_CHANGE;
 #else
-  const int allow = SDL_AUDIO_ALLOW_FREQUENCY_CHANGE | SDL_AUDIO_ALLOW_SAMPLES_CHANGE;
+  // Not the frequency: the engine runs at 48 kHz, and where the device runs at another rate (stock
+  // TrimUI firmware's ALSA mixer can be at 44.1 kHz) SDL converts, rather than the music playing
+  // out of tune.
+  const int allow = SDL_AUDIO_ALLOW_SAMPLES_CHANGE;
 #endif
   want.samples = Uint16(block);
   want.callback = &Sdl2Platform::sdl_audio_callback;

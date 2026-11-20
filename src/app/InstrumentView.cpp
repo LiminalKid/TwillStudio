@@ -125,8 +125,8 @@ std::vector<InstrumentView::Row> InstrumentView::rows() {
   }
 
   if (t.instrument == InstrumentType::Macro) {
-    for (ParamId id : {kParamHarmonics, kParamTimbre, kParamMorph, kParamDecay, kParamLpgColour, kParamFmAmount,
-                       kParamTimbreAmount, kParamMorphAmount})
+    for (ParamId id : {kParamHarmonics, kParamTimbre, kParamMorph, kParamFmAmount, kParamTimbreAmount,
+                       kParamMorphAmount})
       out.push_back(param_row(id));
     Row output;
     output.label = "Output";
@@ -138,9 +138,13 @@ std::vector<InstrumentView::Row> InstrumentView::rows() {
       change([step](Track& tr) { tr.macro.output = MacroOutput((int(tr.macro.output) + step + 3) % 3); });
     };
     out.push_back(output);
+    // The amplifier, then its own settings: the low-pass gate's decay and colour, or the ADSR. The
+    // FM, timbre and morph amounts follow whichever it is.
     out.push_back(param_row(kParamAmpMode));
     if (t.tone.amp_mode == 1)
       for (ParamId id : {kParamAttack, kParamDecayTime, kParamSustain, kParamRelease}) out.push_back(param_row(id));
+    else
+      for (ParamId id : {kParamDecay, kParamLpgColour}) out.push_back(param_row(id));
   } else {
     out.push_back(param_row(kParamSamplerMode));
     if (t.sampler.mode != SamplerMode::Kit) {

@@ -1,5 +1,6 @@
 # Builds the handheld version and runs the tests on every push to main; on a version tag (v0.2.0)
-# it also publishes a GitHub release with the PortMaster zip, its notes taken from the tag's message.
+# it also publishes a GitHub release with the PortMaster zip and the NextUI pak, its notes taken from
+# the tag's message.
 #
 # It runs on GitHub's AArch64 Linux machines, so the tests run natively, as they would on a handheld.
 # The build is the same as tools/make-knulli-sysroot.sh plus the knulli preset, except that the SDL2
@@ -58,13 +59,20 @@ jobs:
       - name: Tests
         run: build/knulli/twill_tests
 
-      - name: PortMaster zip
-        run: tools/make-portmaster-zip.sh
+      - name: PortMaster zip and NextUI pak
+        run: |
+          tools/make-portmaster-zip.sh
+          tools/make-nextui-pak.sh
 
       - uses: actions/upload-artifact@v4
         with:
           name: twill-portmaster
           path: build/portmaster/twill.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: twill-nextui
+          path: build/nextui/TwillStudio.pak.zip
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
@@ -79,19 +87,26 @@ jobs:
         run: |
           v=$(sed -n 's/^project(TwillStudio VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)
           test "v$v" = "$GITHUB_REF_NAME" || { echo "Tag $GITHUB_REF_NAME, but CMakeLists.txt says $v"; exit 1; }
+          # The Pak Store reads pak.json from main and fetches the release tagged with its version.
+          grep -q "\"version\": \"$GITHUB_REF_NAME\"" pak.json || { echo "pak.json's version isn't $GITHUB_REF_NAME"; exit 1; }
 
       - uses: actions/download-artifact@v4
         with:
           name: twill-portmaster
 
+      - uses: actions/download-artifact@v4
+        with:
+          name: twill-nextui
+
       - name: Release
         env:
           GH_TOKEN: ${{ github.token }}
         # The notes are the tag's message. The checkout above fetches the tagged commit without the tag
-        # itself, so fetch the tag. twill.zip is the name PortMaster installs it under.
+        # itself, so fetch the tag. twill.zip is the name PortMaster installs it under;
+        # TwillStudio.pak.zip is pak.json's release_filename, which the Pak Store downloads.
         run: |
           git fetch --force origin "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
           git tag -l --format='%(contents)' "$GITHUB_REF_NAME" > notes.md
           test -s notes.md || { echo "The tag has no message: use git tag -a"; exit 1; }
-          gh release create "$GITHUB_REF_NAME" twill.zip \
+          gh release create "$GITHUB_REF_NAME" twill.zip TwillStudio.pak.zip \
             --title "Twill Studio ${GITHUB_REF_NAME#v}" --notes-file notes.md --verify-tag
