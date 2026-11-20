@@ -84,6 +84,10 @@ class Platform {
   // rather than from a thread on the wall clock.
   virtual bool real_time() const { return true; }
 
+  // While true, music is playing (or being played on a MIDI keyboard): the device shouldn't dim,
+  // mute or go to sleep for want of button presses. Called when it changes.
+  virtual void keep_awake(bool) {}
+
   // Limits from this platform's benchmarks (design §6).
   virtual int max_tracks() const = 0;
   virtual int max_voices() const = 0;

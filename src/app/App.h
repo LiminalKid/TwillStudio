@@ -232,6 +232,8 @@ class App {
   Rect top_bar_, content_, hint_bar_, inspector_rect_;
   bool inspector_live_ = false;  // its values change by themselves (the About panel's audio load)
   uint64_t live_redraw_us_ = 0;
+  uint64_t last_midi_in_us_ = 0;  // when a MIDI keyboard last sent anything
+  bool awake_ = false;            // the platform has been asked to keep the device awake
   float load_peaks_[6] = {};     // the engine's peak load, a slot per half second
   int load_slot_ = 0;
   std::vector<Rect> dirty_;

@@ -49,6 +49,7 @@ class Sdl2Platform : public Platform {
   bool make_dir(const char* path) override;
   std::string data_dir() const override { return data_dir_; }
   MidiPort* midi() override { return midi_.get(); }
+  void keep_awake(bool on) override;
 
   uint64_t micros() const override;
   void log(const char* fmt, ...) override;
@@ -65,6 +66,7 @@ class Sdl2Platform : public Platform {
   const char* name_ = "SDL2";
   std::string data_dir_;  // ends with a slash
   bool handheld_ = false;
+  bool awake_held_ = false;  // keep_awake's files are in place
 #ifdef __linux__
   bool audio_rt_tried_ = false;  // audio thread only
 #endif

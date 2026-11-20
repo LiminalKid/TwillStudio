@@ -129,6 +129,7 @@ Sdl2Platform::Sdl2Platform() {
 }
 
 Sdl2Platform::~Sdl2Platform() {
+  keep_awake(false);
   audio_close();
   if (controller_) SDL_GameControllerClose(controller_);
   else if (joystick_) SDL_JoystickClose(joystick_);
@@ -565,6 +566,32 @@ void Sdl2Platform::log(const char* fmt, ...) {
   va_end(args);
   std::fputc('\n', stderr);
   std::fflush(stderr);
+}
+
+// TWILL_KEEP_AWAKE, set by a handheld's launcher, names files (separated by ':') whose presence keeps
+// that system from dimming, muting or sleeping while nobody presses a button: KNULLI's battery
+// saver, for one, pauses while any /var/run/battery-saver/*.pause exists. They're there only while
+// music plays, so the device still saves its battery when Twill sits idle.
+void Sdl2Platform::keep_awake(bool on) {
+  const char* files = SDL_getenv("TWILL_KEEP_AWAKE");
+  if (!files || !*files || on == awake_held_) return;
+  awake_held_ = on;
+  std::string list = files;
+  size_t start = 0;
+  while (start <= list.size()) {
+    size_t end = list.find(':', start);
+    if (end == std::string::npos) end = list.size();
+    const std::string path = list.substr(start, end - start);
+    if (!path.empty()) {
+      if (on) {
+        if (FILE* f = std::fopen(path.c_str(), "w")) std::fclose(f);
+        else log("keep awake: can't create %s", path.c_str());
+      } else {
+        std::remove(path.c_str());
+      }
+    }
+    start = end + 1;
+  }
 }
 
 }  // namespace twill

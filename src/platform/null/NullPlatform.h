@@ -83,6 +83,8 @@ class NullPlatform : public Platform {
   } fake_midi;
   MidiPort* midi() override { return &fake_midi; }
   bool real_time() const override { return false; }
+  void keep_awake(bool on) override { awake = on; }
+  bool awake = false;  // what the app last asked keep_awake for
   int max_tracks() const override { return 8; }
   int max_voices() const override { return 16; }
   uint64_t micros() const override { return now_us_; }

@@ -75,6 +75,7 @@ void App::stop() {
   // For anyone reporting dropouts: the log says how close the audio came to its limit.
   p_.log("audio load: highest %.0f%%, %u blocks late", engine_->load_highest() * 100, unsigned(engine_->late_blocks()));
   autosave(true);
+  if (awake_) p_.keep_awake(awake_ = false);
   p_.audio_close();
   midi_sender_.reset();
 }
@@ -544,6 +545,7 @@ void App::handle_midi() {
   // Notes from the keyboard: play the current track, and record them if armed and playing.
   std::vector<MidiMessage> in;
   port->poll(in);
+  if (!in.empty()) last_midi_in_us_ = p_.micros();
   const Placement* pl = open_placement();
   Clip* clip = open_clip();
   auto clip_time = [&]() -> Tick {
@@ -1060,6 +1062,12 @@ bool App::frame(const InputState& state, Canvas& canvas) {
     invalidate_all();
   }
   handle_midi();
+  // Playing music, or played on a MIDI keyboard in the last five minutes: no dimming or sleeping.
+  const bool awake = engine_->playing() || (last_midi_in_us_ && p_.micros() - last_midi_in_us_ < 300000000ull);
+  if (awake != awake_) {
+    awake_ = awake;
+    p_.keep_awake(awake);
+  }
   sync_engine();
   engine_->collect_garbage();
   free_unused_samples();

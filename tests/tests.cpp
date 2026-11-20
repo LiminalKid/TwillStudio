@@ -2111,6 +2111,33 @@ void test_ui_play_from_cursor() {
   CHECK(!ui.app.engine().playing());
 }
 
+void test_keep_awake() {
+  // The device is kept from dimming or sleeping while a song plays, and for five minutes after a
+  // MIDI keyboard was last played; otherwise it's left to save its battery.
+  UiDriver ui;
+  ui.audio = true;
+  CHECK(!ui.platform.awake);
+  ui.tap(twill::kStart);
+  ui.step(0);
+  CHECK(ui.app.engine().playing() && ui.platform.awake);
+  ui.tap(twill::kStart);  // stop
+  ui.step(0);
+  CHECK(!ui.platform.awake);
+  ui.platform.fake_midi.in.push_back({0x90, 60, 100});
+  ui.step(0);
+  CHECK(ui.platform.awake);
+  ui.platform.fake_midi.in.push_back({0x80, 60, 0});
+  ui.step(0);
+  ui.platform.advance_ms(301000);
+  ui.step(0);
+  CHECK(!ui.platform.awake);
+  ui.tap(twill::kStart);
+  ui.step(0);
+  CHECK(ui.platform.awake);
+  ui.app.stop();
+  CHECK(!ui.platform.awake);
+}
+
 void test_ui_project_tempo() {
   UiDriver ui;
   ui.tap(twill::kDown);  // Snare: bar 1 is empty
@@ -2441,6 +2468,7 @@ int main(int argc, char** argv) {
       {"midi_sender_thread", test_midi_sender_thread},
       {"live_notes", test_live_notes},
       {"audio_load", test_audio_load},
+      {"keep_awake", test_keep_awake},
       {"adsr_drives_modulation_amounts", test_adsr_drives_modulation_amounts},
       {"ui_roll_add_move_resize_delete_undo", test_ui_roll_add_move_resize_delete_undo},
       {"ui_roll_fine_nudge", test_ui_roll_fine_nudge},
