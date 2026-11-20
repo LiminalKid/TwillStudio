@@ -50,6 +50,7 @@ class Sdl2Platform : public Platform {
   std::string data_dir() const override { return data_dir_; }
   MidiPort* midi() override { return midi_.get(); }
   void keep_awake(bool on) override;
+  bool prefers_long_audio_buffer() const override;
 
   uint64_t micros() const override;
   void log(const char* fmt, ...) override;

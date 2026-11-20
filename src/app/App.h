@@ -74,6 +74,12 @@ class App {
   // New projects get a made-up two-word name ("Velvet Harbour") instead of "Untitled".
   bool auto_names() const { return auto_names_; }
   void set_auto_names(bool on);
+  // The audio buffer: Low keeps the delay short for playing live (512 frames on a handheld, about
+  // 11 ms); Safe doubles it (1024, about 21 ms), for systems that drop out with the short one.
+  // Until the user picks one, it's whichever the platform suggests. Changing it reopens the audio.
+  bool safe_audio() const { return audio_pref_ < 0 ? p_.prefers_long_audio_buffer() : audio_pref_ == 1; }
+  void set_safe_audio(bool on);
+  std::string audio_buffer_text() const;  // "Low, 11 ms"
   std::string fresh_song_name();  // one no saved project has
   // Track names: a list of parts to step through ("Drums", "Bass", "Lead"...), and the editor for
   // a name of one's own. Both are undoable.
@@ -181,6 +187,8 @@ class App {
   double phase_error_ = 0;     // beats the engine is ahead of the master, smoothed
   int output_latency_ = 0;     // frames from rendering to the speaker
   int block_frames_ = 256;
+  int audio_pref_ = -1;  // the Audio buffer the user chose: 0 Low, 1 Safe, -1 not chosen
+  bool open_audio();  // with the buffer the setting asks for; logs what the device gave
   void load_settings();
   bool auto_names_ = true;
   uint32_t names_made_ = 0;

@@ -19,7 +19,11 @@ class NullPlatform : public Platform {
   std::map<std::string, std::vector<uint8_t>> files;
 
   const char* name() const override { return "null"; }
-  bool audio_open(int, int, AudioCallback, void*) override { return true; }
+  bool audio_open(int, int block, AudioCallback, void*) override {
+    opened_block = block;
+    return true;
+  }
+  int opened_block = 0;  // the block size last asked for
   AudioInfo audio_info() const override { return {48000, 256}; }
   void audio_close() override {}
   Size display_size() const override { return size_; }
@@ -85,6 +89,8 @@ class NullPlatform : public Platform {
   bool real_time() const override { return false; }
   void keep_awake(bool on) override { awake = on; }
   bool awake = false;  // what the app last asked keep_awake for
+  bool long_buffer = false;  // what prefers_long_audio_buffer answers
+  bool prefers_long_audio_buffer() const override { return long_buffer; }
   int max_tracks() const override { return 8; }
   int max_voices() const override { return 16; }
   uint64_t micros() const override { return now_us_; }

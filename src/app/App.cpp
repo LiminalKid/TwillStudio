@@ -52,23 +52,47 @@ bool App::start() {
   mixer_ = std::make_unique<MixerView>(*this);
   sync_engine();
 
-  bool ok = p_.audio_open(Engine::kSampleRate, 256, [](void* user, float* out, int frames) {
-    static_cast<App*>(user)->engine_->render(out, frames);
-  }, this);
-  AudioInfo ai = p_.audio_info();
-  p_.log("audio %s: %d Hz, %d frames per block", ok ? "open" : "FAILED", ai.sample_rate,
-         ai.block_frames);
-  if (ok && ai.sample_rate != Engine::kSampleRate)
-    p_.log("warning: device runs at %d Hz; pitch will be off until resampling exists", ai.sample_rate);
-  // MIDI out leaves when the audio around it reaches the speaker: about two blocks after rendering.
   midi_sender_ = std::make_unique<MidiSender>(*engine_, p_.midi());
-  // (Plus the master limiter's look-ahead.)
-  output_latency_ = 2 * ai.block_frames + Engine::kOutputDelay;
-  block_frames_ = std::max(1, ai.block_frames);
-  midi_sender_->set_latency_us(int64_t(output_latency_) * 1000000 / std::max(1, ai.sample_rate));
+  const bool ok = open_audio();
   if (p_.real_time() && p_.midi()) midi_sender_->start_thread();
   saved_revision_ = history_.revision();
   return ok;
+}
+
+bool App::open_audio() {
+  // Low asks for 256 frames, which a handheld's platform raises to its 512 minimum.
+  const bool ok = p_.audio_open(Engine::kSampleRate, safe_audio() ? 1024 : 256, [](void* user, float* out, int frames) {
+    static_cast<App*>(user)->engine_->render(out, frames);
+  }, this);
+  AudioInfo ai = p_.audio_info();
+  p_.log("audio %s: %d Hz, %d frames per block (%s buffer%s)", ok ? "open" : "FAILED", ai.sample_rate,
+         ai.block_frames, safe_audio() ? "Safe" : "Low", audio_pref_ < 0 ? ", this system's default" : "");
+  if (ok && ai.sample_rate != Engine::kSampleRate)
+    p_.log("warning: device runs at %d Hz; pitch will be off until resampling exists", ai.sample_rate);
+  // MIDI out leaves when the audio around it reaches the speaker: about two blocks after rendering
+  // (plus the master limiter's look-ahead).
+  output_latency_ = 2 * ai.block_frames + Engine::kOutputDelay;
+  block_frames_ = std::max(1, ai.block_frames);
+  midi_sender_->set_latency_us(int64_t(output_latency_) * 1000000 / std::max(1, ai.sample_rate));
+  return ok;
+}
+
+void App::set_safe_audio(bool on) {
+  if (on == safe_audio() && audio_pref_ >= 0) return;
+  const bool reopen = on != safe_audio();
+  audio_pref_ = on ? 1 : 0;
+  save_settings();
+  if (!reopen) return;
+  p_.audio_close();
+  open_audio();
+}
+
+std::string App::audio_buffer_text() const {
+  const AudioInfo ai = p_.audio_info();
+  char b[32];
+  std::snprintf(b, sizeof b, "%s, %d ms", safe_audio() ? "Safe" : "Low",
+                ai.sample_rate > 0 ? int(ai.block_frames * 1000.0 / ai.sample_rate + 0.5) : 0);
+  return b;
 }
 
 void App::stop() {
@@ -814,13 +838,16 @@ void App::load_settings() {
     if (line == "theme=light") theme_ = Theme::light();
     if (line == "names=auto") auto_names_ = true;
     if (line == "names=untitled") auto_names_ = false;
+    if (line == "audio=safe") audio_pref_ = 1;
+    if (line == "audio=low") audio_pref_ = 0;
     at = end + 1;
   }
 }
 
 void App::save_settings() {
   const std::string text = std::string("theme=") + (theme_.dark ? "dark" : "light") + "\n" +
-                           "names=" + (auto_names_ ? "auto" : "untitled") + "\n";
+                           "names=" + (auto_names_ ? "auto" : "untitled") + "\n" +
+                           (audio_pref_ < 0 ? "" : audio_pref_ ? "audio=safe\n" : "audio=low\n");
   p_.write_file(kSettingsName, std::vector<uint8_t>(text.begin(), text.end()));
 }
 

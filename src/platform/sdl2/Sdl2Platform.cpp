@@ -594,4 +594,19 @@ void Sdl2Platform::keep_awake(bool on) {
   }
 }
 
+// PipeWire's socket, where its clients find it: in $XDG_RUNTIME_DIR, or the system-wide places
+// handheld systems run it from.
+bool Sdl2Platform::prefers_long_audio_buffer() const {
+  if (!handheld_) return false;
+  std::vector<std::string> dirs;
+  if (const char* x = SDL_getenv("XDG_RUNTIME_DIR")) dirs.push_back(x);
+  dirs.push_back("/run");
+  dirs.push_back("/var/run");
+  for (const std::string& d : dirs) {
+    struct stat st;
+    if (::stat((d + "/pipewire-0").c_str(), &st) == 0) return true;
+  }
+  return false;
+}
+
 }  // namespace twill

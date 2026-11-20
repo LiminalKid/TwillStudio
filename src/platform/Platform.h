@@ -88,6 +88,11 @@ class Platform {
   // mute or go to sleep for want of button presses. Called when it changes.
   virtual void keep_awake(bool) {}
 
+  // True where the shortest audio buffer is known to drop out now and then, so the app should
+  // start with the longer one unless the user chose otherwise: handhelds whose sound goes through
+  // PipeWire (KNULLI on the TrimUI Brick Pro clicks a few times every 10 minutes at 512 frames).
+  virtual bool prefers_long_audio_buffer() const { return false; }
+
   // Limits from this platform's benchmarks (design §6).
   virtual int max_tracks() const = 0;
   virtual int max_voices() const = 0;

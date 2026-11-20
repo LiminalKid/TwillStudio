@@ -1848,10 +1848,10 @@ void test_ui_lane_velocity_and_automation() {
 void test_ui_menu_opens_project() {
   UiDriver ui;
   ui.tap(twill::kRight, twill::kSelect);  // from the roll, say
-  ui.tap(twill::kMenu);                // Menu alone: the settings panel (Controls, Theme, New song names, Tempo, ...)
+  ui.tap(twill::kMenu);                // Menu alone: the settings panel (Controls, Theme, New song names, Audio buffer, Tempo, ...)
   CHECK(ui.app.inspector_open());
   const float tempo = ui.app.project().tempo;
-  for (int i = 0; i < 3; ++i) ui.tap(twill::kDown);
+  for (int i = 0; i < 4; ++i) ui.tap(twill::kDown);
   ui.tap(twill::kRight);
   CHECK(ui.app.project().tempo == tempo + 1);
   ui.tap(twill::kB);  // close
@@ -2010,8 +2010,8 @@ void test_ui_song_names() {
 
   UiDriver ui;
   ui.tap(twill::kDown);  // Snare row, bar 1 empty
-  ui.tap(twill::kX);     // settings panel; Name is the seventh row
-  for (int i = 0; i < 6; ++i) ui.tap(twill::kDown);
+  ui.tap(twill::kX);     // settings panel; Name is the eighth row
+  for (int i = 0; i < 7; ++i) ui.tap(twill::kDown);
   ui.tap(twill::kA);  // the name editor
   ui.tap(twill::kX);  // make one up
   ui.tap(twill::kA);
@@ -2138,13 +2138,43 @@ void test_keep_awake() {
   CHECK(!ui.platform.awake);
 }
 
+void test_audio_buffer_setting() {
+  // Safe asks the platform for a longer buffer, reopening the audio, and is remembered.
+  UiDriver ui;
+  CHECK(!ui.app.safe_audio());
+  ui.tap(twill::kMenu);
+  for (int i = 0; i < 3; ++i) ui.tap(twill::kDown);  // Audio buffer
+  ui.tap(twill::kRight);
+  CHECK(ui.app.safe_audio());
+  CHECK(ui.platform.opened_block == 1024);
+  CHECK(ui.app.audio_buffer_text().rfind("Safe", 0) == 0);
+  const auto it = ui.platform.files.find("settings.txt");
+  CHECK(it != ui.platform.files.end() &&
+        std::string(it->second.begin(), it->second.end()).find("audio=safe") != std::string::npos);
+  ui.tap(twill::kRight);
+  CHECK(!ui.app.safe_audio() && ui.platform.opened_block == 256);
+  // Until chosen, it's what the platform suggests (Safe where PipeWire runs on a handheld), and
+  // saving other settings doesn't fix it.
+  twill::NullPlatform pw;
+  pw.long_buffer = true;
+  twill::App fresh(pw);
+  fresh.start();
+  CHECK(fresh.safe_audio() && pw.opened_block == 1024);
+  fresh.set_dark_mode(!fresh.dark_mode());
+  const auto s = pw.files.find("settings.txt");
+  CHECK(s != pw.files.end() && std::string(s->second.begin(), s->second.end()).find("audio=") == std::string::npos);
+  fresh.set_safe_audio(false);  // chosen: Low stays Low
+  CHECK(!fresh.safe_audio() && pw.opened_block == 256);
+  fresh.stop();
+}
+
 void test_ui_project_tempo() {
   UiDriver ui;
   ui.tap(twill::kDown);  // Snare: bar 1 is empty
   ui.tap(twill::kX);     // settings panel: Controls, Theme, New song names, Tempo, ...
   CHECK(ui.app.inspector_open());
   const float tempo = ui.app.project().tempo;
-  for (int i = 0; i < 3; ++i) ui.tap(twill::kDown);
+  for (int i = 0; i < 4; ++i) ui.tap(twill::kDown);
   ui.tap(twill::kRight);
   ui.tap(twill::kRight, twill::kR);
   CHECK(ui.app.project().tempo == tempo + 11);
@@ -2258,8 +2288,8 @@ void test_ui_mixer() {
 void test_ui_project_files() {
   UiDriver ui;
   ui.tap(twill::kDown);  // Snare row, bar 1 empty
-  ui.tap(twill::kX);     // settings panel: Controls, Theme, New song names, Tempo, Key, Scale, Name, Save, Load, New, Render
-  for (int i = 0; i < 6; ++i) ui.tap(twill::kDown);
+  ui.tap(twill::kX);     // settings panel: Controls, Theme, New song names, Audio buffer, Tempo, Key, Scale, Name, Save, Load, New, Render
+  for (int i = 0; i < 7; ++i) ui.tap(twill::kDown);
   // Rename: the first letter "D" of "Demo" up by one, to "E".
   ui.tap(twill::kA);
   for (int i = 0; i < 4; ++i) ui.tap(twill::kLeft);
@@ -2268,7 +2298,7 @@ void test_ui_project_files() {
   CHECK(ui.app.project().name == "Eemo");
   // Save.
   ui.tap(twill::kX);
-  for (int i = 0; i < 7; ++i) ui.tap(twill::kDown);
+  for (int i = 0; i < 8; ++i) ui.tap(twill::kDown);
   ui.tap(twill::kA);
   CHECK(ui.platform.files.count("projects/Eemo.twill") == 1);
   CHECK(!ui.app.has_unsaved_changes());
@@ -2469,6 +2499,7 @@ int main(int argc, char** argv) {
       {"live_notes", test_live_notes},
       {"audio_load", test_audio_load},
       {"keep_awake", test_keep_awake},
+      {"audio_buffer_setting", test_audio_buffer_setting},
       {"adsr_drives_modulation_amounts", test_adsr_drives_modulation_amounts},
       {"ui_roll_add_move_resize_delete_undo", test_ui_roll_add_move_resize_delete_undo},
       {"ui_roll_fine_nudge", test_ui_roll_fine_nudge},

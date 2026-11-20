@@ -203,6 +203,13 @@ fixed-size arrays with the UI. Instead:
 - *As built (device):* the whole engine averages about 37% of one Brick Pro core on the demo song
   with effects. Plaits itself is about 2% per voice; that song keeps about 14 voices sounding.
   Handhelds use 512-frame audio blocks on a SCHED_FIFO thread: 256 frames underran.
+  The Audio buffer setting picks Low (512 on a handheld, about 11 ms) or Safe (1024, about 21 ms).
+  Under KNULLI's PipeWire, an app asking for 512 drops the whole graph to a 512 quantum, and the
+  Brick Pro's speaker output then runs short a few times every 10 minutes (one quantum of
+  silence); at 1024 it doesn't. So Safe is the default on handhelds where PipeWire runs, Low
+  elsewhere, until the user picks one. While a song plays, the app also keeps the device awake
+  (the platform's keep_awake: KNULLI's battery saver otherwise mutes after 5 minutes without a
+  button press).
 - *As built (device):* the Brick Pro's codec compresses its output in hardware (the device tree's
   `dacdrc_cfg`; bit 29 of DAC_DAP_CTL), which made beats pump. While audio is open the SDL2
   platform turns that bit off (`OutputCompressor`, Linux, this codec only) and restores it on close.

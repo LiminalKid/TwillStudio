@@ -203,6 +203,8 @@ void ArrangementView::open_project_settings() {
                     [&app](int, bool) { app.set_dark_mode(!app.dark_mode()); }});
   fields.push_back({"New song names", [&app] { return std::string(app.auto_names() ? "Made up" : "Untitled"); },
                     [&app](int, bool) { app.set_auto_names(!app.auto_names()); }});
+  fields.push_back({"Audio buffer", [&app] { return app.audio_buffer_text(); },
+                    [&app](int, bool) { app.set_safe_audio(!app.safe_audio()); }});
   fields.push_back({"Tempo",
                     [&app] {
                       char b[16];
