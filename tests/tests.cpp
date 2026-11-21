@@ -2093,9 +2093,13 @@ void test_app_multisample() {
   ui.platform.write_file("lib/s/low.wav", sine_wav(48000, 1));
   ui.platform.write_file("lib/s/high.wav", sine_wav(48000, 2));
   std::string err;
-  // Not there at once: it's on its way.
+  // Not there at once: it's on its way. (The web build has no threads: it loads at once.)
+#ifndef __EMSCRIPTEN__
   CHECK(!ui.app.load_multisample("lib/Test.dspreset", &err) && err.empty());
   CHECK(ui.app.multisample_loading("lib/Test.dspreset"));
+#else
+  ui.app.load_multisample("lib/Test.dspreset", &err);
+#endif
   ui.app.finish_loading();
   CHECK(!ui.app.multisample_loading("lib/Test.dspreset"));
   const twill::Multisample* m = ui.app.load_multisample("lib/Test.dspreset", &err);
@@ -2145,7 +2149,9 @@ void test_app_multisample() {
   for (int i = 0; i < 120; ++i) ui.step(0);
   CHECK(!ui.app.multisample_loading("lib/Test.dspreset"));
   ui.app.load_multisample("lib/Test.dspreset");
+#ifndef __EMSCRIPTEN__
   CHECK(ui.app.multisample_loading("lib/Test.dspreset"));  // loading again
+#endif
   ui.app.finish_loading();
 }
 

@@ -1,6 +1,7 @@
 #include "engine/Snapshot.h"
 
 #include <algorithm>
+#include <cmath>
 
 #include "engine/Sample.h"
 
