@@ -23,9 +23,13 @@ const char* button_name(Button b) {
   return "?";
 }
 
-void InputTracker::update(uint32_t held, uint64_t now) {
+void InputTracker::update(uint32_t raw, uint64_t now) {
+  if (raw & kModifiers) chorded_ |= raw & ~raw_ & ~kModifiers;
+  const uint32_t held = (raw & kModifiers) ? raw : raw & ~chorded_;
   pressed_ = held & ~held_;
-  released_ = held_ & ~held;
+  released_ = held_ & ~held & ~chorded_;
+  chorded_ &= raw;
+  raw_ = raw;
   held_ = held;
   repeat_ = 0;
   for (int i = 0; i < kNumButtons; ++i) {

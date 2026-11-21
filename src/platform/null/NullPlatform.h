@@ -1,8 +1,10 @@
 // A platform with no display, sound or controller: for the benchmark and the scripted UI tests.
 // Files live in memory; input comes from set_held().
 #pragma once
+#include <algorithm>
 #include <chrono>
 #include <map>
+#include <mutex>
 #include <string>
 
 #include "platform/Platform.h"
@@ -36,18 +38,23 @@ class NullPlatform : public Platform {
     std::string p = path;
     return p.compare(0, 6, "/null/") == 0 ? p.substr(6) : p;
   }
+  // Locked: a preset loads on a thread of its own.
+  mutable std::mutex files_lock;
   bool read_file(const char* name, std::vector<uint8_t>& out) override {
+    std::lock_guard<std::mutex> hold(files_lock);
     auto it = files.find(rel(name));
     if (it == files.end()) return false;
     out = it->second;
     return true;
   }
   bool write_file(const char* name, const std::vector<uint8_t>& data) override {
+    std::lock_guard<std::mutex> hold(files_lock);
     files[rel(name)] = data;
     return true;
   }
   bool list_dir(const char* path, std::vector<DirEntry>& out) override {
     // Files whose names start with path + '/': their next component, as a file or a folder.
+    std::lock_guard<std::mutex> hold(files_lock);
     out.clear();
     std::string prefix = rel(path);
     if (!prefix.empty() && prefix.back() != '/') prefix += '/';
@@ -62,6 +69,10 @@ class NullPlatform : public Platform {
       for (const DirEntry& o : out) dup |= o.name == e.name;
       if (!dup) out.push_back(e);
     }
+    // Folders first, then by name, as the real platforms list them.
+    std::stable_sort(out.begin(), out.end(), [](const DirEntry& a, const DirEntry& b) {
+      return a.is_dir != b.is_dir ? a.is_dir : a.name < b.name;
+    });
     return any || dirs.count(rel(path)) || prefix.empty();
   }
   bool make_dir(const char* path) override {
@@ -91,6 +102,8 @@ class NullPlatform : public Platform {
   bool awake = false;  // what the app last asked keep_awake for
   bool long_buffer = false;  // what prefers_long_audio_buffer answers
   bool prefers_long_audio_buffer() const override { return long_buffer; }
+  size_t budget = 0;  // what sample_budget answers
+  size_t sample_budget() const override { return budget; }
   int max_tracks() const override { return 8; }
   int max_voices() const override { return 16; }
   uint64_t micros() const override { return now_us_; }

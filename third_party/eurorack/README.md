@@ -1,7 +1,7 @@
 # Vendored eurorack code
 
-The macro-oscillator DSP and the parts of `stmlib` it uses, copied unmodified from Emilie Gillet's
-eurorack repository, keeping their original paths:
+The macro-oscillator DSP and the parts of `stmlib` it uses, copied from Emilie Gillet's eurorack
+repository, keeping their original paths, and unmodified except for the change listed below:
 
 - `plaits/` from https://github.com/pichenettes/eurorack at commit `f4cfa76` (2026-10-12): `plaits/dsp/`,
   `plaits/resources.{h,cc}` and `plaits/user_data.h`. Only the files the DSP needs.
@@ -12,6 +12,10 @@ eurorack repository, keeping their original paths:
 
 Licence: MIT (the STM32 projects in that repository), see `LICENSE` here and `stmlib/LICENSE`; every
 file also carries its own notice.
+
+One local change, marked "Twill Studio" in the code: the chiptune engine can restart its arpeggio
+(`ChiptuneEngine::restart_arpeggio()`, reached through `Voice::chiptune_engine()`), so that each note
+begins on its own pitch. Upstream, every trigger steps the arpeggio on from wherever it was.
 
 Built with `-DTEST`, which swaps 32-bit ARM inline assembly for portable C and makes
 `plaits/user_data.h` return no user data (the six-op FM engines then use their built-in DX7 banks).

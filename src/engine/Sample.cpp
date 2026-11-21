@@ -7,6 +7,10 @@
 #define DR_WAV_IMPLEMENTATION
 #define DR_WAV_NO_STDIO  // we read files through the platform layer
 #include "dr_wav.h"
+#define DR_FLAC_IMPLEMENTATION
+#define DR_FLAC_NO_STDIO
+#define DR_FLAC_NO_OGG   // FLAC files only, not FLAC in Ogg
+#include "dr_flac.h"
 
 namespace twill {
 
@@ -28,61 +32,102 @@ inline float hermite(float xm1, float x0, float x1, float x2, float t) {
 
 std::shared_ptr<const SampleData> decode_sample(const uint8_t* bytes, size_t size, const std::string& name,
                                                 std::string& error) {
-  drwav wav;
-  if (!drwav_init_memory(&wav, bytes, size, nullptr)) {
-    error = "not a WAV or AIFF file this app can read";
-    return nullptr;
-  }
-  const int channels = int(wav.channels);
-  const uint64_t frames = wav.totalPCMFrameCount;
-  if (channels < 1 || frames == 0 || wav.sampleRate == 0 || frames > uint64_t(48000) * 60 * 30) {
+  // The file's audio as interleaved float, whichever reader it takes.
+  int channels = 0, rate = 0;
+  uint64_t frames = 0, read = 0;
+  std::vector<float> raw;
+  int64_t marker_a = -1, marker_b = -1;  // the file's own loop, in its frames
+  auto too_long = [&] { return frames > uint64_t(48000) * 60 * 30; };
+  if (size >= 4 && std::memcmp(bytes, "fLaC", 4) == 0) {
+    drflac* flac = drflac_open_memory(bytes, size, nullptr);
+    if (!flac) {
+      error = "a FLAC file this app can't read";
+      return nullptr;
+    }
+    channels = int(flac->channels);
+    rate = int(flac->sampleRate);
+    frames = flac->totalPCMFrameCount;
+    if (channels < 1 || frames == 0 || rate == 0 || too_long()) {
+      drflac_close(flac);
+      error = frames == 0 ? "the file has no audio" : "the file is too long or malformed";
+      return nullptr;
+    }
+    raw.resize(size_t(frames) * size_t(channels));
+    read = drflac_read_pcm_frames_f32(flac, frames, raw.data());
+    drflac_close(flac);
+  } else {
+    drwav wav;
+    if (!drwav_init_memory_with_metadata(&wav, bytes, size, 0, nullptr)) {
+      error = "not a WAV, AIFF or FLAC file this app can read";
+      return nullptr;
+    }
+    channels = int(wav.channels);
+    rate = int(wav.sampleRate);
+    frames = wav.totalPCMFrameCount;
+    if (channels < 1 || frames == 0 || rate == 0 || too_long()) {
+      drwav_uninit(&wav);
+      error = frames == 0 ? "the file has no audio" : "the file is too long or malformed";
+      return nullptr;
+    }
+    raw.resize(size_t(frames) * size_t(channels));
+    read = drwav_read_pcm_frames_f32(&wav, frames, raw.data());
+    // Loop markers (a sampler chunk's first loop), for multisample zones that don't set their own.
+    for (drwav_uint32 i = 0; i < wav.metadataCount; ++i)
+      if (wav.pMetadata[i].type == drwav_metadata_type_smpl && wav.pMetadata[i].data.smpl.sampleLoopCount > 0) {
+        const drwav_smpl_loop& l = wav.pMetadata[i].data.smpl.pLoops[0];
+        if (l.lastSampleOffset > l.firstSampleOffset) marker_a = l.firstSampleOffset, marker_b = int64_t(l.lastSampleOffset) + 1;
+        break;
+      }
     drwav_uninit(&wav);
-    error = frames == 0 ? "the file has no audio" : "the file is too long or malformed";
-    return nullptr;
   }
-  std::vector<float> raw(size_t(frames) * size_t(channels));
-  const uint64_t read = drwav_read_pcm_frames_f32(&wav, frames, raw.data());
-  const int rate = int(wav.sampleRate);
-  drwav_uninit(&wav);
   if (read == 0) {
     error = "the audio couldn't be decoded";
     return nullptr;
   }
 
-  // To stereo: mono is copied to both sides; more than two channels keep the first two.
-  std::vector<float> stereo(size_t(read) * 2);
-  for (uint64_t i = 0; i < read; ++i) {
-    const float l = raw[size_t(i) * size_t(channels)];
-    const float r = channels > 1 ? raw[size_t(i) * size_t(channels) + 1] : l;
-    stereo[size_t(2 * i)] = l;
-    stereo[size_t(2 * i + 1)] = r;
-  }
+  // Mono stays mono; more than two channels keep the first two.
+  const int keep = std::min(channels, 2);
+  std::vector<float> in(size_t(read) * size_t(keep));
+  for (uint64_t i = 0; i < read; ++i)
+    for (int ch = 0; ch < keep; ++ch) in[size_t(i) * size_t(keep) + size_t(ch)] = raw[size_t(i) * size_t(channels) + size_t(ch)];
 
   auto s = std::make_shared<SampleData>();
   s->name = name;
   s->source_rate = rate;
-  s->source_channels = std::min(channels, 2);
+  s->source_channels = keep;
   if (rate == kEngineRate) {
-    s->frames = int(read);
-    s->data = std::move(stereo);
+    s->set_from_float(in, keep);
   } else {
     // Resample to 48 kHz.
     const double ratio = double(rate) / kEngineRate;
     const int out_frames = int(double(read) / ratio);
-    s->frames = out_frames;
-    s->data.resize(size_t(out_frames) * 2);
+    std::vector<float> out(size_t(out_frames) * size_t(keep));
     const int last = int(read) - 1;
-    auto at = [&](int i, int ch) { return stereo[size_t(2 * std::max(0, std::min(last, i)) + ch)]; };
+    auto at = [&](int i, int ch) { return in[size_t(std::max(0, std::min(last, i))) * size_t(keep) + size_t(ch)]; };
     for (int i = 0; i < out_frames; ++i) {
       const double pos = i * ratio;
       const int i0 = int(pos);
       const float t = float(pos - i0);
-      for (int ch = 0; ch < 2; ++ch)
-        s->data[size_t(2 * i + ch)] = hermite(at(i0 - 1, ch), at(i0, ch), at(i0 + 1, ch), at(i0 + 2, ch), t);
+      for (int ch = 0; ch < keep; ++ch)
+        out[size_t(i) * size_t(keep) + size_t(ch)] = hermite(at(i0 - 1, ch), at(i0, ch), at(i0 + 1, ch), at(i0 + 2, ch), t);
     }
+    s->set_from_float(out, keep);
+  }
+  if (marker_a >= 0 && marker_b <= int64_t(read)) {
+    const double scale = double(kEngineRate) / rate;
+    s->loop_start = std::min(s->frames - 1, int(std::lround(marker_a * scale)));
+    s->loop_end = std::max(s->loop_start + 1, std::min(s->frames, int(std::lround(marker_b * scale))));
   }
   s->onsets = find_onsets(*s);
   return s;
+}
+
+void SampleData::set_from_float(const std::vector<float>& in, int ch) {
+  channels = ch < 2 ? 1 : 2;
+  frames = int(in.size() / size_t(channels));
+  pcm.resize(size_t(frames) * size_t(channels));
+  for (size_t i = 0; i < pcm.size(); ++i)
+    pcm[i] = int16_t(std::lrint(std::max(-1.0f, std::min(1.0f, in[i])) * 32767.0f));
 }
 
 // A spectral transient detector at a fixed high sensitivity (0.8): it finds plenty, each with a strength, and transient_slices() keeps the strongest that fit.
@@ -101,8 +146,8 @@ std::vector<Onset> find_onsets(const SampleData& s) {
     double e = 0, t = 0;
     for (int ch = 0; ch < 2; ++ch)
       for (int i = f * hop; i < (f + 1) * hop; ++i) {
-        const double v = s.data[size_t(2 * i + ch)];
-        const double d = v - (i > 0 ? double(s.data[size_t(2 * (i - 1) + ch)]) : 0.0);
+        const double v = s.at(i, ch);
+        const double d = v - (i > 0 ? double(s.at(i - 1, ch)) : 0.0);
         e += v * v;
         t += d * d;
       }

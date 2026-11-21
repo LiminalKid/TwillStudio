@@ -75,7 +75,7 @@ change three things:
 │   later:  web (Emscripten+SDL2), iOS/Android, more        │
 │           Linux handhelds                                 │
 └───────────────────────────────────────────────────────────┘
-third_party/  plaits/, stmlib/, clouds reverb (MIT), dr_wav (public domain)
+third_party/  plaits/, stmlib/, clouds reverb (MIT), dr_wav and dr_flac (public domain)
 ```
 
 Rules that keep it portable:
@@ -217,11 +217,33 @@ fixed-size arrays with the UI. Instead:
   Its chord engine is still there for one-voice chords.
 - **CPU budget (measured in M1 with `twill_macro_lab bench`, 256-frame blocks).** On the Brick
   Pro (Cortex-A53 at 1.6 GHz) one macro-oscillator voice costs 0.6–2.7% of one core on average,
-  depending on the engine (Chiptune and Speech cheapest; Formant, Particles and Plucked string
+  depending on the engine (Chiptune Arp and Speech cheapest; Formant, Particles and Plucked string
   dearest), with worst-case blocks up to 5.2% (Swarm). That is about 36 voices per core for the
   heaviest engines. The Brick Pro's limit is set at **16 voices** for now, under half of one core
   in the worst case, leaving room for samplers, effects and the UI. On an Apple-silicon Mac a voice
   costs at most 0.5% of a core.
+- **Handhelds have 32 voices, at most 16 of them on the macro oscillator** (2026-11-21). A
+  multisample song needs more than 16: release tails keep their voices after the notes end, and a
+  preset with two layers plays two voices a note. Measured on the Brick Pro (engine only, 256-frame
+  blocks, average): a sample voice costs about 0.9% of a core, a Swarm voice 2.7%, the effects with
+  nothing playing 5%; 16 Swarm voices and 16 sample voices together about 63%. A macro note with all
+  16 synth voices busy takes one of those, never a sample's. Two fixes came out of measuring it: the
+  drive's soft clip uses `fast_tanh` (within 0.0001 of tanh; std::tanh had made the drive cost as much
+  as the rest of a sample voice), and a layered note counts once against the track's voices (its
+  layers used to count separately, so a 2-layer preset held half the notes).
+- **Speed-ups for the Brick Pro's Cortex-A53** (2026-11-21, engine only, average share of one core).
+  The A53 runs in order and glibc's `sin`, `tanh`, `log10` and `pow` are slow on it, so per-sample
+  calls to them cost far more there than on a Mac. Changes: the drive's `fast_tanh`; the chorus turns
+  one sweep (a rotating sine and cosine) instead of four `sin` calls a sample; the compressor takes
+  its logs only above the threshold; each send effect sleeps once nothing is sent to it and its
+  tail has died away (the chorus after its 85 ms ring, the delay once its echoes fall below
+  -140 dB, the reverb a second after it falls below -120 dB) and wakes with the next block sent;
+  a sample voice reads a run of frames with no edge, loop point or crossfade in reach without the
+  per-frame checks; the envelope ramp has no divide; a track with no sends skips the send mixing.
+  Results: nothing playing 5.4% to 2.2%; Misty Kite (20 multisample voices) 14% to 7.4%; 16 choir
+  voices with drive 34% to 12.6%; 8 Swarm voices 27% to 23.5%. Benchmarks for this kind of work:
+  render the engine alone with a NullPlatform holding the song's files, cross-built with the
+  KNULLI toolchain, run over SSH (the Brick has no `perf`).
 - Voice rendering can be spread over cores (tracks are independent until the mixer) if one core isn't
   enough. The core exposes that as "render these tracks" jobs the platform may run in parallel.
 
@@ -260,6 +282,16 @@ plus 4 **modulator** slots.
     timbre and morph inputs), except where two engines use those amounts for something else:
     speech's FM and morph amounts and chiptune's timbre amount. Decay and LPG colour then do
     (almost) nothing, so the sound view shows them only with the gate, under Amp.
+- **Chiptune Arp** (engine 7): with its trigger patched, the engine is an arpeggiator that steps
+  once per trigger, so Twill clocks it itself while a note is held, at 1/8, 1/16 (default), 1/32 or
+  1/64 notes of the song's tempo (the **Arpeggio** row, saved per track), and restarts it at each
+  note so the note begins on its own pitch (a marked change in the vendored engine,
+  `third_party/eurorack/README.md`). Harmonics picks the chord (octave, fifth, sus4, minor, minor
+  7th, 9th and 11th, 6/9, major 9th and 7th, major) and Timbre the pattern (up, down, up-down or
+  random, over 1, 2 or 4 octaves); the sound view names both and steps them one at a time (the
+  Chords engine's Harmonics too). Triggered, the engine passes the low-pass gate by, so under the
+  gate setting Twill applies the gate's part: each trigger rises to full in 1 ms and dies away at
+  the Decay's rate, as the other engines do.
 
 #### Sampler
 
@@ -297,6 +329,174 @@ plus 4 **modulator** slots.
   two-op FM, analog + filter). The demo song (100 BPM, C minor) is the same kit with a four-bar
   groove, under bass, chords, lead, pluck and pad. The UI tests drive a fixed copy of the earlier
   demo, so the demo can change without touching them.
+
+#### Multisamples (planned 2026-11-20, built 2026-11-21)
+
+For small sample libraries (tens of MB: a piano, keys, a plucked or bowed instrument, with a few
+velocity layers and round robins), read from a preset file a library already ships with.
+
+- **One model, readers on top.** A **multisample** is a list of **zones**, each: a sample file, a key
+  range, a velocity range, a root note, tuning (semitones), level (linear), pan (-1..1), start and
+  end, loop (off / forward, with points), and a round-robin place (sequence mode, length,
+  position). A reader turns a preset file into this list; everything after it (playing, memory,
+  the screens, the song file) is written once, for every format.
+- **Sampler mode "Multi"**, beside Single, Slices and Kit. The sound view picks a preset file in the
+  file browser (`.dspreset` first, `.sfz` later) and shows its name, its zone count, its key range
+  and anything it couldn't use. Tune, level and pan apply to the whole instrument; the track's
+  filter, ADSR, modulators and sends work as for any sampler track. Zones aren't edited in Twill.
+- **Playing a note:** every zone whose key and velocity ranges hold the note plays (layered zones
+  are layered voices, counted against the track's voices), at note - root + tuning semitones, with
+  its level and pan; the note's velocity sets the level as on any sampler track, or as the preset's
+  velocity tracking says. Round robins: a zone in a sequence plays when its position comes up
+  (`round_robin`), or a random one does (`random`: never the same twice running; `true_random`).
+- **The envelope:** when a preset gives one amp envelope for all its zones, choosing it sets the
+  track's ADSR to that (one undoable change), since a piano's release matters; afterwards it's the
+  track's to change. Presets with different envelopes per group use the first, and say so.
+- **Memory.** Today a sample is kept as stereo float at 48 kHz, 384 KB a second. Every sample (not
+  only zones: one path for all) moves to **16-bit at the file's own channel count**, resampled to
+  48 kHz on load as now: 96 KB a second for mono, 192 for stereo, a quarter or half, with its noise
+  floor at about -96 dB. A platform sets a **budget** for loaded samples, to be found by trying
+  libraries on the devices (a starting guess: 256 MB on a handheld with 1 GB); a preset that would
+  go over it isn't loaded, with a message saying how big it is. Zones share loaded samples by path,
+  as tracks do.
+- **Loading** happens on a thread of its own, with progress in the hint bar ("Loading 23 of 60
+  samples"); notes play once it's done. Today's loads are quick enough to run on the UI thread; 50
+  MB from an SD card isn't.
+- **FLAC**, which libraries use a lot, is read with `dr_flac` from the same `dr_libs` as `dr_wav`.
+  WAV and AIFF are already read.
+- **Songs** refer to the preset by path (track chunk version 10), with its samples beside it as the
+  library has them, nothing copied into the song. A missing preset or sample is said once, when the
+  song loads, and its notes are silent.
+
+*As built (2026-11-21):*
+
+- The zone model (`model/Multisample.h`), the DecentSampler reader (`model/DsPreset.cpp`), the SFZ
+  reader (`model/SfzPreset.cpp`) and `read_multisample()`, which picks one by file extension.
+  Besides the fields above, a zone has key tracking (with tuning applied before it, DecentSampler's
+  way, or after, SFZ's), velocity tracking, one-shot playback, a random range (SFZ's
+  `lorand`/`hirand`: one random number a note), and "loop if the file has loop markers" (SFZ's
+  default when no `loop_mode` is given).
+- Multi mode in the engine: layers, round robins, random groups and ranges, polyphony in notes, zone
+  and WAV loop markers. A new snapshot (any edit) leaves the voices of a preset still in use playing.
+- **Loading** (`app/PresetLoader`): one preset at a time on a thread of its own, the rest queued.
+  The thread reads the preset and decodes its samples, sharing ones already loaded; the UI thread
+  takes the finished preset, adds its samples to the cache, and rebuilds the snapshot, so notes play
+  from then on. Until then the track's Multi zones are empty (silent). The hint bar says "Loading
+  Grand: 23 of 60", and the sound view shows a progress bar. The web build has no threads and loads
+  in place. Rendering a song (export, stems) waits for its presets first. A preset no track names is
+  forgotten, its samples freed as any others are; using it again loads it again.
+- **Picking a preset** (`App::pick_multisample`) keeps the track's old one playing while the new one
+  loads; once it's ready the track takes it, with its amp envelope, as one undo step. A preset that
+  can't load leaves the track as it was and says why in the hint bar.
+- **The notice:** if the preset has things that aren't played (or samples that couldn't be read),
+  a card over the view says what, once, when it's picked; A closes it (B and X too), and the view
+  gets no buttons while it's up. (This replaced a "Not used" row in the settings list, which read
+  as a setting and was cramped.)
+- **The sound view** in Multi mode: Preset (A opens the browser, which lists `.dspreset` and `.sfz`
+  files and folders), Zones ("66, A1 to D7, 2 missing", or "Loading...", or why it can't load), Fine
+  tune. The picture on the right is a **zone map**: keys across, velocity up, each zone a tinted
+  rectangle (layers and round robins overlap darker), a keyboard below with a dot on each key a
+  sample was recorded at, octave names, the preset's memory, and all samples' memory against the
+  budget.
+- **The zone map lights the zones sounding** (solid in the track's colour, outlined): each voice
+  records its zone, and the engine publishes them after every callback (`Engine::sounding_zones`,
+  lock-free), which the sound view checks each frame and redraws on a change. It shows velocity
+  layers and round robins at work, and why a note is silent.
+- **Library bundles** (DecentSampler's `.dsbundle` folders, as libraries are usually unpacked): in
+  the preset browser a bundle with one preset is listed as that preset, by the bundle's name ("Basic
+  Piano"), and A picks it; one with several is a folder that opens to just its presets (not its
+  Samples and Images folders). Reopening the browser on a one-preset bundle's preset starts beside
+  the bundle.
+- **Memory budget** (`Platform::sample_budget()`): on a handheld, set once at start from the memory
+  the kernel says is free (`MemAvailable` in `/proc/meminfo`): 60% of what's left after keeping 160
+  MB back for the system and the app, from 64 MB to 1 GB (`Sdl2Platform::budget_for`), logged at
+  start. Without a reading, 256 MB. Computers have no limit. It counts every loaded sample (kits and
+  single samples too), and a preset is refused when its new samples would go past what's left, with
+  a message saying so. The About panel shows "Samples: 120 of 380 MB".
+- Still to come: `.dslibrary` zips, release triggers (if ever), and making multisamples of one's own
+  (below).
+
+**DecentSampler presets (`.dspreset`)**, written from the format's public documentation (its
+developer guide and schema):
+
+- XML: `<DecentSampler><groups><group><sample .../></group></groups></DecentSampler>`. Parsed with
+  pugixml (MIT), vendored in `third_party/`.
+- Read from `<sample>`: `path` (relative to the preset), `rootNote`, `loNote`/`hiNote`,
+  `loVel`/`hiVel`, `start`/`end`, `tuning`, `volume`, `pan`, `loopStart`/`loopEnd`/`loopEnabled`
+  (and a WAV's own loop markers when no points are given), `seqMode`/`seqLength`/`seqPosition`,
+  `attack`/`decay`/`sustain`/`release` (and their `ampEnv` spellings).
+- Inheritance as documented: most attributes set on `<groups>` or `<group>` apply to the samples
+  below unless a sample sets its own. Volume doesn't inherit; the three levels multiply (`volume`, or
+  `globalVolume` / `groupVolume`), in linear or in dB ("-3dB"). `pan` inherits, and `globalPan` and
+  `groupPan` are added to it, clamped. Tuning adds up (`globalTuning`, `groupTuning`, `tuning`), and
+  so does transposing (`globalTranspose`, `transpose`). Groups with `enabled="false"` are left out.
+- **Not used, and named in the notice when the preset is picked:** effects, the UI and its controls,
+  modulators, buses, MIDI mappings, tags, note sequences, the arpeggiator, oscillators, release and
+  legato triggers (`trigger` other than `attack`: release triggers, for a piano's key-off and pedal
+  noises, aren't planned for now), key switches and CC ranges, MIDI
+  channel ranges, glide and the monophonic settings, sample slicing and tempo-synced loops. A preset
+  still plays its sample zones without them.
+- Libraries come as a folder; `.dslibrary` files (zips) are a later step (miniz, MIT).
+
+Two more of its documented attributes are played: `pitchKeyTrack` (with `tuningIgnoresKeyTrack`) and
+`ampVelTrack`. **Loop crossfades** too (2026-11-21): `loopCrossfade` (frames, inheriting) and
+`loopCrossfadeMode` (`equal_power`, the default, or `linear`); SFZ's `loop_crossfade` (seconds) the
+same way. Over the loop's last crossfade-length frames the voice also reads the audio that far
+before the loop's start, fading it in as the end fades out; at the loop's end it goes back to the
+start, which carries on from what was fading in. The crossfade is cut to fit the loop and the audio
+before it.
+
+**SFZ (`.sfz`)**, written from the format's public documentation (sfzformat.com):
+
+- Comments (`//`, `/* */`), `#define $NAME value` (replaced wherever it comes after, longest names
+  first) and `#include "file"` (relative to the `.sfz`'s folder, up to 8 deep).
+- Headers `<control>`, `<global>`, `<master>`, `<group>` and `<region>`: a region takes the opcodes of
+  the group, master and global above it, its own winning; a header clears the levels below it. An
+  opcode's value runs to the next opcode, header or line end, so sample paths may hold spaces.
+- `<control>`: `default_path`, `note_offset`, `octave_offset`, `set_ccN` (`set_hdccN`).
+- Read: `sample`, `lokey`/`hikey`/`key`, `pitch_keycenter` (note numbers or names, "c4" = 60),
+  `lovel`/`hivel`, `tune` (cents) and `transpose` (both change the pitch, not the mapping),
+  `pitch_keytrack`, `volume` and `amplitude` (with their `global_`/`master_`/`group_` forms,
+  multiplied), `pan`, `amp_veltrack`, `offset`/`end`, `loop_mode` (`no_loop`, `one_shot`,
+  `loop_continuous`; `loop_sustain` plays as continuous) and `loop_start`/`loop_end` (or
+  `loopstart`/`loopend`), `seq_length`/`seq_position` (a round robin per group header),
+  `lorand`/`hirand`, `trigger` (only `attack` plays), and `ampeg_attack`/`decay`/`sustain` (%)/
+  `release`, the first region that sets them being the instrument's.
+- Key switches: only one articulation plays, `sw_default`'s, else the lowest `sw_last`. Controller
+  ranges (`loccN`/`hiccN`) are read as if each controller were at its `set_ccN` value, else 0 (a
+  sustain pedal up); regions a controller triggers (`on_loccN`) aren't played.
+- Listed as not used, by kind: filters, EQ, LFOs, other envelopes, effects, curves, velocity curves,
+  crossfades, pitch bend, voice muting (`group`/`off_by`), polyphony limits, release and legato
+  triggers, built-in waveforms (`*sine`...), and any other opcode ("other settings").
+
+**SF2** isn't planned: most good SoundFonts are large General MIDI sets, which suit neither the
+handhelds' memory nor this model's scope.
+
+**Tests** use presets made for them, with generated samples: key and velocity mapping, layers,
+each round-robin mode, attribute inheritance and the volume and pan rules, dB values, a missing
+sample, ignored elements, the memory budget, FLAC decoding, and the song file round trip; SFZ's
+headers, defines, includes, note names, key switches, controller ranges, one-shots, key and
+velocity tracking and random ranges; loading in the background (a preset ready later reaches the
+engine without an edit; one no track uses is let go), picking a preset and its notice; and held
+notes playing on through an edit.
+
+**Making multisamples of one's own (planned, not soon).** Kits can be made in Twill; multisamples
+should be too, simply: no SFZ- or DecentSampler-sized feature set. A sketch: a screen of its own,
+reached from Multi mode's preset row ("New multisample"), listing zones as rows (sample, root, key
+range, velocity range, level, tune). Adding samples from a folder maps them by the note in their
+names ("Pluck C3.wav", as the Single mode's root already does), spread to fill the keys between
+them; velocity layers from a second folder or a name suffix. Saved as a small `.dspreset` (so it
+also opens in DecentSampler) beside its samples, written with pugixml. Editing a library's own
+preset would save a copy, never the original.
+
+**Sound view pictures for the envelope.** While one of the amp ADSR's settings is chosen (any
+instrument), the picture on the right is the envelope's shape: a linear attack, then exponential
+decay and release as the engine makes them, each stage as wide as its time on a log scale, the held
+part a fixed stretch, the chosen stage filled in the track's colour and its value under it. While
+the low-pass gate's Decay or LPG colour is chosen, the picture is a struck note through the gate,
+worked out block by block with the engine's own gate formulas: its level, and its brightness (how
+open the filter is), with how long the note lasts. Chiptune Arp shows the app's own envelope for it
+(no brightness); engines that make their own envelope say so instead.
 
 #### MIDI Out
 
@@ -372,7 +572,9 @@ plus 4 **modulator** slots.
 ### Samples
 
 - WAV and AIFF, 8/16/24-bit and float, mono or stereo, via `dr_wav` (0.14.6 reads AIFF too, so no
-  separate reader was needed); converted to stereo float at 48 kHz on load (Hermite resampling).
+  separate reader was needed), and FLAC via `dr_flac` (2026-11-20); resampled to 48 kHz on load
+  (Hermite). *As built (2026-11-20):* kept as **16-bit at the file's own channel count** (mono stays
+  mono), a quarter of stereo float's memory for mono and half for stereo; until then, stereo float.
   *As built (2026-11-14):* a loaded sample stays in memory while any track names it (whatever the
   track's instrument, so switching back doesn't reload). Once none does, it's freed when the engine
   has let go: it's playing a snapshot built without it (sampler voices on a sample a new snapshot
@@ -483,6 +685,36 @@ arm, is now "Record from MIDI" in the settings panel.) The settings panel starts
 a page listing every button combination by view, since the hint bar shows only what fits (about
 four hints at 640x480).
 
+*Changed 2026-11-21: Menu, the main menu, and clip loops.*
+
+- **Menu opens the settings of what the screen shows:** the main menu in the arrangement (the song)
+  and the mixer, the open clip's panel in the roll (wherever the cursor is, whatever is selected:
+  X on a note could open the note panel by surprise when selected notes were off screen), the
+  track's settings in the sound view. Tapping it again puts the panel away. **Select + X** opens the
+  main menu from any view (a second press closes it). X on an empty bar in the arrangement opens it
+  too.
+- **The main menu** (it was the "settings panel") is titled MAIN MENU, with the version and commit
+  beside the title for testing, and runs in sections as a desktop app's menus do: **Song** (Name,
+  New project, Load, Save, Render to WAV, Render stems), **Music** (Tempo, Key, Scale), **MIDI**
+  (Record from MIDI, MIDI clock, MIDI devices), **Settings** (Theme, New song names, Audio buffer)
+  and **Help** (Controls, About).
+- **The clip panel** starts with **Loop length** (it was "Clip length", further down): how long the
+  clip's pattern is before it repeats, as against how long the arrangement plays it. Its last row,
+  **Main menu**, opens the main menu.
+- **A + Y on a clip in the arrangement: no repeat.** A + Left/Right sets how long a placement plays
+  the clip, repeating its loop; pressing Y while A is still held makes the clip's loop that long, so
+  it plays once. The notes stay where they are (a longer loop has empty bars at its end; a shorter
+  one hides later notes, which come back if it's lengthened). Every placement of the clip plays the
+  new loop. One undo step.
+- **Output boost** (main menu, Settings: Off, +3, +6, +9, +12 dB; kept in `settings.txt`): gain
+  before the master limiter, for a device that plays quietly. Twill's mixes peak at the limiter's
+  ceiling but average about -21 dBFS RMS (the demo song), some 10 dB under commercial music; on the
+  RG28XX under sndstation that was too quiet even with the hardware at full. It's live playback
+  only: renders and stems use an engine of their own and stay as mixed.
+- **A button that closes a panel is the panel's until it's let go.** B closes a panel on its press;
+  its release used to reach the view underneath, and in the arrangement releasing B deletes the
+  clip under the cursor.
+
 *Changed 2026-11-16:* **X in the sound view** opens the track's settings, as X on a track header
 does in the arrangement (it did nothing there; every other screen's X opens a panel). **Y in the
 mixer** plays the track's sound, as Y does in the sound view: Y means "listen" wherever there is
@@ -512,7 +744,8 @@ when built with uncommitted changes), build date, audio and screen. `cmake/versi
 | L / R held + d-pad | in the roll: the grid (left/right; the view zooms with it, and a message names the new grid) and scroll by page (up/down); in the arrangement: zoom |
 | L2 / R2, or Select + left/right | switch view: arrangement, piano roll, instrument, mixer |
 | Select + up/down | in the roll: between the notes and the lane strip; in the sound view: previous / next track |
-| Select + X | the settings panel (as Menu) |
+| Select + X | the main menu, from any view |
+| Menu | the settings of what the screen shows: main menu (arrangement, mixer), clip (roll), track (sound view) |
 | Start | play / stop (L or R + Start: play from the cursor) |
 
 Most handhelds also have analog sticks; they could add shortcuts (scrolling) but nothing requires
@@ -535,7 +768,8 @@ and record into the clip, quantized or not.
   most handheld front ends' "close the app" shortcut, so the app leaves it free). **Menu + Start
   quits** (on a few devices PortMaster closes ports with that same chord, which is just as good).
   **Menu on its own opens the project panel** (tempo, key, scale, files, MIDI clock) from any view; the hint bar says so when
-  there is room. (X on an empty bar in the arrangement still opens it too.)
+  there is room. (X on an empty bar in the arrangement still opens it too.) *Since 2026-11-21 Menu
+  opens the screen's own settings and Select + X the main menu; see above.*
   (Select + up/down changed tempo in M3; since M5 it moves between the notes and the lane strip, and
   tempo is in the project panel.)
 - **Start** plays the song in the arrangement and loops the edited clip's placement in the roll.
@@ -543,7 +777,8 @@ and record into the clip, quantized or not.
   nothing selected the clip and grid (grid, key, scale, fold to scale, clip length).
 - The hint bar at the bottom changes with the buttons held, so the grammar teaches itself.
 
-**Arrangement** (M3): the d-pad moves by bar and track (left of bar 1 is the track header). A on
+**Arrangement** (M3): the d-pad moves by track, and along a track an empty bar or a whole clip at a
+time (left of bar 1 is the track header): the cursor never stops part way along a clip. A on
 an empty bar makes a one-bar clip, A held + left/right resizes a clip by bars (on a header:
 changes engine), B deletes, B held + left/right moves a clip, Y duplicates it (linked: the copy
 plays the same clip), X opens it in the roll (on a header: the track's settings). Projects

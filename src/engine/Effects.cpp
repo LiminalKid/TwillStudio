@@ -1,4 +1,5 @@
 #include "engine/Effects.h"
+#include "engine/VoiceDsp.h"
 
 #include <algorithm>
 #include <cmath>
@@ -103,13 +104,19 @@ void Effects::master_compressor(const MixSettings& m, float* io, int n) {
   // A peak envelope (instant up, falling at the release rate) sets the target reduction; the
   // reduction then rises towards it over the attack time and follows the envelope down.
   float gr = comp_gr_db_, env = comp_env_;
+  // Below the threshold there's no reduction: the gain is the makeup alone, with no logs to take.
+  const float below_env = std::pow(10.0f, threshold / 20) - 1e-9f;
+  const float makeup_gain = std::pow(10.0f, makeup / 20);
   for (int i = 0; i < n; ++i) {
     const float peak = std::max(std::fabs(io[2 * i]), std::fabs(io[2 * i + 1]));
     env = std::max(peak, env * release);
-    const float over = 20 * std::log10(env + 1e-9f) - threshold;
-    const float target = over > 0 ? over * slope : 0;
-    gr = target > gr ? target + (gr - target) * attack : target;
-    const float g = std::pow(10.0f, (makeup - gr) / 20);
+    float g = makeup_gain;
+    if (env > below_env || gr != 0) {
+      const float over = 20 * std::log10(env + 1e-9f) - threshold;
+      const float target = over > 0 ? over * slope : 0;
+      gr = target > gr ? target + (gr - target) * attack : target;
+      g = std::pow(10.0f, (makeup - gr) / 20);
+    }
     io[2 * i] *= g;
     io[2 * i + 1] *= g;
   }
@@ -117,14 +124,15 @@ void Effects::master_compressor(const MixSettings& m, float* io, int n) {
   comp_env_ = env;
 }
 
-void Effects::master_out(const MixSettings& m, float* io, int n) {
+void Effects::master_out(const MixSettings& m, float* io, int n, float boost) {
   constexpr int L = kLimiterDelay;
   constexpr float kCeiling = 0.966f;  // -0.3 dBFS
   const float release = 1 - std::exp(-1.0f / (0.1f * kRate));     // 100 ms
   const float level_glide = 1 - std::exp(-1.0f / (0.005f * kRate));  // 5 ms
-  if (master_gain_ < 0) master_gain_ = m.master;
+  const float target = m.master * boost;
+  if (master_gain_ < 0) master_gain_ = target;
   for (int i = 0; i < n; ++i) {
-    master_gain_ += (m.master - master_gain_) * level_glide;
+    master_gain_ += (target - master_gain_) * level_glide;
     const float l = io[2 * i] * master_gain_, r = io[2 * i + 1] * master_gain_;
     // The gain this frame needs, and the least any frame in the look-ahead window needs.
     const float peak = std::max(std::fabs(l), std::fabs(r));
@@ -145,8 +153,8 @@ void Effects::master_out(const MixSettings& m, float* io, int n) {
       io[2 * i] = std::max(-1.0f, std::min(1.0f, out_l * gain));
       io[2 * i + 1] = std::max(-1.0f, std::min(1.0f, out_r * gain));
     } else {
-      io[2 * i] = std::tanh(out_l);
-      io[2 * i + 1] = std::tanh(out_r);
+      io[2 * i] = fast_tanh(out_l);
+      io[2 * i + 1] = fast_tanh(out_r);
     }
     if (++lim_pos_ == L) {
       lim_pos_ = 0;
@@ -156,33 +164,55 @@ void Effects::master_out(const MixSettings& m, float* io, int n) {
   }
 }
 
+namespace {
+bool silent(const float* x, int n) {
+  for (int i = 0; i < 2 * n; ++i)
+    if (x[i] != 0) return false;
+  return true;
+}
+}  // namespace
+
 void Effects::process(const MixSettings& m, float tempo, const float* chorus_in, const float* delay_in,
                       const float* reverb_in, float* out, int n) {
-  // Chorus: two taps per side, swept in opposite directions.
+  // Chorus: two taps per side, swept in opposite directions (a quarter of a cycle apart, so the
+  // four sweeps are the sine and cosine of one phase and their negatives, turned sample by sample).
   {
     const float rate_hz = 0.1f + m.chorus_rate * 2.9f;
     const float depth = 2 + m.chorus_depth * 10;  // ms
-    for (int i = 0; i < n; ++i) {
-      chorus_buf_[size_t(2 * chorus_pos_)] = chorus_in[2 * i];
-      chorus_buf_[size_t(2 * chorus_pos_ + 1)] = chorus_in[2 * i + 1];
-      chorus_phase_ += rate_hz / kRate;
-      if (chorus_phase_ >= 1) chorus_phase_ -= 1;
-      for (int ch = 0; ch < 2; ++ch) {
-        float wet = 0;
-        for (int tap = 0; tap < 2; ++tap) {
-          const float ph = chorus_phase_ + 0.25f * (ch * 2 + tap);
-          const float d_ms = 12 + depth * 0.5f * (1 + std::sin(6.2831853f * ph));
-          const float d = d_ms * kRate / 1000;
-          float rp = float(chorus_pos_) - d;
-          while (rp < 0) rp += kChorusFrames;
-          const int i0 = int(rp);
-          const float f = rp - i0;
-          const int i1 = (i0 + 1) % kChorusFrames;
-          wet += chorus_buf_[size_t(2 * i0 + ch)] * (1 - f) + chorus_buf_[size_t(2 * i1 + ch)] * f;
+    const float step = rate_hz / kRate;
+    chorus_quiet_ = silent(chorus_in, n) ? std::min(chorus_quiet_ + n, 1 << 30) : 0;
+    if (chorus_quiet_ > kChorusFrames + n) {
+      // Asleep: the ring holds only silence. Keep time moving, so waking up sounds the same.
+      chorus_phase_ += step * float(n);
+      chorus_phase_ -= std::floor(chorus_phase_);
+      chorus_pos_ = (chorus_pos_ + n) % kChorusFrames;
+    } else {
+      float s = std::sin(6.2831853f * chorus_phase_), c = std::cos(6.2831853f * chorus_phase_);
+      const float rs = std::sin(6.2831853f * step), rc = std::cos(6.2831853f * step);
+      for (int i = 0; i < n; ++i) {
+        chorus_buf_[size_t(2 * chorus_pos_)] = chorus_in[2 * i];
+        chorus_buf_[size_t(2 * chorus_pos_ + 1)] = chorus_in[2 * i + 1];
+        chorus_phase_ += step;
+        if (chorus_phase_ >= 1) chorus_phase_ -= 1;
+        const float s1 = s * rc + c * rs;
+        c = c * rc - s * rs;
+        s = s1;
+        const float sweep[4] = {s, c, -s, -c};  // sin(2 pi (phase + k / 4))
+        for (int ch = 0; ch < 2; ++ch) {
+          float wet = 0;
+          for (int tap = 0; tap < 2; ++tap) {
+            const float d_ms = 12 + depth * 0.5f * (1 + sweep[ch * 2 + tap]);
+            float rp = float(chorus_pos_) - d_ms * (kRate / 1000);
+            if (rp < 0) rp += kChorusFrames;
+            const int i0 = int(rp);
+            const float f = rp - float(i0);
+            const int i1 = i0 + 1 == kChorusFrames ? 0 : i0 + 1;
+            wet += chorus_buf_[size_t(2 * i0 + ch)] * (1 - f) + chorus_buf_[size_t(2 * i1 + ch)] * f;
+          }
+          out[2 * i + ch] += wet * 0.5f;
         }
-        out[2 * i + ch] += wet * 0.5f;
+        if (++chorus_pos_ == kChorusFrames) chorus_pos_ = 0;
       }
-      chorus_pos_ = (chorus_pos_ + 1) % kChorusFrames;
     }
   }
   // Delay: ping-pong, the time a division of the beat, smoothed so changes glide.
@@ -191,35 +221,58 @@ void Effects::process(const MixSettings& m, float tempo, const float* chorus_in,
     const float target = std::min(float(kDelayFrames - 2), kDelayBeats[div] * 60.0f / std::max(20.0f, tempo) * kRate);
     if (delay_time_ <= 0) delay_time_ = target;
     const float fb = m.delay_feedback * 0.9f;
-    for (int i = 0; i < n; ++i) {
-      delay_time_ += (target - delay_time_) * 0.0005f;
-      float rp = float(delay_pos_) - delay_time_;
-      while (rp < 0) rp += kDelayFrames;
-      const int i0 = int(rp);
-      const float f = rp - i0;
-      const int i1 = (i0 + 1) % kDelayFrames;
-      float tap[2];
-      for (int ch = 0; ch < 2; ++ch) tap[ch] = delay_buf_[size_t(2 * i0 + ch)] * (1 - f) + delay_buf_[size_t(2 * i1 + ch)] * f;
-      // Ping-pong: each side feeds the other; the input enters on the left (mono sum).
-      for (int ch = 0; ch < 2; ++ch) delay_lp_[ch] += (tap[ch] - delay_lp_[ch]) * 0.35f;
-      const float in = 0.5f * (delay_in[2 * i] + delay_in[2 * i + 1]);
-      delay_buf_[size_t(2 * delay_pos_)] = in + delay_lp_[1] * fb;
-      delay_buf_[size_t(2 * delay_pos_ + 1)] = delay_lp_[0] * fb;
-      out[2 * i] += tap[0];
-      out[2 * i + 1] += tap[1];
-      delay_pos_ = (delay_pos_ + 1) % kDelayFrames;
+    const bool in_silent = silent(delay_in, n);
+    if (in_silent && delay_quiet_ > kDelayFrames) {
+      if (!delay_asleep_) {  // what's left in the ring is below -140 dB: clear it and sleep
+        std::fill(delay_buf_.begin(), delay_buf_.end(), 0.0f);
+        delay_lp_[0] = delay_lp_[1] = 0;
+        delay_asleep_ = true;
+      }
+      delay_time_ += (target - delay_time_) * (1 - std::pow(1 - 0.0005f, float(n)));  // the glide, all at once
+      delay_pos_ = (delay_pos_ + n) % kDelayFrames;
+    } else {
+      delay_asleep_ = false;
+      float loudest = 0;
+      for (int i = 0; i < n; ++i) {
+        delay_time_ += (target - delay_time_) * 0.0005f;
+        float rp = float(delay_pos_) - delay_time_;
+        if (rp < 0) rp += kDelayFrames;
+        const int i0 = int(rp);
+        const float f = rp - float(i0);
+        const int i1 = i0 + 1 == kDelayFrames ? 0 : i0 + 1;
+        float tap[2];
+        for (int ch = 0; ch < 2; ++ch) tap[ch] = delay_buf_[size_t(2 * i0 + ch)] * (1 - f) + delay_buf_[size_t(2 * i1 + ch)] * f;
+        // Ping-pong: each side feeds the other; the input enters on the left (mono sum).
+        for (int ch = 0; ch < 2; ++ch) delay_lp_[ch] += (tap[ch] - delay_lp_[ch]) * 0.35f;
+        const float in = 0.5f * (delay_in[2 * i] + delay_in[2 * i + 1]);
+        const float wl = in + delay_lp_[1] * fb, wr = delay_lp_[0] * fb;
+        delay_buf_[size_t(2 * delay_pos_)] = wl;
+        delay_buf_[size_t(2 * delay_pos_ + 1)] = wr;
+        loudest = std::max(loudest, std::max(std::fabs(wl), std::fabs(wr)));
+        out[2 * i] += tap[0];
+        out[2 * i + 1] += tap[1];
+        if (++delay_pos_ == kDelayFrames) delay_pos_ = 0;
+      }
+      delay_quiet_ = loudest < 1e-7f ? std::min(delay_quiet_ + n, 1 << 30) : 0;
     }
   }
-  // Reverb.
+  // Reverb: asleep a second after its input stopped and its tail fell below -120 dB.
   {
-    reverb_->set_time(0.5f + m.reverb_size * 0.48f);
-    reverb_->set_lp(0.3f + m.reverb_tone * 0.6f);
-    clouds::FloatFrame* frames = reinterpret_cast<clouds::FloatFrame*>(reverb_frames_.data());
-    for (int i = 0; i < n; ++i) frames[i] = clouds::FloatFrame{reverb_in[2 * i], reverb_in[2 * i + 1]};
-    reverb_->Process(frames, size_t(n));
-    for (int i = 0; i < n; ++i) {
-      out[2 * i] += frames[i].l;
-      out[2 * i + 1] += frames[i].r;
+    if (!silent(reverb_in, n)) reverb_quiet_ = 0;
+    if (reverb_quiet_ < 48000) {
+      reverb_->set_time(0.5f + m.reverb_size * 0.48f);
+      reverb_->set_lp(0.3f + m.reverb_tone * 0.6f);
+      clouds::FloatFrame* frames = reinterpret_cast<clouds::FloatFrame*>(reverb_frames_.data());
+      for (int i = 0; i < n; ++i) frames[i] = clouds::FloatFrame{reverb_in[2 * i], reverb_in[2 * i + 1]};
+      reverb_->Process(frames, size_t(n));
+      float loudest = 0;
+      for (int i = 0; i < n; ++i) {
+        out[2 * i] += frames[i].l;
+        out[2 * i + 1] += frames[i].r;
+        loudest = std::max(loudest, std::max(std::fabs(frames[i].l), std::fabs(frames[i].r)));
+      }
+      if (loudest < 1e-6f) reverb_quiet_ += n;
+      else reverb_quiet_ = 0;
     }
   }
 }

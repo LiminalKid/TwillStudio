@@ -14,6 +14,9 @@
 #include "app/Splash.h"
 #include "gfx/Canvas.h"
 #include "platform/sdl2/Sdl2Platform.h"
+#ifdef TWILL_SNDSTATION
+#include "platform/sndstation/SndstationPlatform.h"
+#endif
 
 namespace {
 // Writes the canvas as a binary PPM (for TWILL_SCREENSHOT test captures).
@@ -113,7 +116,11 @@ int main(int, char**) {
   emscripten_set_main_loop_arg(web_frame, web, 0, false);
   return 0;
 #else
+#ifdef TWILL_SNDSTATION
+  twill::SndstationPlatform platform;
+#else
   twill::Sdl2Platform platform;
+#endif
   if (!platform.init()) return 1;
   // Test hook: TWILL_SCREENSHOT=<file.ppm> saves a frame after about a second, then quits.
   const char* screenshot = std::getenv("TWILL_SCREENSHOT");

@@ -29,6 +29,9 @@ struct MacroParams {
   // Without the gate (the ADSR in charge): the ADSR's level, 0-1, which the FM, timbre and morph
   // amounts then follow in place of the internal decay envelope.
   float envelope = 0;
+  // The chiptune engine's arpeggio: one step every this many samples while a note is held (0: it
+  // doesn't step). Each note starts it again on the note's own pitch.
+  float arp_step = 0;
 };
 
 class PlaitsVoice {
@@ -52,6 +55,8 @@ class PlaitsVoice {
   void note_on() {
     retrigger_ = rendered_high_;
     gate_ = true;
+    arp_pos_ = 0;
+    restart_arp_ = true;
   }
   void note_off() { gate_ = false; }
   // Legato: the gate stays (or goes back) high with no new edge, so nothing retriggers.
@@ -74,6 +79,10 @@ class PlaitsVoice {
   bool gate_ = false;
   bool retrigger_ = false;  // drop the gate for one block before the next one
   bool rendered_high_ = false;  // the gate Plaits saw in the last block
+  bool restart_arp_ = false;    // the next block starts the chiptune arpeggio again
+  float arp_pos_ = 0;           // samples since the arpeggio's last step
+  float chip_env_ = 0;          // the chiptune engine's level under the low-pass gate setting
+  bool chip_attack_ = false;    // rising to full after a trigger
 };
 
 }  // namespace twill

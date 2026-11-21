@@ -12,6 +12,10 @@ constexpr float kCapsSpacing = 0.5f;
 
 std::string caps(const std::string& s);
 
+// `s` as it fits in `width` pixels: whole if it does, else cut short with "..." (a value in a
+// settings row, so it doesn't run into the row's label).
+std::string fit_text(const Font& f, const std::string& s, float width, float spacing = 0);
+
 // The cursor: four corner marks just outside `r`, like a viewfinder. `u` is the UI scale.
 void draw_brackets(Canvas& c, const Rect& r, Color col, float u);
 

@@ -252,7 +252,8 @@ void PianoRollView::lane_input() {
         if (lane->points.empty()) copy.lanes.erase(copy.lanes.begin() + (lane - copy.lanes.data()));
       } else {
         const float current = lane->points.empty() ? app_.project().track_param(app_.track(), id) : lane->value_at(cursor_);
-        lane->set_point(cursor_, std::max(lo, std::min(hi, current + step * (hi - lo) * (coarse ? 0.1f : 0.02f))));
+        const float next = step_track_param(app_.project().tracks[size_t(app_.track())], id, current, step, coarse, 0.02f);
+        lane->set_point(cursor_, std::max(lo, std::min(hi, next)));
       }
       h.change_clip(copy);
       changed = true;
@@ -407,14 +408,13 @@ void PianoRollView::open_settings() {
     const int track = app.track();
     for (ParamId pid : automatable_params(app.project().tracks[size_t(track)].instrument)) {
       if (pid >= 100) continue;  // mixer and effect settings aren't per note
-      const ParamInfo* info = param_info(pid);
       fields.push_back({"Lock: " + param_name(app.project().tracks[size_t(track)], pid),
-                        [first, pid] {
+                        [first, pid, &app, track] {
                           const Note* n = first();
                           const ParamLock* lk = n ? n->lock(pid) : nullptr;
-                          return lk ? format_param(pid, lk->value) : std::string("-");
+                          return lk ? format_track_param(app.project().tracks[size_t(track)], pid, lk->value) : std::string("-");
                         },
-                        [&app, cid, ids, pid, info, track](int step, bool coarse) {
+                        [&app, cid, ids, pid, track](int step, bool coarse) {
                           Clip* c = app.project().find_clip(cid);
                           if (!c) return;
                           app.history().begin_group();
@@ -424,7 +424,7 @@ void PianoRollView::open_settings() {
                               Note copy = *n;
                               const ParamLock* lk = copy.lock(pid);
                               const float from = lk ? lk->value : app.project().track_param(track, pid);
-                              const float v = std::max(info->min, std::min(info->max, from + step * (info->max - info->min) * (coarse ? 0.1f : 0.01f)));
+                              const float v = step_track_param(app.project().tracks[size_t(track)], pid, from, step, coarse, 0.01f);
                               if (!copy.set_lock(pid, v)) full = true;
                               else app.history().change_note(cid, copy);
                             }
@@ -444,8 +444,30 @@ void PianoRollView::open_settings() {
     app.open_inspector(title, std::move(fields));
     return;
   }
+  open_clip_settings();
+}
 
-  // The clip and the grid.
+void PianoRollView::open_clip_settings() {
+  App& app = app_;
+  Clip* clip = app.open_clip();
+  if (!clip) return;
+  const uint32_t cid = clip->id;
+  std::vector<InspectorField> fields;
+  // The clip's loop first (what a placement in the arrangement repeats), then the grid and the rest.
+  fields.push_back({"Loop length", [&app, cid] {
+                      const Clip* c = app.project().find_clip(cid);
+                      char b[24];
+                      std::snprintf(b, sizeof b, "%.2f bars", c ? double(c->length) / kBar : 0.0);
+                      return std::string(b);
+                    },
+                    [&app, cid](int step, bool coarse) {
+                      const Clip* c = app.project().find_clip(cid);
+                      if (!c) return;
+                      Clip copy = *c;
+                      const Tick unit = coarse ? kBar : kTicksPerQuarter;
+                      copy.length = std::max(unit, (copy.length + step * unit) / unit * unit);
+                      app.history().change_clip(copy);
+                    }});
   fields.push_back({"Grid", [this] { return std::string(kSnaps[snap_index_].name); },
                     [this](int step, bool) {
                       snap_index_ = std::max(0, std::min(kNumSnaps - 1, snap_index_ + step));
@@ -476,20 +498,6 @@ void PianoRollView::open_settings() {
                       lane_ = options[size_t((idx + step + int(options.size())) % int(options.size()))];
                       if (lane_ < 0) lane_focus_ = false;
                     }});
-  fields.push_back({"Clip length", [&app, cid] {
-                      const Clip* c = app.project().find_clip(cid);
-                      char b[24];
-                      std::snprintf(b, sizeof b, "%.2f bars", c ? double(c->length) / kBar : 0.0);
-                      return std::string(b);
-                    },
-                    [&app, cid](int step, bool coarse) {
-                      const Clip* c = app.project().find_clip(cid);
-                      if (!c) return;
-                      Clip copy = *c;
-                      const Tick unit = coarse ? kBar : kTicksPerQuarter;
-                      copy.length = std::max(unit, (copy.length + step * unit) / unit * unit);
-                      app.history().change_clip(copy);
-                    }});
   if (!app.note_clipboard().empty())
     fields.push_back({"Paste at cursor", [&app] {
                         const size_t n = app.note_clipboard().size();
@@ -513,6 +521,8 @@ void PianoRollView::open_settings() {
                       app.history().change_clip(copy);
                       app.message("Snapped to the grid");
                     }});
+  // The way up to the main menu (Menu here opens this panel).
+  fields.push_back({"Main menu", [] { return std::string("press A"); }, nullptr, [&app] { app.open_main_menu(); }});
   app.open_inspector("Clip", std::move(fields));
 }
 
@@ -972,6 +982,16 @@ void PianoRollView::draw_lane(Canvas& c, const Layout& l, const Clip& clip) {
   const float sp = f.measure(name.c_str(), app_.u(kCapsSpacing)) <= room ? app_.u(kCapsSpacing) : 0;
   while (name.size() > 1 && f.measure(name.c_str(), sp) > room) name.pop_back();
   c.text(f, l.lane_label.x + app_.u(8), l.lane_label.y + int(app_.u(18)), name.c_str(), lane_focus_ ? th.text : th.text_secondary, sp);
+  // Under it, the value at the cursor: the lane's, else the track's own.
+  if (lane_ > 0) {
+    const Track& tr = app_.project().tracks[size_t(app_.track())];
+    const Lane* ln = clip.lane(ParamId(lane_));
+    const float v = ln && !ln->points.empty() ? ln->value_at(cursor_) : app_.project().track_param(app_.track(), ParamId(lane_));
+    const Font& vf = Font::get(FontFace::Regular, app_.u(11));
+    std::string text = format_track_param(tr, ParamId(lane_), v);
+    while (text.size() > 1 && vf.measure(text.c_str()) > room) text.pop_back();
+    c.text(vf, l.lane_label.x + app_.u(8), l.lane_label.y + int(app_.u(34)), text.c_str(), th.text_secondary);
+  }
   const Rect plot = Rect{r.x, r.y + int(app_.u(6)), r.w, r.h - int(app_.u(10))};
   float lo, hi;
   lane_range(lo, hi);

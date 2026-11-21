@@ -53,4 +53,16 @@ int draw_keycap(Canvas& c, const Font& f, int x, int y, int h, const char* key, 
   return w;
 }
 
+std::string fit_text(const Font& f, const std::string& s, float width, float spacing) {
+  if (f.measure(s.c_str(), spacing) <= width) return s;
+  std::string t = s;
+  while (!t.empty()) {
+    t.pop_back();
+    while (!t.empty() && (static_cast<unsigned char>(t.back()) & 0xC0) == 0x80) t.pop_back();  // whole characters
+    while (!t.empty() && t.back() == ' ') t.pop_back();
+    if (f.measure((t + "...").c_str(), spacing) <= width) return t + "...";
+  }
+  return f.measure("...", spacing) <= width ? "..." : "";
+}
+
 }  // namespace twill

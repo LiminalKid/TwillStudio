@@ -39,9 +39,12 @@ class Sdl2Platform : public Platform {
   const char* controller_name() const override;
 
   // From M1's benchmarks (Docs/DESIGN.md §6): on the Brick Pro the heaviest macro-oscillator engine
-  // costs 2.7% of a core per voice, so 16 voices stay under half of one core.
+  // costs 2.7% of a core per voice, so 16 synth voices stay under half of one core. Playing a
+  // sample costs far less, so samples get 16 voices more (multisample chords with release tails
+  // and layered zones need them).
   int max_tracks() const override { return 8; }
-  int max_voices() const override { return handheld_ ? 16 : 64; }
+  int max_voices() const override { return handheld_ ? 32 : 64; }
+  int max_synth_voices() const override { return handheld_ ? 16 : 0; }
 
   bool read_file(const char* path, std::vector<uint8_t>& out) override;
   bool write_file(const char* path, const std::vector<uint8_t>& data) override;
@@ -51,9 +54,29 @@ class Sdl2Platform : public Platform {
   MidiPort* midi() override { return midi_.get(); }
   void keep_awake(bool on) override;
   bool prefers_long_audio_buffer() const override;
+  // On a handheld, from the memory free when the app starts (design §6, "Multisamples"); no limit
+  // on a computer.
+  size_t sample_budget() const override { return sample_budget_; }
 
   uint64_t micros() const override;
   void log(const char* fmt, ...) override;
+  // The budget for `available` bytes of free memory: 60% of what's left after a reserve for the
+  // system and the app itself, from 64 MB to 1 GB.
+  static size_t budget_for(size_t available);
+
+ protected:
+  // Hooks for a platform built on this one (SndstationPlatform): the system's MIDI devices; the
+  // game controllers, opened at start; an event, before the default handling (true: handled); and
+  // the buttons held, read once per poll after the events.
+  virtual std::unique_ptr<MidiPort> make_midi();
+  virtual void open_input();
+  virtual bool take_event(const SDL_Event&) { return false; }
+  virtual uint32_t read_buttons() { return keys_ | read_pad(); }
+
+  const char* name_ = "SDL2";
+  std::string data_dir_;  // ends with a slash
+  bool handheld_ = false;
+  size_t sample_budget_ = 0;
 
  private:
   static void sdl_audio_callback(void* user, Uint8* stream, int len);
@@ -64,9 +87,6 @@ class Sdl2Platform : public Platform {
   uint32_t read_pad() const;
   std::string resolve(const char* path) const { return path[0] == '/' ? path : data_dir_ + path; }
 
-  const char* name_ = "SDL2";
-  std::string data_dir_;  // ends with a slash
-  bool handheld_ = false;
   bool awake_held_ = false;  // keep_awake's files are in place
 #ifdef __linux__
   bool audio_rt_tried_ = false;  // audio thread only

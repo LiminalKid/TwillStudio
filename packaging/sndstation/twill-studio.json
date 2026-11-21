@@ -1,0 +1,6 @@
+{
+  "name":        "Twill Studio",
+  "description": "Piano-roll groovebox: synths, drums and samples",
+  "exec":        ["/usr/lib/twill-studio/twill-studio.sh"],
+  "order":       50
+}

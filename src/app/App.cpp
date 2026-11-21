@@ -4,6 +4,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdio>
+#include <set>
 
 #include "app/ArrangementView.h"
 #include "app/DemoSong.h"
@@ -12,6 +13,7 @@
 #include "app/MixerView.h"
 #include "app/Paper.h"
 #include "app/PianoRollView.h"
+#include "app/PresetLoader.h"
 #include "app/SongNames.h"
 #include "Version.h"
 #include "engine/PlaitsVoice.h"
@@ -27,7 +29,15 @@ constexpr uint64_t kAutosaveDelayUs = 3000000;  // save 3 s after the last edit
 constexpr int kStrip = 32;                      // see App::draw
 }  // namespace
 
-App::App(Platform& platform) : p_(platform) {}
+namespace {
+#ifdef __EMSCRIPTEN__
+constexpr bool kLoadInBackground = false;  // the web build has no threads
+#else
+constexpr bool kLoadInBackground = true;
+#endif
+}  // namespace
+
+App::App(Platform& platform) : p_(platform), loader_(std::make_unique<PresetLoader>(platform, kLoadInBackground)) {}
 App::~App() = default;
 
 bool App::start() {
@@ -45,7 +55,8 @@ bool App::start() {
   open_.assign(project_.tracks.size(), Placement{});
   validate_open_clips();
 
-  engine_ = std::make_unique<Engine>(p_.max_voices());
+  engine_ = std::make_unique<Engine>(p_.max_voices(), p_.max_synth_voices());
+  engine_->set_output_boost_db(float(boost_db_));
   arrangement_ = std::make_unique<ArrangementView>(*this);
   roll_ = std::make_unique<PianoRollView>(*this);
   instrument_ = std::make_unique<InstrumentView>(*this);
@@ -65,8 +76,12 @@ bool App::open_audio() {
     static_cast<App*>(user)->engine_->render(out, frames);
   }, this);
   AudioInfo ai = p_.audio_info();
-  p_.log("audio %s: %d Hz, %d frames per block (%s buffer%s)", ok ? "open" : "FAILED", ai.sample_rate,
-         ai.block_frames, safe_audio() ? "Safe" : "Low", audio_pref_ < 0 ? ", this system's default" : "");
+  if (p_.system_sets_audio_buffer())
+    p_.log("audio %s: %d Hz, %d frames per block (the system's setting)", ok ? "open" : "FAILED", ai.sample_rate,
+           ai.block_frames);
+  else
+    p_.log("audio %s: %d Hz, %d frames per block (%s buffer%s)", ok ? "open" : "FAILED", ai.sample_rate,
+           ai.block_frames, safe_audio() ? "Safe" : "Low", audio_pref_ < 0 ? ", this system's default" : "");
   if (ok && ai.sample_rate != Engine::kSampleRate)
     p_.log("warning: device runs at %d Hz; pitch will be off until resampling exists", ai.sample_rate);
   // MIDI out leaves when the audio around it reaches the speaker: about two blocks after rendering
@@ -150,13 +165,29 @@ void App::toggle_recording() {
   invalidate(top_bar_);
 }
 
-void App::toggle_settings() {
+std::string App::build_id() { return std::string(TWILL_VERSION) + " " + TWILL_COMMIT; }
+
+void App::open_main_menu() {
+  arrangement_->open_main_menu();
+  menu_panel_ = true;
+}
+
+void App::toggle_main_menu() {
+  if (inspector_open() && inspector_title_ == kMainMenuTitle) close_inspector();
+  else open_main_menu();
+}
+
+void App::toggle_screen_menu() {
   if (inspector_open() && menu_panel_) {
     close_inspector();
-  } else {
-    arrangement_->open_project_settings();
-    menu_panel_ = true;
+    return;
   }
+  // What the screen shows: the song in the arrangement (and the mixer), the open clip in the roll,
+  // the track in the sound view.
+  if (view_ == View::PianoRoll && open_clip()) roll_->open_clip_settings();
+  else if (view_ == View::Instrument) open_track_settings(track_);
+  else arrangement_->open_main_menu();
+  menu_panel_ = true;
 }
 
 void App::step_view(int by) {
@@ -196,20 +227,199 @@ std::shared_ptr<const SampleData> App::load_sample(const std::string& path, std:
   return s;
 }
 
+size_t App::loaded_sample_bytes() const {
+  size_t n = 0;
+  for (const auto& s : samples_) n += s.second->bytes();
+  return n;
+}
+
+const Multisample* App::load_multisample(const std::string& path, std::string* error) {
+  auto it = multisamples_.find(path);
+  if (it != multisamples_.end()) return it->second.get();
+  auto failed = multisample_errors_.find(path);
+  if (failed != multisample_errors_.end()) {
+    if (error) *error = failed->second;
+    return nullptr;
+  }
+  if (error) error->clear();
+  if (!multisample_loading(path)) {
+    load_queue_.push_back(path);
+    pump_loads();
+    // Without threads it has loaded already.
+    it = multisamples_.find(path);
+    if (it != multisamples_.end()) return it->second.get();
+    failed = multisample_errors_.find(path);
+    if (failed != multisample_errors_.end() && error) *error = failed->second;
+  }
+  return nullptr;
+}
+
+bool App::multisample_loading(const std::string& path) const {
+  if (!loader_->idle() && loader_->path() == path) return true;
+  return std::find(load_queue_.begin(), load_queue_.end(), path) != load_queue_.end();
+}
+
+bool App::loading_status(std::string& name, int& done, int& total) const {
+  if (loader_->idle()) return false;
+  const std::string& path = loader_->path();
+  name = path.substr(path.find_last_of('/') + 1);
+  name = name.substr(0, name.find_last_of('.'));
+  done = loader_->done();
+  total = loader_->total();
+  return true;
+}
+
+void App::pump_loads() {
+  for (;;) {
+    PresetLoader::Result r;
+    if (loader_->take(r)) {
+      for (auto& s : r.samples) samples_.emplace(s.first, s.second);
+      for (auto& e : r.sample_errors) sample_errors_[e.first] = e.second;
+      if (r.preset) {
+        multisamples_[r.path] = r.preset;
+        multisample_missing_[r.path] = r.missing;
+        if (r.missing) p_.log("multisample %s: %d of %zu samples missing", r.path.c_str(), r.missing, r.preset->zones.size());
+      } else {
+        multisample_errors_[r.path] = r.error;
+        p_.log("multisample %s: %s", r.path.c_str(), r.error.c_str());
+      }
+      ++loads_done_;
+      if (pick_.path == r.path) {
+        const int track = pick_.track;
+        pick_ = Pick();
+        if (r.preset && track >= 0 && track < int(project_.tracks.size())) {
+          apply_pick(track, r.path, *r.preset);
+        } else if (!r.preset) {
+          message(r.error);
+        }
+      }
+      invalidate_all();
+    }
+    if (!loader_->idle() || load_queue_.empty()) return;
+    PresetLoader::Job job;
+    job.path = load_queue_.front();
+    load_queue_.pop_front();
+    job.have = samples_;
+    if (const size_t budget = p_.sample_budget()) {
+      const size_t used = loaded_sample_bytes();
+      job.budget = used < budget ? budget - used : 1;
+    }
+    loader_->start(std::move(job));
+    if (!kLoadInBackground) continue;  // finished already: take it
+    return;
+  }
+}
+
+void App::finish_loading() {
+  while (!loader_->idle() || !load_queue_.empty()) {
+    loader_->wait();
+    pump_loads();
+  }
+}
+
+void App::pick_multisample(int track, const std::string& path) {
+  retry_multisample(path);
+  pick_ = Pick{track, path};
+  if (const Multisample* m = load_multisample(path)) {
+    pick_ = Pick();
+    apply_pick(track, path, *m);
+  }
+}
+
+void App::apply_pick(int track, const std::string& path, const Multisample& m) {
+  Track t = project_.tracks[size_t(track)];
+  t.sampler.preset = path;
+  // The preset's amp envelope becomes the track's (a piano's release matters); it's the track's
+  // to change after.
+  if (m.has_envelope) {
+    t.tone.attack = env_value(m.envelope.attack);
+    t.tone.decay = env_value(m.envelope.decay);
+    t.tone.sustain = m.envelope.sustain;
+    t.tone.release = env_value(m.envelope.release);
+  }
+  history_.change_track(track, t);
+  const int missing = multisample_missing(path);
+  // A track playing one note at a time can't play chords on it: worth saying, though how the
+  // preset will be played is the user's choice, so the voices are left alone.
+  const bool one_voice = t.voices <= 1;
+  if (m.unused.empty() && !missing && !one_voice) {
+    message(m.name + " loaded");
+    return;
+  }
+  // What it has that the app doesn't play, said once, when it's picked.
+  std::string text;
+  if (!m.unused.empty()) {
+    text = "It plays, but not everything in it is played here: ";
+    for (size_t i = 0; i < m.unused.size(); ++i)
+      text += (i == 0 ? "" : i + 1 == m.unused.size() ? " and " : ", ") + m.unused[i];
+    text += ". The track's filter, envelope and modulators can stand in for some of it.";
+  }
+  if (missing) {
+    text += (text.empty() ? "" : " ") + std::to_string(missing) + (missing == 1 ? " zone's sample" : " zones' samples") +
+            " couldn't be read, so " + (missing == 1 ? "it is" : "they are") + " silent.";
+  }
+  if (one_voice)
+    text += std::string(text.empty() ? "" : " ") + "This track plays one note at a time (Voices: " + voices_label(t.voices) +
+            "). To play chords on it, raise Voices in the sound view.";
+  show_notice(m.name + " loaded", text);
+}
+
+void App::show_notice(std::string title, std::string text) {
+  notice_title_ = std::move(title);
+  notice_text_ = std::move(text);
+  invalidate_all();
+}
+
+size_t App::multisample_bytes(const std::string& preset) const {
+  auto m = multisamples_.find(preset);
+  if (m == multisamples_.end()) return 0;
+  std::set<std::string> seen;
+  size_t n = 0;
+  for (const Zone& z : m->second->zones) {
+    if (!seen.insert(z.sample).second) continue;
+    auto s = samples_.find(z.sample);
+    if (s != samples_.end()) n += s->second->bytes();
+  }
+  return n;
+}
+
+int App::multisample_missing(const std::string& path) const {
+  auto it = multisample_missing_.find(path);
+  return it == multisample_missing_.end() ? 0 : it->second;
+}
+
 void App::free_unused_samples() {
   const uint64_t now = p_.micros();
   if (now - unused_checked_us_ < 500000 && unused_checked_us_ != 0) return;
   unused_checked_us_ = now;
   // In use: anything a track names (whatever its instrument, so switching back doesn't reload).
   // The newest snapshot matches the project here (sync_engine() ran earlier in the frame).
+  // A multisample's samples count as named by the tracks that use its preset.
   auto used = [&](const std::string& path) {
     for (const Track& t : project_.tracks) {
       if (t.sampler.sample == path) return true;
       for (const KitSlot& k : t.sampler.kit)
         if (k.sample == path) return true;
+      if (!t.sampler.preset.empty()) {
+        auto m = multisamples_.find(t.sampler.preset);
+        if (m != multisamples_.end())
+          for (const Zone& z : m->second->zones)
+            if (z.sample == path) return true;
+      }
     }
     return false;
   };
+  // Presets no track names are forgotten (their samples go below); using one again loads it again.
+  for (auto it = multisamples_.begin(); it != multisamples_.end();) {
+    bool named = false;
+    for (const Track& t : project_.tracks) named |= t.sampler.preset == it->first;
+    if (named || pick_.path == it->first) {
+      ++it;
+    } else {
+      multisample_missing_.erase(it->first);
+      it = multisamples_.erase(it);
+    }
+  }
   const uint64_t callbacks = engine_->callbacks();
   for (auto it = samples_.begin(); it != samples_.end();) {
     if (used(it->first)) {
@@ -278,6 +488,15 @@ void App::open_about() {
   fields.push_back(row("Audio", std::to_string(ai.sample_rate) + " Hz, " + std::to_string(ai.block_frames) + " frames"));
   // Live: how long the audio takes to make, as a share of the time it has.
   fields.push_back({"Audio load", [this] { return load_text(); }, nullptr});
+  fields.push_back({"Samples", [this] {
+                      char b[64];
+                      if (p_.sample_budget())
+                        std::snprintf(b, sizeof b, "%zu of %zu MB", loaded_sample_bytes() >> 20, p_.sample_budget() >> 20);
+                      else
+                        std::snprintf(b, sizeof b, "%zu MB", loaded_sample_bytes() >> 20);
+                      return std::string(b);
+                    },
+                    nullptr});
   fields.push_back({"Since start", [this] {
                       char b[48];
                       std::snprintf(b, sizeof b, "highest %.0f%%, %u late", engine_->load_highest() * 100,
@@ -362,7 +581,8 @@ void App::open_controls() {
   open_inspector("Controls", std::move(fields));
 }
 
-void App::add_project_fields(std::vector<InspectorField>& fields) {
+// The song: its name, and saving, loading and starting one.
+void App::add_song_fields(std::vector<InspectorField>& fields) {
   fields.push_back({"Name", [this] { return project_.name; }, nullptr, [this] {
                       close_inspector();
                       name_edit_ = true;
@@ -371,8 +591,11 @@ void App::add_project_fields(std::vector<InspectorField>& fields) {
                       name_cursor_ = int(name_draft_.size());
                       invalidate_all();
                     }});
-  fields.push_back({"Save", [] { return std::string("press A"); }, nullptr, [this] {
-                      if (save_project_file()) message("Saved \"" + project_.name + "\"");
+  fields.push_back({"New project", [] { return std::string("press A"); }, nullptr, [this] {
+                      if (!confirm_discard("start a new project")) return;
+                      new_project();
+                      close_inspector();
+                      message("New project");
                     }});
   fields.push_back({"Load", [] { return std::string("press A"); }, nullptr, [this] {
                       std::vector<Platform::DirEntry> entries;
@@ -395,12 +618,30 @@ void App::add_project_fields(std::vector<InspectorField>& fields) {
                       }
                       open_inspector("Load a project", std::move(list));
                     }});
-  fields.push_back({"New project", [] { return std::string("press A"); }, nullptr, [this] {
-                      if (!confirm_discard("start a new project")) return;
-                      new_project();
-                      close_inspector();
-                      message("New project");
+  fields.push_back({"Save", [] { return std::string("press A"); }, nullptr, [this] {
+                      if (save_project_file()) message("Saved \"" + project_.name + "\"");
                     }});
+}
+
+// Getting the music out: the song, or each track, as WAV files.
+void App::add_render_fields(std::vector<InspectorField>& fields) {
+  fields.push_back({"Render to WAV", [] { return std::string("press A"); }, nullptr, [this] {
+                      message("Rendering...");
+                      if (render_song_to_wav()) message("Saved renders/" + file_safe(project_.name) + ".wav");
+                    }});
+  fields.push_back({"Render stems", [] { return std::string("press A"); }, nullptr, [this] {
+                      message("Rendering stems...");
+                      const int n = render_stems();
+                      if (n > 0) message("Saved " + std::to_string(n) + " stems to renders/" + file_safe(project_.name) + " stems");
+                      else message("No tracks to render");
+                    }});
+}
+
+// MIDI: recording from a keyboard, the clock, and the devices connected.
+void App::add_midi_fields(std::vector<InspectorField>& fields) {
+  // While on and playing, notes from a MIDI keyboard are recorded into the open clip ("Rec" on top).
+  fields.push_back({"Record from MIDI", [this] { return std::string(recording_ ? "On" : "Off"); },
+                    [this](int, bool) { toggle_recording(); }, [this] { toggle_recording(); }});
   fields.push_back({"MIDI clock",
                     [this] {
                       static const char* const names[] = {"Off", "Send", "Follow"};
@@ -414,19 +655,6 @@ void App::add_project_fields(std::vector<InspectorField>& fields) {
                       last_edit_us_ = p_.micros();
                     }});
   fields.push_back({"MIDI devices", [this] { return p_.midi() ? p_.midi()->describe() : std::string("none"); }, nullptr});
-  // While on and playing, notes from a MIDI keyboard are recorded into the open clip ("Rec" on top).
-  fields.push_back({"Record from MIDI", [this] { return std::string(recording_ ? "On" : "Off"); },
-                    [this](int, bool) { toggle_recording(); }, [this] { toggle_recording(); }});
-  fields.push_back({"Render to WAV", [] { return std::string("press A"); }, nullptr, [this] {
-                      message("Rendering...");
-                      if (render_song_to_wav()) message("Saved renders/" + file_safe(project_.name) + ".wav");
-                    }});
-  fields.push_back({"Render stems", [] { return std::string("press A"); }, nullptr, [this] {
-                      message("Rendering stems...");
-                      const int n = render_stems();
-                      if (n > 0) message("Saved " + std::to_string(n) + " stems to renders/" + file_safe(project_.name) + " stems");
-                      else message("No tracks to render");
-                    }});
 }
 
 bool App::has_unsaved_changes() {
@@ -438,6 +666,10 @@ bool App::has_unsaved_changes() {
 
 bool App::confirm_discard(const char* what) {
   if (!has_unsaved_changes()) return true;
+  return confirm_twice(what, std::string("Unsaved changes: press A again to ") + what);
+}
+
+bool App::confirm_twice(const char* what, const std::string& prompt) {
   const uint64_t now = p_.micros();
   if (confirm_what_ == what && now < confirm_until_us_) {
     confirm_what_.clear();
@@ -445,7 +677,7 @@ bool App::confirm_discard(const char* what) {
   }
   confirm_what_ = what;
   confirm_until_us_ = now + 4000000;
-  message(std::string("Unsaved changes: press A again to ") + what);
+  message(prompt);
   return false;
 }
 
@@ -510,9 +742,15 @@ std::vector<float> App::render_offline(const Project& song, bool master) {
   const Tick end = std::max<Tick>(4 * kTicksPerQuarter, project_.song_end());
   Project p = song;
   p.loop = false;
+  // Its presets loaded first: the render doesn't wait for the background.
+  for (const Track& t : p.tracks)
+    if (t.instrument == InstrumentType::Sampler && t.sampler.mode == SamplerMode::Multi && !t.sampler.preset.empty())
+      load_multisample(t.sampler.preset);
+  finish_loading();
   Engine e(std::max(16, p_.max_voices()));
   e.set_master_bypass(!master);
-  e.submit(build_snapshot(p, p_.max_tracks(), 1, [this](const std::string& path) { return load_sample(path).get(); }));
+  e.submit(build_snapshot(p, p_.max_tracks(), 1, [this](const std::string& path) { return load_sample(path).get(); },
+                                 [this](const std::string& path) { return load_multisample(path); }));
   e.locate(0);
   e.play();
   const double seconds = end / double(kTicksPerQuarter) * 60.0 / p.tempo + 3.0;
@@ -840,6 +1078,7 @@ void App::load_settings() {
     if (line == "names=untitled") auto_names_ = false;
     if (line == "audio=safe") audio_pref_ = 1;
     if (line == "audio=low") audio_pref_ = 0;
+    if (line.rfind("boost=", 0) == 0) boost_db_ = std::max(0, std::min(12, std::atoi(line.c_str() + 6) / 3 * 3));
     at = end + 1;
   }
 }
@@ -847,8 +1086,15 @@ void App::load_settings() {
 void App::save_settings() {
   const std::string text = std::string("theme=") + (theme_.dark ? "dark" : "light") + "\n" +
                            "names=" + (auto_names_ ? "auto" : "untitled") + "\n" +
-                           (audio_pref_ < 0 ? "" : audio_pref_ ? "audio=safe\n" : "audio=low\n");
+                           (audio_pref_ < 0 ? "" : audio_pref_ ? "audio=safe\n" : "audio=low\n") +
+                           (boost_db_ ? "boost=" + std::to_string(boost_db_) + "\n" : std::string());
   p_.write_file(kSettingsName, std::vector<uint8_t>(text.begin(), text.end()));
+}
+
+void App::set_output_boost_db(int db) {
+  boost_db_ = std::max(0, std::min(12, db / 3 * 3));
+  engine_->set_output_boost_db(float(boost_db_));
+  save_settings();
 }
 
 void App::set_auto_names(bool on) {
@@ -912,8 +1158,9 @@ void App::step_sound(int track, int step) {
 
 // --- Inspector ------------------------------------------------------------------------------
 
-void App::open_inspector(std::string title, std::vector<InspectorField> fields) {
+void App::open_inspector(std::string title, std::vector<InspectorField> fields, std::string note) {
   inspector_title_ = std::move(title);
+  inspector_note_ = std::move(note);
   inspector_fields_ = std::move(fields);
   inspector_live_ = false;
   inspector_sel_ = 0;
@@ -933,6 +1180,7 @@ void App::close_inspector() {
   menu_panel_ = false;
   if (inspector_fields_.empty()) return;
   inspector_fields_.clear();
+  input_.consume_held();
   invalidate_all();
 }
 
@@ -974,11 +1222,11 @@ void App::handle_global() {
     quit_ = true;
     return;
   }
-  // Menu on its own: the project panel (tempo, key, scale, save and load...), from any view.
+  // Menu on its own: the settings of what the screen shows (toggle_screen_menu()).
   if (in.pressed(kMenu)) menu_used_ = false;
   if (in.held(kMenu) && in.pressed(~uint32_t(kMenu))) menu_used_ = true;
   if (in.released(kMenu) && !menu_used_ && !name_edit_) {
-    toggle_settings();  // a second tap puts it away
+    toggle_screen_menu();  // a second tap puts it away
     return;
   }
   // L2 / R2: the previous / next view, in one press (Select + Left / Right does the same).
@@ -993,9 +1241,9 @@ void App::handle_global() {
     if (view_ == View::PianoRoll && (in.pressed(kUp) || in.pressed(kDown))) roll_->set_lane_focus(in.pressed(kDown));
     // In the sound view, Up / Down choose the track (elsewhere the arrangement is where to pick one).
     if (view_ == View::Instrument && (in.pressed(kUp) || in.pressed(kDown))) set_track(track_ + (in.pressed(kDown) ? 1 : -1));
-    // Select + X: the settings panel, as Menu opens it. Menu is awkward to reach on some handhelds
-    // (or kept by the system), and not all of them have sticks to click.
-    if (in.pressed(kX) && !name_edit_) toggle_settings();
+    // Select + X: the main menu, from any view. (Menu opens the screen's own settings; it's also
+    // awkward to reach on some handhelds, or kept by the system.)
+    if (in.pressed(kX) && !name_edit_) toggle_main_menu();
     // Copy and paste: Y copies, R pastes at the cursor.
     if (in.pressed(kY) || in.pressed(kR)) {
       if (view_ == View::PianoRoll) in.pressed(kY) ? roll_->copy() : roll_->paste();
@@ -1044,11 +1292,14 @@ void App::play_from(Tick position) {
 }
 
 void App::sync_engine() {
-  if (history_.revision() == synced_revision_ && transport_changes_ == synced_transport_) return;
+  if (history_.revision() == synced_revision_ && transport_changes_ == synced_transport_ && loads_done_ == synced_loads_)
+    return;
   synced_revision_ = history_.revision();
   synced_transport_ = transport_changes_;
+  synced_loads_ = loads_done_;
   engine_->submit(build_snapshot(project_, p_.max_tracks(), ++snapshot_counter_,
-                                 [this](const std::string& path) { return load_sample(path).get(); }));
+                                 [this](const std::string& path) { return load_sample(path).get(); },
+                                 [this](const std::string& path) { return load_multisample(path); }));
 }
 
 void App::autosave(bool force) {
@@ -1071,9 +1322,23 @@ bool App::frame(const InputState& state, Canvas& canvas) {
     if (inspector_open() && inspector_live_) invalidate(inspector_rect_);
   }
 
+  pump_loads();
+  // While a preset loads: its progress in the hint bar, a few times a second.
+  if (!loader_->idle() && now - load_redraw_us_ >= 150000) {
+    load_redraw_us_ = now;
+    invalidate(hint_bar_);
+    if (view_ == View::Instrument) invalidate(content_);
+  }
   handle_global();
   // While Select or Menu is held, buttons belong to the global chords above, not the view.
-  if (!input_.held(kSelect) && !input_.held(kMenu)) {
+  if (notice_open()) {
+    if (input_.pressed(kA) || input_.pressed(kB) || input_.pressed(kX)) {
+      notice_title_.clear();
+      notice_text_.clear();
+      input_.consume_held();
+      invalidate_all();
+    }
+  } else if (!input_.held(kSelect) && !input_.held(kMenu)) {
     if (name_edit_) handle_name_edit();
     else if (inspector_open()) handle_inspector();
     else if (view_ == View::Arrangement) arrangement_->handle_input();
@@ -1165,6 +1430,7 @@ void App::draw(Canvas& c) {
         else mixer_->draw(c);
         if (inspector_open()) draw_inspector(c);
         if (name_edit_) draw_name_edit(c);
+        if (notice_open()) draw_notice(c);
       }
       if (!strip.intersect(hint_bar_).empty()) draw_hint_bar(c);
     }
@@ -1261,7 +1527,9 @@ void App::draw_hint_bar(Canvas& c) {
   const float sp = u(0.4f);
 
   std::vector<Hint> hints;
-  if (input_.held(kSelect)) {
+  if (notice_open()) {
+    hints = {{"A", "OK"}};
+  } else if (input_.held(kSelect)) {
     // Most important first: the bar drops what doesn't fit (a 640-pixel screen shows about four).
     hints = {{"Left/Right", "view"}, {"X", "settings"}, {"B", "undo"}, {"A", "redo"}};
     if (view_ == View::Instrument) hints.push_back({"Up/Down", "track"});
@@ -1294,8 +1562,13 @@ void App::draw_hint_bar(Canvas& c) {
   // before they would run into it or off the screen. Each hint is its buttons as a keycap, then
   // what they do.
   float limit = r.right() - u(8);
-  if (!message_.empty()) {
-    const std::string m = caps(message_);
+  std::string loading_name;
+  int done = 0, total = 0;
+  std::string shown = message_;
+  if (shown.empty() && loading_status(loading_name, done, total))
+    shown = "Loading " + loading_name + (total ? ": " + std::to_string(done) + " of " + std::to_string(total) : std::string("..."));
+  if (!shown.empty()) {
+    const std::string m = caps(shown);
     const float w = fs.measure(m.c_str(), sp);
     c.text(fs, limit - w, base, m.c_str(), theme_.cursor.mix(theme_.hint_text, 60), sp);
     limit -= w + u(16);
@@ -1325,10 +1598,56 @@ int App::draw_panel_frame(Canvas& c, const char* title) {
   return rule_y + int(u(4));
 }
 
+void App::draw_notice(Canvas& c) {
+  // A card in the middle of the view: the title, a rule, the text wrapped to fit, and the key.
+  const Font& tf = Font::get(FontFace::CondensedBold, u(kPanelTitle));
+  const Font& f = Font::get(FontFace::Regular, u(kPanelText));
+  const int w = std::min(content_.w - int(u(40)), int(u(420)));
+  const int pad = int(u(16)), line_h = int(u(kPanelText + 6));
+  std::vector<std::string> lines;
+  std::string line, word;
+  auto flush_word = [&] {
+    if (word.empty()) return;
+    const std::string tried = line.empty() ? word : line + " " + word;
+    if (!line.empty() && f.measure(tried.c_str()) > w - 2 * pad) {
+      lines.push_back(line);
+      line = word;
+    } else {
+      line = tried;
+    }
+    word.clear();
+  };
+  for (char ch : notice_text_) {
+    if (ch == ' ') flush_word();
+    else word += ch;
+  }
+  flush_word();
+  if (!line.empty()) lines.push_back(line);
+  const int h = int(u(44)) + int(lines.size()) * line_h + pad;
+  const Rect r{content_.x + (content_.w - w) / 2, content_.y + std::max(int(u(8)), (content_.h - h) / 2), w, h};
+  c.fill(Rect{r.x + int(u(4)), r.y + int(u(4)), r.w, r.h}, theme_.text.with_alpha(40));
+  c.fill(r, theme_.panel);
+  c.stroke_rect(r, std::max(1, int(u(1))), theme_.text);
+  const std::string title = caps(notice_title_);
+  c.text(tf, r.x + pad, r.y + int(u(26)), title.c_str(), theme_.text);
+  c.fill(Rect{r.x + pad, r.y + int(u(34)), r.w - 2 * pad, std::max(1, int(u(1)))}, theme_.text);
+  int y = r.y + int(u(44)) + int(u(kPanelText));
+  for (const std::string& l : lines) {
+    c.text(f, r.x + pad, y, l.c_str(), theme_.text);
+    y += line_h;
+  }
+}
+
 void App::draw_inspector(Canvas& c) {
   const Rect& r = inspector_rect_;
   const std::string title_caps = caps(inspector_title_);
   int y = draw_panel_frame(c, title_caps.c_str());
+  if (!inspector_note_.empty()) {  // just after the title, small and quiet (the right end has the scroll arrows)
+    const Font& tf = Font::get(FontFace::CondensedBold, u(kPanelTitle));
+    const Font& nf = Font::get(FontFace::CondensedSemiBold, u(kPanelText - 2));
+    c.text(nf, r.x + u(12) + tf.measure(title_caps.c_str()) + u(10), r.y + int(u(24)), inspector_note_.c_str(),
+           theme_.text_secondary);
+  }
   const Font& label_f = Font::get(FontFace::CondensedSemiBold, u(kPanelText));
   const Font& value_f = Font::get(FontFace::CondensedBold, u(kPanelText + 2));
   const Font& action_f = Font::get(FontFace::CondensedSemiBold, u(kPanelText + 1));
@@ -1405,10 +1724,13 @@ void App::draw_inspector(Canvas& c) {
         if (plus == std::string::npos) break;
         start = plus + 3;
       }
+      v = fit_text(action_f, v, r.right() - u(12) - (x + u(12)));
       c.text(action_f, r.right() - u(12) - action_f.measure(v.c_str()), base, v.c_str(), quiet);
     } else {
       const std::string label = caps(field.label);
-      c.text(label_f, r.x + u(12), base, label.c_str(), quiet, sp);
+      const float label_end = c.text(label_f, r.x + u(12), base, label.c_str(), quiet, sp);
+      // A long value (the MIDI devices, a file name) is cut short rather than run into the label.
+      v = fit_text(value_f, v, r.right() - u(12) - (label_end + u(12)));
       c.text(value_f, r.right() - u(12) - value_f.measure(v.c_str()), base, v.c_str(), ink);
     }
     y += row_h;

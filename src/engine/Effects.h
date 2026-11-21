@@ -30,8 +30,9 @@ class Effects {
   // The last stage, in place: the master level (smoothed, so automating it doesn't click), then a
   // look-ahead peak limiter with its ceiling at -0.3 dBFS, or with the limiter off, a tanh soft
   // clip. Either way the audio is delayed by kLimiterDelay frames, so switching doesn't jump.
+  // `boost` multiplies the master level, before the limiter (the device's output boost).
   static constexpr int kLimiterDelay = 64;  // 1.3 ms
-  void master_out(const MixSettings& m, float* io, int n);
+  void master_out(const MixSettings& m, float* io, int n, float boost = 1);
 
  private:
   struct Biquad {
@@ -56,15 +57,21 @@ class Effects {
   int lim_pos_ = 0, lim_need_pos_ = 0;
   float comp_env_ = 0;    // the peak envelope it follows
 
+  // Each effect sleeps once nothing has been sent to it for long enough that it has nothing left to
+  // play (its ring all silence), and wakes with the next block sent to it.
   // Chorus.
   std::vector<float> chorus_buf_;  // stereo ring
   int chorus_pos_ = 0;
   float chorus_phase_ = 0;
+  int chorus_quiet_ = 0;           // frames since anything was sent to it
   // Delay.
   std::vector<float> delay_buf_;   // stereo ring
   int delay_pos_ = 0;
   float delay_lp_[2] = {};
   float delay_time_ = 0;           // smoothed, in samples
+  int delay_quiet_ = 0;            // frames since it last wrote anything above -140 dB
+  bool delay_asleep_ = false;
+  int reverb_quiet_ = 0;           // frames since it last had input or played above -120 dB
   // Reverb, built in zeroed memory: it reads some of its state before setting it.
   struct ReverbDeleter {
     void operator()(clouds::Reverb* r) const;

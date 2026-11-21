@@ -55,6 +55,12 @@ class ChiptuneEngine : public Engine {
       size_t size,
       bool* already_enveloped);
   
+  // Twill Studio: the next clock starts the arpeggio again on the chord's first note, rather than
+  // stepping to the next one, so every note begins on the pitch it was written at.
+  inline void restart_arpeggio() {
+    restart_arpeggio_ = true;
+  }
+
   inline void set_envelope_shape(float envelope_shape) {
     envelope_shape_ = envelope_shape;
   }
@@ -70,6 +76,7 @@ class ChiptuneEngine : public Engine {
   float envelope_shape_;
   float envelope_state_;
   float aux_envelope_amount_;
+  bool restart_arpeggio_;  // Twill Studio
   
   DISALLOW_COPY_AND_ASSIGN(ChiptuneEngine);
 };

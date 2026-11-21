@@ -6,6 +6,7 @@
 // from MIDI, Start plays/stops, Select + Start plays from the cursor, Menu + Start quits.
 #pragma once
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <map>
 #include <memory>
@@ -20,6 +21,7 @@
 #include "engine/PlaitsVoice.h"
 #include "gfx/Canvas.h"
 #include "model/Edit.h"
+#include "model/Multisample.h"
 #include "platform/Platform.h"
 
 namespace twill {
@@ -28,6 +30,7 @@ class ArrangementView;
 class InstrumentView;
 class MixerView;
 class PianoRollView;
+class PresetLoader;
 
 // A list of settings shown in a panel on the right; up/down picks one, left/right changes it.
 struct InspectorField {
@@ -62,6 +65,7 @@ class App {
   Project& project() { return project_; }
   EditHistory& history() { return history_; }
   Engine& engine() { return *engine_; }
+  ArrangementView& arrangement() { return *arrangement_; }
   const Theme& theme() const { return theme_; }
   // A track's own colour (it keeps it when moved), from the theme's set.
   Color track_colour(int track) const {
@@ -74,6 +78,10 @@ class App {
   // New projects get a made-up two-word name ("Velvet Harbour") instead of "Untitled".
   bool auto_names() const { return auto_names_; }
   void set_auto_names(bool on);
+  // Output boost: gain before the master limiter for live playback, for a device that plays
+  // quietly (0, 3, 6, 9 or 12 dB). Renders are left as mixed.
+  int output_boost_db() const { return boost_db_; }
+  void set_output_boost_db(int db);
   // The audio buffer: Low keeps the delay short for playing live (512 frames on a handheld, about
   // 11 ms); Safe doubles it (1024, about 21 ms), for systems that drop out with the short one.
   // Until the user picks one, it's whichever the platform suggests. Changing it reopens the audio.
@@ -104,8 +112,16 @@ class App {
   void show(View v);
   // Moves through the views in order (arrangement, roll, sound, mixer), wrapping round.
   void step_view(int by);
-  // Opens the settings panel, or puts it away if it is open.
-  void toggle_settings();
+  // The main menu (song files, the song's tempo and key, MIDI, the app's settings, help): Select + X
+  // from any view, Menu in the arrangement and mixer. It's titled kMainMenuTitle, with build_id()
+  // beside the title.
+  static constexpr const char* kMainMenuTitle = "Main menu";
+  static std::string build_id();  // "0.5.0 500fa1e"
+  void open_main_menu();
+  void toggle_main_menu();
+  // Menu: the settings of what the screen shows (the main menu in the arrangement and mixer, the
+  // clip in the roll, the track in the sound view), or puts them away if open.
+  void toggle_screen_menu();
   // Arms or disarms recording from MIDI (the settings panel's "Record from MIDI").
   void toggle_recording();
   // A panel listing every button combination.
@@ -127,7 +143,8 @@ class App {
   void invalidate(const Rect& r);
   void invalidate_all();
   Rect content_rect() const { return content_; }
-  void open_inspector(std::string title, std::vector<InspectorField> fields);
+  // `note`: a few quiet words beside the title (the main menu's build).
+  void open_inspector(std::string title, std::vector<InspectorField> fields, std::string note = "");
   bool inspector_open() const { return !inspector_fields_.empty(); }
   // The audio load as the About panel shows it: "45%, peaks 71%" (peaks over the last 3 s).
   std::string load_text();
@@ -135,10 +152,16 @@ class App {
   int inspector_scroll() const { return inspector_scroll_; }  // first row shown
   void close_inspector();
   int inspector_selection() const { return inspector_sel_; }
+  const std::vector<InspectorField>& inspector_fields() const { return inspector_fields_; }
   void select_inspector_row(int row);  // scrolls it into view
+  // True on the second press of the same thing within four seconds; the first shows `prompt`.
+  bool confirm_twice(const char* what, const std::string& prompt);
   void message(const std::string& text);  // shown briefly in the hint bar
   // Adds the project file actions (save, load, new, render) to a settings panel's fields.
-  void add_project_fields(std::vector<InspectorField>& fields);
+  // The settings menu's song, export and MIDI rows.
+  void add_song_fields(std::vector<InspectorField>& fields);
+  void add_render_fields(std::vector<InspectorField>& fields);
+  void add_midi_fields(std::vector<InspectorField>& fields);
   void open_about();  // version, commit and build date
   // Project files, in projects/ in the data folder.
   bool save_project_file();
@@ -158,11 +181,38 @@ class App {
   // free_unused_samples()); using it again loads it again.
   std::shared_ptr<const SampleData> load_sample(const std::string& path, std::string* error = nullptr);
   size_t loaded_samples() const { return samples_.size(); }
+  size_t loaded_sample_bytes() const;
+  size_t multisample_bytes(const std::string& preset) const;  // its samples' share of the memory
+  // A multisample's preset (.dspreset or .sfz), read once with its zones' samples loaded (they're
+  // kept while a track uses the preset). It loads in the background: null until it's ready
+  // (multisample_loading() says when it's on its way), or null with why if the preset can't be
+  // read or its samples would take more memory than the platform allows. Missing samples are left
+  // out, and counted in multisample_missing().
+  const Multisample* load_multisample(const std::string& path, std::string* error = nullptr);
+  bool multisample_loading(const std::string& path) const;  // queued, or loading now
+  // The preset loading now: its name, and its samples read so far of how many. False if none.
+  bool loading_status(std::string& name, int& done, int& total) const;
+  void finish_loading();  // waits until every queued preset has loaded (export, tests)
+  int multisample_missing(const std::string& path) const;  // its zones whose samples couldn't load
+  // Forgets that a preset couldn't be loaded, so the next load tries again (picked in the browser).
+  void retry_multisample(const std::string& path) { multisample_errors_.erase(path); }
+  // A preset picked for a track: once it has loaded, the track takes it and its amp envelope (one
+  // undo step), and a notice says what in it isn't played. A later pick replaces a waiting one.
+  void pick_multisample(int track, const std::string& path);
+  // Memory for samples: what's loaded, and what the platform allows (0: no limit).
+  size_t sample_budget() const { return p_.sample_budget(); }
+  // A note over the screen, a title and a paragraph, until A or B.
+  void show_notice(std::string title, std::string text);
+  bool notice_open() const { return !notice_title_.empty(); }
+  const std::string& notice_text() const { return notice_text_; }
   void free_unused_samples();  // every frame; checks twice a second
 
  private:
   void handle_global();
   void handle_inspector();
+  void pump_loads();  // takes a finished preset load, and starts the next
+  void apply_pick(int track, const std::string& path, const Multisample& m);
+  void draw_notice(Canvas& c);
   void sync_engine();
   void play_from(Tick song_position);
   void autosave(bool force);
@@ -191,6 +241,7 @@ class App {
   bool open_audio();  // with the buffer the setting asks for; logs what the device gave
   void load_settings();
   bool auto_names_ = true;
+  int boost_db_ = 0;
   uint32_t names_made_ = 0;
   void save_settings();
   // Recording from MIDI into the open clip (Select + X arms it).
@@ -215,6 +266,18 @@ class App {
   std::unique_ptr<MixerView> mixer_;
   std::map<std::string, std::shared_ptr<const SampleData>> samples_;
   std::map<std::string, std::string> sample_errors_;  // so a missing file isn't retried every frame
+  std::map<std::string, std::shared_ptr<Multisample>> multisamples_;
+  std::map<std::string, std::string> multisample_errors_;
+  std::map<std::string, int> multisample_missing_;
+  std::unique_ptr<PresetLoader> loader_;
+  std::deque<std::string> load_queue_;
+  struct Pick {
+    int track = -1;
+    std::string path;
+  } pick_;
+  uint64_t loads_done_ = 0, synced_loads_ = ~0ull;  // a finished load changes what the engine plays
+  uint64_t load_redraw_us_ = 0;
+  std::string notice_title_, notice_text_;
   // Loaded samples the project no longer uses, waiting for the engine to let go of them: the
   // snapshot it must be playing, and the callback count it must pass (two on from when nothing else
   // held the sample, so a preview that was playing it has stopped).
@@ -259,7 +322,7 @@ class App {
   uint64_t confirm_until_us_ = 0;
 
   // Inspector.
-  std::string inspector_title_;
+  std::string inspector_title_, inspector_note_;
   std::vector<InspectorField> inspector_fields_;
   // Notes from a MIDI keyboard passed on to a MIDI Out track: where each one went, for its note off.
   struct LiveOut {

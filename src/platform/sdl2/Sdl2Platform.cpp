@@ -119,13 +119,37 @@ bool env_flag(const char* name) {
   return v && *v && std::strcmp(v, "0") != 0;
 }
 
+// Bytes of memory free for new work, as the kernel reckons it (MemAvailable); 0 if unknown.
+size_t available_memory() {
+  FILE* f = std::fopen("/proc/meminfo", "r");
+  if (!f) return 0;
+  char line[128];
+  size_t kb = 0;
+  while (std::fgets(line, sizeof line, f))
+    if (std::sscanf(line, "MemAvailable: %zu kB", &kb) == 1) break;
+  std::fclose(f);
+  return kb * 1024;
+}
+
 }  // namespace
+
+size_t Sdl2Platform::budget_for(size_t available) {
+  const size_t reserve = size_t(160) << 20, low = size_t(64) << 20, high = size_t(1024) << 20;
+  const size_t room = available > reserve ? (available - reserve) / 10 * 6 : 0;
+  return std::max(low, std::min(high, room));
+}
 
 Sdl2Platform::Sdl2Platform() {
 #ifdef TWILL_HANDHELD
   handheld_ = true;
 #endif
   if (env_flag("TWILL_FULLSCREEN")) handheld_ = true;
+  // Handhelds share 1 GB or so with the system: samples get a share of what's free at the start.
+  // Without a reading, a cautious 256 MB.
+  if (handheld_) {
+    const size_t free = available_memory();
+    sample_budget_ = free ? budget_for(free) : size_t(256) << 20;
+  }
 }
 
 Sdl2Platform::~Sdl2Platform() {
@@ -166,6 +190,7 @@ bool Sdl2Platform::init() {
     std::snprintf(built, sizeof built, " (built with %d.%d.%d)", SDL_MAJOR_VERSION, SDL_MINOR_VERSION, SDL_PATCHLEVEL);
   log("SDL %d.%d.%d%s, video driver %s, audio driver %s", run.major, run.minor, run.patch, built,
       SDL_GetCurrentVideoDriver(), SDL_GetCurrentAudioDriver());
+  if (sample_budget_) log("samples may take %zu MB (%zu MB free at the start)", sample_budget_ >> 20, available_memory() >> 20);
 
   if (handheld_) {
     // Use the panel's own mode: the highest resolution the device offers.
@@ -203,13 +228,19 @@ bool Sdl2Platform::init() {
   update_size();
   follow_page_size();
 
-  midi_ = make_system_midi();
+  midi_ = make_midi();
   if (midi_) log("MIDI: %s", midi_->describe().c_str());
+  open_input();
+  return true;
+}
+
+std::unique_ptr<MidiPort> Sdl2Platform::make_midi() { return make_system_midi(); }
+
+void Sdl2Platform::open_input() {
   for (int i = 0; i < SDL_NumJoysticks(); ++i) {
     open_controller(i);
     if (joystick_ || controller_) break;
   }
-  return true;
 }
 
 void Sdl2Platform::update_size() {
@@ -388,6 +419,7 @@ uint32_t Sdl2Platform::read_pad() const {
 void Sdl2Platform::poll_input(InputState& out) {
   SDL_Event e;
   while (SDL_PollEvent(&e)) {
+    if (take_event(e)) continue;
     switch (e.type) {
       case SDL_QUIT: quit_ = true; break;
       case SDL_KEYDOWN:
@@ -414,7 +446,7 @@ void Sdl2Platform::poll_input(InputState& out) {
     }
   }
   follow_page_size();
-  out.held = keys_ | read_pad();
+  out.held = read_buttons();
   out.quit_requested = quit_;
 }
 

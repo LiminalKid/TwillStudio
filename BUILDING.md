@@ -36,6 +36,23 @@ as `build/trimui/TwillStudio-TrimUI.zip`, holding `Apps/Twill/` (with the menu's
 icon from `packaging/trimui/`): unzip it at the top of the SD card and Twill Studio appears under
 Apps. Songs go in the same `TwillStudio/` folder as with NextUI.
 
+**sndstation handhelds** (Debian with the sndstation launcher), cross-compiled with Zig. The build
+uses the sndstation SDK for sound, buttons and MIDI, built from its source: put a checkout (with
+its submodules) in `~/SDKs/sndstation`, or pass `-DSNDSTATION_DIR=<folder>`.
+
+    tools/make-sndstation-sysroot.sh sndy@<device>   # once: the device's SDL2 and alsa-lib, Debian's headers
+    cmake --preset sndstation && cmake --build --preset sndstation --target twill
+    tools/make-sndstation-deb.py                     # build/sndstation-deb/twill-studio_<version>_arm64.deb
+
+Install the package on the device with `sudo apt install ./twill-studio_<version>_arm64.deb`, then
+press X in the launcher's list to read it again. Twill plays through the unit's Audio settings
+(output, buffer size, volume) and its MIDI ports, so it has no Audio buffer setting of its own
+there. Songs, samples and renders go in `~/TwillStudio`, with the log of the last run,
+`log.txt`. The start script, `packaging/sndstation/twill-studio.sh`, also clears the `AUDIODEV`
+the launcher passes on (sndstation 0.15), which would otherwise put the sound on SDL's own ALSA
+stream. `cmake --preset macos-sndstation` builds the same platform on a Mac (`brew install sdl2
+sdl2_ttf sdl2_image`), with the SDK's keyboard map for the pad.
+
 **Web** (Emscripten: `brew install emscripten`):
 
     emcmake cmake -S . -B build/web -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build build/web

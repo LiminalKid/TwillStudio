@@ -101,11 +101,20 @@ std::string param_name(const Track& t, ParamId id);
 std::string cc_label(int cc);
 // Display text for a parameter's value ("1.2 kHz", "40 ms", "Forward").
 std::string format_param(ParamId id, float value);
+// The same for a track's setting, where its engine reads one in steps: the chiptune arpeggio's chord
+// and pattern, and the chord engine's chord, are named ("Minor", "Up-down, 2 octaves"). The sound
+// view, parameter locks and automation lanes all show values this way.
+std::string format_track_param(const Track& t, ParamId id, float value);
+// One press of a control from `value`: to the middle of the next step where the engine reads the
+// setting in steps, else by `fine` of the range (ten times that when coarse), or by 1 (4, or 12 for
+// the root note, when coarse) for a whole-number setting. Kept in range.
+float step_track_param(const Track& t, ParamId id, float value, int step, bool coarse, float fine);
 // "Legato" for 0, else the number of voices.
 std::string voices_label(int voices);
 // Conversions shared by the engine and the UI.
 float cutoff_hz(float v);      // 0-1 to 20 Hz - 20 kHz
 float env_seconds(float v);
+float env_value(float seconds);  // env_seconds' inverse, kept in range
 // A kit slot's decay: the time a hit takes to fade by 60 dB, 20 ms to about 3.6 s; 0 at 1, which
 // means no fade (the drum plays to the end of its sample).
 float kit_decay_seconds(float v);
@@ -189,6 +198,15 @@ struct Placement {
 
 enum class InstrumentType : uint8_t { Macro = 0, Sampler = 1, MidiOut = 2 };
 enum class MacroOutput : uint8_t { Main = 0, Aux = 1, Mix = 2 };
+// How fast the chiptune engine's arpeggio steps while a note is held: eighth, sixteenth,
+// thirty-second or sixty-fourth notes at the song's tempo.
+enum class ArpRate : uint8_t { Eighth = 0, Sixteenth = 1, ThirtySecond = 2, SixtyFourth = 3 };
+constexpr int kNumArpRates = 4;
+inline int arp_steps_per_beat(ArpRate r) { return 2 << int(r); }
+inline const char* arp_rate_name(ArpRate r) {
+  static const char* const names[kNumArpRates] = {"1/8", "1/16", "1/32", "1/64"};
+  return names[int(r)];
+}
 
 struct MacroSettings {
   int engine = 8;
@@ -196,12 +214,14 @@ struct MacroSettings {
   float decay = 0.5f, lpg_colour = 0.5f;
   float fm_amount = 0, timbre_amount = 0, morph_amount = 0;
   MacroOutput output = MacroOutput::Main;
+  ArpRate arp_rate = ArpRate::Sixteenth;  // the chiptune engine's arpeggio (track chunk version 9)
   bool operator==(const MacroSettings& o) const;
   float get(ParamId id) const;
   void set(ParamId id, float value);
 };
 
-enum class SamplerMode : uint8_t { Single = 0, Slice = 1, Kit = 2 };
+// Multi: a multisample, its zones read from a sample library's preset (model/Multisample.h).
+enum class SamplerMode : uint8_t { Single = 0, Slice = 1, Kit = 2, Multi = 3 };
 enum class LoopMode : uint8_t { Off = 0, Forward = 1, PingPong = 2 };
 enum class FilterType : uint8_t { Off = 0, LowPass = 1, BandPass = 2, HighPass = 3 };
 
@@ -233,6 +253,7 @@ struct SamplerSettings {
   int slices = 16;              // equal: how many; at transients: the most there can be
   bool slice_transients = false;  // track chunk version 6
   KitSlot kit[kKitSlots];
+  std::string preset;  // Multi: the preset file, as `sample` is named (track chunk version 10)
   bool operator==(const SamplerSettings& o) const;
   float get(ParamId id) const;
   void set(ParamId id, float value);

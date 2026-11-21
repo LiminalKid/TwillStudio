@@ -37,6 +37,9 @@ class PianoRollView {
 
   // A global chord used L or R (L/R + Start): releasing it then does nothing here.
 
+  // The open clip's panel: its loop length, the grid, key and scale... (Menu in the roll).
+  void open_clip_settings();
+
  private:
   struct Layout {
     Rect ruler, keys, grid;
@@ -54,7 +57,7 @@ class PianoRollView {
   std::vector<uint32_t> targets();
   int shifted_pitch(int pitch, int rows, bool octave) const;
   void keep_cursor_visible(const Layout& l);
-  void open_settings();
+  void open_settings();  // X: the note panel for the selection (or the note under the cursor), else the clip's
   void audition(int pitch) { app_.audition(app_.track(), pitch); }
   void lane_input();
   void draw_lane(Canvas& c, const Layout& l, const Clip& clip);

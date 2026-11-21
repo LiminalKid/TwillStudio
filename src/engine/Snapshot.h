@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 
+#include "model/Multisample.h"
 #include "model/Project.h"
 
 namespace twill {
@@ -16,6 +17,26 @@ struct SampleData;
 // Finds a loaded sample by path (on the UI thread, while building a snapshot). The samples must
 // stay alive while any snapshot or voice may use them (the app's sample cache keeps them).
 using SampleResolver = std::function<const SampleData*(const std::string& path)>;
+// The same for a multisample's preset, read with its zones (and their samples loaded, so `samples`
+// finds them); null when it can't be read.
+using MultisampleResolver = std::function<const Multisample*(const std::string& path)>;
+
+// A multisample zone as the audio thread plays it: its sample found, and its frames at 48 kHz.
+struct SnapZone {
+  const SampleData* sample = nullptr;
+  int index = 0;  // in the Multisample's zones (missing ones aren't here, so this can differ)
+  int lo_key = 0, hi_key = 127, lo_vel = 0, hi_vel = 127, root = 60;
+  float tune = 0, gain = 1, pan = 0;
+  int begin = 0, end = 0;        // frames
+  bool loop = false, one_shot = false;
+  int loop_a = 0, loop_b = 0;    // frames
+  int xfade = 0;                 // the loop's crossfade, frames (fits the loop and what's before it)
+  bool xfade_linear = false;
+  float keytrack = 1, veltrack = 1, lo_rand = 0, hi_rand = 1;
+  bool tune_after_keytrack = false;
+  SeqMode seq = SeqMode::Always;
+  int seq_group = 0, seq_length = 0, seq_position = 1;
+};
 
 // SamplerSettings without its strings, so the audio thread can copy it freely.
 struct SnapSampler {
@@ -62,6 +83,7 @@ struct SnapTrack {
   const SampleData* sample = nullptr;              // the sampler's sample (single and slice modes)
   const SampleData* kit[kKitSlots] = {};           // kit mode
   std::vector<int> slice_points;  // slicing at transients: each slice's first frame, then the last's end
+  std::vector<SnapZone> zones;    // multi mode: the preset's zones whose samples are loaded
   float level = 0.8f, pan = 0;
   float send_chorus = 0, send_delay = 0, send_reverb = 0;
   Modulator mods[kModulators];
@@ -85,6 +107,7 @@ struct Snapshot {
 // Builds a snapshot of the first `max_tracks` tracks (the rest stay in the project, silent on this
 // device; design §6, "Track count").
 std::unique_ptr<Snapshot> build_snapshot(const Project& p, int max_tracks, uint64_t revision,
-                                         const SampleResolver& samples = nullptr);
+                                         const SampleResolver& samples = nullptr,
+                                         const MultisampleResolver& multisamples = nullptr);
 
 }  // namespace twill

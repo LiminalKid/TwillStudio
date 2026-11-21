@@ -1,6 +1,7 @@
 // The sound of the current track (design §7, "Instrument"): a list of settings on the left, and a
-// picture on the right (the engine for the macro oscillator; the waveform, or the kit's slots,
-// for the sampler). Also the sample browser.
+// picture on the right (the engine for the macro oscillator; the waveform, the kit's slots or a
+// multisample's zones for the sampler; the envelope while its settings are chosen). Also the
+// sample browser.
 //
 //   Up/Down        choose a setting           Left/Right   change it (R held: bigger steps)
 //   A              on a sample: browse; on an action: do it
@@ -24,7 +25,7 @@ class InstrumentView {
   explicit InstrumentView(App& app) : app_(app) {}
 
   void handle_input();
-  void tick() {}
+  void tick();  // the zone map follows the zones sounding
   void draw(Canvas& c);
   std::vector<Hint> hints() const;
   bool browsing() const { return browser_open_; }
@@ -39,23 +40,32 @@ class InstrumentView {
     std::function<void(int step, bool coarse)> adjust;
     std::function<void()> press;                // A; null if A does nothing here
     std::function<void()> reset;                // B; null if nothing to reset
+    ParamId param = kParamNone;                 // the setting it changes, if it's one
   };
   std::vector<Row> rows();
   Row param_row(ParamId id, const char* label = nullptr);
-  void open_browser(std::function<void(const std::string&)> on_pick, const std::string& start);
+  enum class Browse { Samples, Presets };  // what the file browser lists besides folders
+  void open_browser(std::function<void(const std::string&)> on_pick, const std::string& start,
+                    Browse what = Browse::Samples);
   void browser_input();
   void draw_browser(Canvas& c, const Rect& r);
   void draw_waveform(Canvas& c, const Rect& r, const SampleData& s, const Track& t);
   void draw_kit(Canvas& c, const Rect& r, const Track& t);
   void draw_macro(Canvas& c, const Rect& r, const Track& t);
+  void draw_zones(Canvas& c, const Rect& r, const Track& t);
+  // While the amp envelope's settings are chosen: its shape, the selected stage marked.
+  void draw_adsr(Canvas& c, const Rect& r, const Track& t, ParamId selected);
+  void draw_lpg(Canvas& c, const Rect& r, const Track& t, ParamId selected);
   int audition_note() const;
 
   App& app_;
   int sel_ = 0, top_ = 0;
   int kit_slot_ = 0;
+  std::vector<int> sounding_;  // the zones of this track's multisample sounding, as last drawn
 
   // Browser.
   bool browser_open_ = false;
+  Browse browse_ = Browse::Samples;
   std::string dir_;                      // absolute, ends with '/'
   std::vector<Platform::DirEntry> entries_;  // starts with ".." ("Up a folder") below the root
   bool list_browser_dir(const std::string& dir, const std::string& select);  // false: unreadable

@@ -76,13 +76,16 @@ MacroParams macro_params_for(const MacroSettings& s, const ToneSettings& tone, f
 
 }  // namespace
 
-Engine::Engine(int max_voices) : effects_(std::make_unique<Effects>()) {
+Engine::Engine(int max_voices, int max_synth_voices) : effects_(std::make_unique<Effects>()) {
+  max_synth_voices_ = max_synth_voices > 0 && max_synth_voices < max_voices ? max_synth_voices : 0;
   reset_midi_cc();
   voices_.reserve(size_t(std::max(1, max_voices)));
   for (int i = 0; i < std::max(1, max_voices); ++i) {
     voices_.push_back(std::make_unique<Voice>());
     voices_.back()->tone.reset();
   }
+  voice_zones_.reset(new std::atomic<int32_t>[voices_.size()]);
+  for (size_t i = 0; i < voices_.size(); ++i) voice_zones_[i].store(-1);
   // The DSP's noise comes from one generator shared by every voice; start it the same way every
   // time, so a render is repeatable.
   PlaitsVoice::seed_random(0x21);
@@ -94,6 +97,14 @@ Engine::~Engine() {
   collect_garbage();
   for (Snapshot* p : pending_free_) delete p;
   delete snap_;
+}
+
+void Engine::sounding_zones(int track, std::vector<int>& out) const {
+  out.clear();
+  for (size_t i = 0; i < voices_.size(); ++i) {
+    const int32_t v = voice_zones_[i].load(std::memory_order_relaxed);
+    if (v >= 0 && (v >> 20) == track) out.push_back(v & 0xFFFFF);
+  }
 }
 
 void Engine::submit(std::unique_ptr<Snapshot> snapshot) {
@@ -219,6 +230,7 @@ void Engine::apply_command(const Command& c) {
           midi_note(t, c.pitch, uint8_t(n.velocity), gate);
           break;
         }
+        if (start_multi(c.track, t, n, gate, false)) break;
         Voice* v = allocate(c.track, t, c.pitch);
         start_voice(*v, c.track, n, gate, false);
       }
@@ -242,6 +254,7 @@ void Engine::apply_command(const Command& c) {
         Note n;
         n.pitch = c.pitch;
         n.velocity = uint8_t(c.value);
+        if (start_multi(c.track, t, n, INT64_MAX / 2, true)) break;
         Voice* v = allocate(c.track, t, c.pitch);
         start_voice(*v, c.track, n, INT64_MAX / 2, false);
         v->live = v->track == c.track;
@@ -279,9 +292,20 @@ Engine::Voice* Engine::allocate(int track, const SnapTrack& t, uint8_t pitch) {
       if (!oldest_held || v->started < oldest_held->started) oldest_held = v.get();
     }
   if (held >= t.voices && oldest_held) return oldest_held;
+  return any_voice(t.instrument == InstrumentType::Macro);
+}
+
+Engine::Voice* Engine::any_voice(bool synth) {
+  // With the synth voices all in use, a macro note takes one of them, so the macro oscillators
+  // never cost more than their limit however many samples play.
+  int synths = 0;
+  if (synth && max_synth_voices_)
+    for (auto& v : voices_) synths += v->track >= 0 && v->instrument == InstrumentType::Macro;
+  const bool synth_only = synth && max_synth_voices_ && synths >= max_synth_voices_;
   // A free voice, else the oldest released one anywhere, else the oldest of all.
   Voice* best = nullptr;
   for (auto& v : voices_) {
+    if (synth_only && (v->track < 0 || v->instrument != InstrumentType::Macro)) continue;
     if (v->track < 0) return v.get();
     bool better = !best || (v->gate == 0 && best->gate > 0) ||
                   ((v->gate == 0) == (best->gate == 0) && v->started < best->started);
@@ -294,7 +318,8 @@ Engine::Voice* Engine::allocate(int track, const SnapTrack& t, uint8_t pitch) {
   return best;
 }
 
-bool Engine::start_sampler(Voice& v, const SnapTrack& t, const Note& n) {
+bool Engine::start_sampler(Voice& v, const SnapTrack& t, const Note& n, int zone) {
+  v.xfade = 0;  // set for a multisample zone below
   const Settings s = locked(t, n);
   const SnapSampler& sm = s.sampler;
   v.pan = 0;
@@ -309,8 +334,25 @@ bool Engine::start_sampler(Voice& v, const SnapTrack& t, const Note& n) {
   LoopMode loop = sm.loop;
   float la = sm.loop_start, lb = sm.loop_end;
   bool reverse = sm.reverse;
+  int frames_a = -1, frames_b = -1, frames_la = -1, frames_lb = -1;  // multi: in frames, not fractions
 
   switch (sm.mode) {
+    case SamplerMode::Multi: {
+      if (zone < 0 || zone >= int(t.zones.size())) return false;
+      const SnapZone& z = t.zones[size_t(zone)];
+      smp = z.sample;
+      semitones = z.tune_after_keytrack ? (n.pitch - z.root) * z.keytrack + z.tune
+                                        : (n.pitch - z.root + z.tune) * z.keytrack;
+      semitones += sm.fine;
+      v.gain = (1 - z.veltrack + z.veltrack * n.velocity / 127.0f) * z.gain;
+      v.pan = z.pan;
+      frames_a = z.begin, frames_b = z.end, frames_la = z.loop_a, frames_lb = z.loop_b;
+      v.xfade = z.loop ? z.xfade : 0;
+      v.xfade_linear = z.xfade_linear;
+      loop = z.loop ? LoopMode::Forward : LoopMode::Off;
+      reverse = false;
+      break;
+    }
     case SamplerMode::Single:
       smp = t.sample;
       semitones = n.pitch - sm.root + sm.fine;
@@ -356,6 +398,12 @@ bool Engine::start_sampler(Voice& v, const SnapTrack& t, const Note& n) {
   v.end = std::max(v.begin + 1, std::min(frames, int(b * frames)));
   v.loop_a = std::max(v.begin, std::min(v.end - 1, int(la * frames)));
   v.loop_b = std::max(v.loop_a + 1, std::min(v.end, int(lb * frames)));
+  if (frames_a >= 0) {
+    v.begin = std::max(0, std::min(frames - 1, frames_a));
+    v.end = std::max(v.begin + 1, std::min(frames, frames_b));
+    v.loop_a = std::max(v.begin, std::min(v.end - 1, frames_la));
+    v.loop_b = std::max(v.loop_a + 1, std::min(v.end, frames_lb));
+  }
   v.loop = loop;
   v.inc = v.base_inc = std::pow(2.0, semitones / 12.0);
   if (reverse) {
@@ -372,7 +420,7 @@ bool Engine::start_sampler(Voice& v, const SnapTrack& t, const Note& n) {
   return true;
 }
 
-void Engine::start_voice(Voice& v, int track, const Note& n, int64_t gate, bool legato) {
+void Engine::start_voice(Voice& v, int track, const Note& n, int64_t gate, bool legato, int zone) {
   const SnapTrack& t = snap_->tracks[size_t(track)];
   v.track = track;
   v.instrument = t.instrument;
@@ -385,6 +433,7 @@ void Engine::start_voice(Voice& v, int track, const Note& n, int64_t gate, bool 
   v.started = clock_;  // clock_ is the start of the current sub-block
   v.live = false;
   v.one_shot = false;
+  v.zone = zone;
   if (!legato) {  // a legato note carries its modulators on, as it does the amp envelope
     v.mod_started = clock_;
     for (int m = 0; m < kModulators; ++m) {
@@ -399,13 +448,14 @@ void Engine::start_voice(Voice& v, int track, const Note& n, int64_t gate, bool 
   if (t.instrument == InstrumentType::Sampler) {
     v.tone.reset();
     v.env.reset();
-    if (!start_sampler(v, t, n)) {
+    if (!start_sampler(v, t, n, zone)) {
       v.track = -1;  // nothing to play (no sample, or the note has no slice or kit slot)
       return;
     }
     // Kit drums are one-shots: the note's end doesn't release them. They stop at the end of the
     // sample, or early when choked, stolen (a drum hit again at one voice per drum) or stopped.
-    if (t.sampler.mode == SamplerMode::Kit) {
+    if (t.sampler.mode == SamplerMode::Kit ||
+        (t.sampler.mode == SamplerMode::Multi && zone >= 0 && zone < int(t.zones.size()) && t.zones[size_t(zone)].one_shot)) {
       v.one_shot = true;
       v.gate = INT64_MAX / 2;
     }
@@ -427,6 +477,99 @@ void Engine::start_voice(Voice& v, int track, const Note& n, int64_t gate, bool 
   }
 }
 
+bool Engine::start_multi(int track, const SnapTrack& t, const Note& n, int64_t gate, bool live) {
+  if (t.instrument != InstrumentType::Sampler || t.sampler.mode != SamplerMode::Multi) return false;
+  // The zones this note plays: those holding its key and velocity, of each round robin only its
+  // turn, and of each random group one.
+  constexpr int kMaxLayers = 16;
+  int play[kMaxLayers], count = 0;
+  const int tr = std::min(track, kMaxTracks - 1);
+  bool turned[kSeqGroups] = {};
+  int candidates[kSeqGroups] = {}, pick[kSeqGroups];
+  bool last_there[kSeqGroups] = {};
+  // One random number for the note, for zones that play over a range of it.
+  rng_ = rng_ * 1664525u + 1013904223u;
+  const float chance = (rng_ >> 8) / float(1 << 24);
+  auto matches = [&](const SnapZone& z) {
+    return n.pitch >= z.lo_key && n.pitch <= z.hi_key && n.velocity >= z.lo_vel && n.velocity <= z.hi_vel &&
+           chance >= z.lo_rand && (chance < z.hi_rand || z.hi_rand >= 1);
+  };
+  auto is_random = [](const SnapZone& z) { return z.seq == SeqMode::Random || z.seq == SeqMode::TrueRandom; };
+  // Random groups: count the zones the note could play, then choose one (a Random group never the
+  // one it played last, when there's another).
+  for (int i = 0; i < int(t.zones.size()); ++i) {
+    const SnapZone& z = t.zones[size_t(i)];
+    if (!is_random(z) || !matches(z)) continue;
+    const int g = z.seq_group % kSeqGroups;
+    ++candidates[g];
+    if (z.seq == SeqMode::Random && i == seq_last_[tr][g]) last_there[g] = true;
+  }
+  for (int g = 0; g < kSeqGroups; ++g) {
+    pick[g] = -1;
+    const bool skip_last = last_there[g] && candidates[g] > 1;
+    if (candidates[g] == 0) continue;
+    rng_ = rng_ * 1664525u + 1013904223u;
+    pick[g] = int((rng_ >> 8) % uint32_t(candidates[g] - (skip_last ? 1 : 0)));  // the pick-th, counting on
+  }
+  for (int i = 0; i < int(t.zones.size()); ++i) {
+    const SnapZone& z = t.zones[size_t(i)];
+    if (!matches(z)) continue;
+    const int g = z.seq_group % kSeqGroups;
+    if (is_random(z)) {
+      if (pick[g] < 0) continue;
+      if (z.seq == SeqMode::Random && i == seq_last_[tr][g] && candidates[g] > 1) continue;
+      if (pick[g]-- == 0) {
+        if (count < kMaxLayers) play[count++] = i;
+        seq_last_[tr][g] = i;
+        pick[g] = -1;
+      }
+      continue;
+    }
+    if (z.seq == SeqMode::RoundRobin && z.seq_length > 0) {
+      turned[g] = true;
+      if (seq_turn_[tr][g] % z.seq_length + 1 != z.seq_position) continue;
+    }
+    if (count < kMaxLayers) play[count++] = i;
+  }
+  for (int g = 0; g < kSeqGroups; ++g)
+    if (turned[g]) ++seq_turn_[tr][g];
+  if (count == 0) return true;
+
+  // Polyphony in notes: a mono track lets its last note go; at the limit, the oldest held note goes.
+  int held = 0;
+  uint64_t oldest = UINT64_MAX;
+  int oldest_pitch = -1;
+  for (size_t i = 0; i < voices_.size(); ++i) {
+    const Voice* v = voices_[i].get();
+    if (v->track == track && v->gate > 0) {
+      // Count each note once, by its oldest layer (layers start together: the first of those).
+      bool first = true;
+      for (size_t j = 0; j < voices_.size() && first; ++j) {
+        const Voice* o = voices_[j].get();
+        if (j != i && o->track == track && o->gate > 0 && o->note.pitch == v->note.pitch &&
+            (o->started < v->started || (o->started == v->started && j < i)))
+          first = false;
+      }
+      if (!first) continue;
+      ++held;
+      if (v->started < oldest) oldest = v->started, oldest_pitch = v->note.pitch;
+    }
+  }
+  if (held >= t.voices && oldest_pitch >= 0)
+    for (auto& v : voices_)
+      if (v->track == track && v->gate > 0 && (t.voices == 1 || v->note.pitch == oldest_pitch)) {
+        v->env.kill(kChokeSeconds);
+        v->gate = 0;
+        v->live = false;
+      }
+  for (int k = 0; k < count; ++k) {
+    Voice* v = any_voice(false);
+    start_voice(*v, track, n, gate, false, play[k]);
+    v->live = live && v->track == track;
+  }
+  return true;
+}
+
 void Engine::start_note(int track, const Note& n, double tps) {
   if (n.probability < 100) {
     rng_ ^= rng_ << 13;
@@ -446,6 +589,10 @@ void Engine::start_note(int track, const Note& n, double tps) {
       if (track < kMaxTracks) cc_held_until_[track][which] = clock_ + uint64_t(gate);
     }
     midi_note(t, n.pitch, n.velocity, gate);
+    if (observer_) observer_->note_on(track, n.pitch, clock_, MacroParams());
+    return;
+  }
+  if (start_multi(track, t, n, std::max<int64_t>(kSubBlock, int64_t(n.length / tps)), false)) {
     if (observer_) observer_->note_on(track, n.pitch, clock_, MacroParams());
     return;
   }
@@ -497,19 +644,76 @@ void Engine::release_all() {
     if (v->gate > 0) release(*v);
 }
 
+// A stretch of frames with every read inside the sample and no loop, end or crossfade in reach.
+void Engine::render_sampler_run(Voice& v, float* l, float* r, int n) {
+  const SampleData& s = *v.sample;
+  const int16_t* pcm = s.pcm.data();
+  constexpr float kScale = 1.0f / 32767.0f;
+  double pos = v.pos;
+  const double inc = v.inc;
+  if (s.channels == 1) {
+    for (int i = 0; i < n; ++i) {
+      const int i0 = int(pos);
+      const float t = float(pos - i0);
+      const int16_t* p = pcm + (i0 - 1);
+      l[i] = r[i] = hermite4(p[0] * kScale, p[1] * kScale, p[2] * kScale, p[3] * kScale, t);
+      pos += inc;
+    }
+  } else {
+    for (int i = 0; i < n; ++i) {
+      const int i0 = int(pos);
+      const float t = float(pos - i0);
+      const int16_t* p = pcm + 2 * (i0 - 1);
+      l[i] = hermite4(p[0] * kScale, p[2] * kScale, p[4] * kScale, p[6] * kScale, t);
+      r[i] = hermite4(p[1] * kScale, p[3] * kScale, p[5] * kScale, p[7] * kScale, t);
+      pos += inc;
+    }
+  }
+  v.pos = pos;
+}
+
 void Engine::render_sampler(Voice& v, float* l, float* r, int n) {
   const SampleData& s = *v.sample;
   const int last = s.frames - 1;
-  auto at = [&](int i, int ch) { return s.data[size_t(2 * std::max(0, std::min(last, i)) + ch)]; };
+  auto at = [&](int i, int ch) { return s.at(std::max(0, std::min(last, i)), ch); };
+  const bool mono = s.channels == 1;
   for (int i = 0; i < n; ++i) {
     if (v.done) {
       l[i] = r[i] = 0;
       continue;
     }
+    // Most of a sample is far from its ends, its loop points and its crossfade: there, a run of
+    // frames needs none of the checks below. (Forwards only; the rest takes the careful way.)
+    if (v.dir > 0 && v.pos >= 1 && v.pos >= v.begin) {
+      double limit = v.loop == LoopMode::Off ? double(v.end) : double(v.loop_b);
+      if (v.xfade > 0 && v.loop == LoopMode::Forward) limit = std::min(limit, double(v.loop_b - v.xfade));
+      limit = std::min(limit, double(last - 2));
+      // Frames whose read and whose step both stay short of the limit.
+      const double room = (limit - v.pos) / v.inc - 1;
+      const int k = room > 0 ? int(std::min(room, double(n - i))) : 0;
+      if (k > 0) {
+        render_sampler_run(v, l + i, r + i, k);
+        i += k - 1;
+        continue;
+      }
+    }
     const int i0 = int(std::floor(v.pos));
     const float t = float(v.pos - i0);
     l[i] = hermite4(at(i0 - 1, 0), at(i0, 0), at(i0 + 1, 0), at(i0 + 2, 0), t);
-    r[i] = hermite4(at(i0 - 1, 1), at(i0, 1), at(i0 + 1, 1), at(i0 + 2, 1), t);
+    r[i] = mono ? l[i] : hermite4(at(i0 - 1, 1), at(i0, 1), at(i0 + 1, 1), at(i0 + 2, 1), t);
+    // A crossfaded loop: over its last `xfade` frames, the audio the same distance before the
+    // loop's start fades in as the end fades out; at the end the loop's start carries on from it.
+    if (v.xfade > 0 && v.loop == LoopMode::Forward && v.dir > 0 && v.pos >= v.loop_b - v.xfade && v.pos < v.loop_b) {
+      const float x = float((v.pos - (v.loop_b - v.xfade)) / v.xfade);  // 0..1 across the fade
+      float g_out, g_in;
+      if (v.xfade_linear) g_out = 1 - x, g_in = x;
+      else g_out = std::cos(x * 1.5707963f), g_in = std::sin(x * 1.5707963f);
+      const int j0 = i0 - (v.loop_b - v.loop_a);
+      const float pl = hermite4(at(j0 - 1, 0), at(j0, 0), at(j0 + 1, 0), at(j0 + 2, 0), t);
+      const float pr = mono ? pl : hermite4(at(j0 - 1, 1), at(j0, 1), at(j0 + 1, 1), at(j0 + 2, 1), t);
+      l[i] = l[i] * g_out + pl * g_in;
+      r[i] = r[i] * g_out + pr * g_in;
+    }
     v.pos += v.inc * v.dir;
     switch (v.loop) {
       case LoopMode::Off:
@@ -677,6 +881,7 @@ void Engine::render_block(float* out, int frames) {
         const SnapTrack& t = snap_->tracks[size_t(v->track)];
         used = t.sample == v->sample;
         for (const SampleData* k : t.kit) used = used || k == v->sample;
+        for (const SnapZone& z : t.zones) used = used || z.sample == v->sample;
       }
       if (!used) v->track = -1;
     }
@@ -830,6 +1035,7 @@ void Engine::render_block(float* out, int frames) {
         // (a retriggered note's attack, for one, would be inaudible).
         p.level = 1;
         p.envelope = env_to;  // what the FM, timbre and morph amounts follow
+        p.arp_step = float(60.0 * kSampleRate / (tempo() * arp_steps_per_beat(set.macro.arp_rate)));
         v.params = p;
         v.synth.render(p, main, aux, n);
         for (int i = 0; i < n; ++i) {
@@ -843,10 +1049,15 @@ void Engine::render_block(float* out, int frames) {
         v.inc = v.base_inc * (pitch_offset != 0 ? std::exp2(pitch_offset / 12.0) : 1.0);
         render_sampler(v, vl, vr, n);
         // The envelope, ramped across the block.
-        for (int i = 0; i < n; ++i) {
-          const float e = env_from + (env_to - env_from) * float(i + 1) / float(n);
-          vl[i] *= e;
-          vr[i] *= e;
+        if (env_from == env_to) {
+          for (int i = 0; i < n; ++i) vl[i] *= env_to, vr[i] *= env_to;
+        } else {
+          const float step = (env_to - env_from) / float(n);
+          for (int i = 0; i < n; ++i) {
+            const float e = env_from + step * float(i + 1);
+            vl[i] *= e;
+            vr[i] *= e;
+          }
         }
       }
       v.tone.process(vl, vr, n);
@@ -866,14 +1077,17 @@ void Engine::render_block(float* out, int frames) {
       gr *= track_level * v.gain;
       float& peak = v.block_peak;
       float& meter = peaks[tl];
+      const bool sends = send_c != 0 || send_d != 0 || send_r != 0;
+      float* o = out + 2 * pos;
       for (int i = 0; i < n; ++i) {
         const float l = vl[i] * gl, r = vr[i] * gr;
-        out[2 * (pos + i)] += l;
-        out[2 * (pos + i) + 1] += r;
-        // Sends, after the track's level and pan.
-        bus_chorus[2 * i] += l * send_c, bus_chorus[2 * i + 1] += r * send_c;
-        bus_delay[2 * i] += l * send_d, bus_delay[2 * i + 1] += r * send_d;
-        bus_reverb[2 * i] += l * send_r, bus_reverb[2 * i + 1] += r * send_r;
+        o[2 * i] += l;
+        o[2 * i + 1] += r;
+        if (sends) {  // after the track's level and pan
+          bus_chorus[2 * i] += l * send_c, bus_chorus[2 * i + 1] += r * send_c;
+          bus_delay[2 * i] += l * send_d, bus_delay[2 * i + 1] += r * send_d;
+          bus_reverb[2 * i] += l * send_r, bus_reverb[2 * i + 1] += r * send_r;
+        }
         peak = std::max(peak, std::max(std::fabs(vl[i]), std::fabs(vr[i])));
         meter = std::max(meter, std::max(std::fabs(l), std::fabs(r)));
       }
@@ -916,7 +1130,7 @@ void Engine::render_block(float* out, int frames) {
     if (!master_bypass_) {
       effects_->master_eq(mix_, block, n);
       effects_->master_compressor(mix_, block, n);
-      effects_->master_out(mix_, block, n);
+      effects_->master_out(mix_, block, n, output_boost_.load(std::memory_order_relaxed));
     }
     for (int i = 0; i < 2 * n; ++i) master_peak = std::max(master_peak, std::fabs(block[i]));
     clock_ += uint64_t(n);
@@ -930,6 +1144,15 @@ void Engine::render_block(float* out, int frames) {
   position_.store(Tick(tick_));
   elapsed_ticks_.store(elapsed_, std::memory_order_relaxed);
   active_voices_.store(active * kSubBlock / std::max(1, frames));  // average over the callback
+  for (size_t i = 0; i < voices_.size(); ++i) {
+    const Voice& v = *voices_[i];
+    int32_t z = -1;
+    if (v.track >= 0 && v.track < int(snap_->tracks.size()) && v.zone >= 0 && v.instrument == InstrumentType::Sampler) {
+      const SnapTrack& t = snap_->tracks[size_t(v.track)];
+      if (t.sampler.mode == SamplerMode::Multi && v.zone < int(t.zones.size())) z = (v.track << 20) | t.zones[size_t(v.zone)].index;
+    }
+    voice_zones_[i].store(z, std::memory_order_relaxed);
+  }
 }
 
 }  // namespace twill

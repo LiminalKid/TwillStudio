@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(TwillStudio VERSION 0.4.1 LANGUAGES CXX)
+project(TwillStudio VERSION 0.5.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -7,6 +7,10 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(TWILL_HANDHELD "Build for a handheld: full-screen at the panel's resolution" OFF)
+# sndstation (BUILDING.md): sound, buttons and MIDI through the sndstation SDK, built from its source
+# in SNDSTATION_DIR. Off unless asked for; the SDK isn't part of this repository.
+option(TWILL_SNDSTATION "Build for sndstation, with its SDK (SNDSTATION_DIR)" OFF)
+set(SNDSTATION_DIR "$ENV{HOME}/SDKs/sndstation" CACHE PATH "The sndstation SDK's source tree")
 
 # Vendored macro-oscillator DSP (third_party/eurorack/README.md). TEST selects portable C over the
 # module's 32-bit ARM assembly and disables its flash-based user data.
@@ -21,6 +25,12 @@ if(EMSCRIPTEN)
   target_compile_options(eurorack PRIVATE -include cstdio)
 endif()
 
+# XML, for sample library presets (third_party/pugixml/README.md).
+add_library(pugixml STATIC third_party/pugixml/pugixml.cpp)
+target_include_directories(pugixml SYSTEM PUBLIC third_party/pugixml)
+target_compile_definitions(pugixml PUBLIC PUGIXML_NO_EXCEPTIONS PUGIXML_NO_XPATH)
+target_compile_options(pugixml PRIVATE -w)
+
 # Portable core: no OS or SDL headers in here (design §4).
 add_library(twill_core STATIC
   src/engine/Effects.cpp
@@ -32,8 +42,12 @@ add_library(twill_core STATIC
   src/model/Project.cpp
   src/model/ProjectFile.cpp
   src/model/Scale.cpp
+  src/model/DsPreset.cpp
+  src/model/Multisample.cpp
+  src/model/SfzPreset.cpp
   src/platform/Midi.cpp
   src/app/App.cpp
+  src/app/PresetLoader.cpp
   src/app/MidiSender.cpp
   src/app/ClockFollower.cpp
   src/app/SongNames.cpp
@@ -72,7 +86,7 @@ add_dependencies(twill_core twill_version)
 target_include_directories(twill_core PUBLIC ${TWILL_GEN_DIR})
 target_include_directories(twill_core SYSTEM PRIVATE third_party/dr_libs)
 find_package(Threads REQUIRED)
-target_link_libraries(twill_core PUBLIC eurorack Threads::Threads)
+target_link_libraries(twill_core PUBLIC eurorack pugixml Threads::Threads)
 target_compile_options(twill_core PRIVATE -Wall -Wextra -fno-exceptions -fno-rtti)
 
 # SDL2 platform. On macOS, prefer a package manager's SDL2 (Homebrew) over any SDL2.framework
@@ -123,6 +137,20 @@ else()
   target_sources(twill PRIVATE src/platform/sdl2/SystemMidiLinux.cpp src/platform/sdl2/OutputCompressorLinux.cpp)
 endif()
 target_link_libraries(twill PRIVATE twill_core ${TWILL_SDL2_TARGET})
+if(TWILL_SNDSTATION)
+  if(NOT EXISTS "${SNDSTATION_DIR}/CMakeLists.txt")
+    message(FATAL_ERROR "TWILL_SNDSTATION: no sndstation SDK in ${SNDSTATION_DIR}; set SNDSTATION_DIR")
+  endif()
+  # The SDK's own build, as a static library; its tests and tools aren't needed. It is built with
+  # its own flags (C++20, exceptions).
+  set(SNDSTATION_DEV_CONFIG OFF CACHE BOOL "" FORCE)
+  add_subdirectory(${SNDSTATION_DIR} ${CMAKE_BINARY_DIR}/sndstation EXCLUDE_FROM_ALL)
+  set_target_properties(sndstation PROPERTIES CXX_STANDARD 20)  # this project sets 17 for its own
+  target_sources(twill PRIVATE src/platform/sndstation/SndstationPlatform.cpp)
+  target_link_libraries(twill PRIVATE sndstation::sndstation)
+  target_compile_definitions(twill PRIVATE TWILL_SNDSTATION=1)
+  set_target_properties(twill PROPERTIES CXX_STANDARD 20)
+endif()
 target_compile_options(twill PRIVATE -Wall -Wextra -fno-exceptions -fno-rtti)
 if(NOT EMSCRIPTEN)
   # Drawing benchmark, no display needed (runs over SSH on a device).

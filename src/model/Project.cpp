@@ -20,7 +20,7 @@ const std::vector<ParamInfo> kMacroParams = {
     {kParamPitch, "Pitch", -24, 24, 0, false},
 };
 const std::vector<ParamInfo> kSamplerParams = {
-    {kParamSamplerMode, "Mode", 0, 2, 0, true},
+    {kParamSamplerMode, "Mode", 0, 3, 0, true},
     {kParamRootNote, "Root note", 0, 127, 60, true},
     {kParamFineTune, "Fine tune", -1, 1, 0, false},
     {kParamSampleStart, "Start", 0, 1, 0, false},
@@ -194,6 +194,9 @@ float kit_decay_seconds(float v) {
 }
 
 float env_seconds(float v) { return 0.001f * std::pow(10000.0f, std::min(1.0f, std::max(0.0f, v))); }
+float env_value(float seconds) {
+  return seconds <= 0.001f ? 0.0f : std::min(1.0f, std::log10(seconds / 0.001f) / 4.0f);
+}
 
 std::string format_param(ParamId id, float v) {
   char b[32];
@@ -212,7 +215,7 @@ std::string format_param(ParamId id, float v) {
     case kParamCompRelease:
       time(comp_release_seconds(v));
       return b;
-    case kParamSamplerMode: return v < 0.5f ? "Single" : v < 1.5f ? "Slices" : "Kit";
+    case kParamSamplerMode: return v < 0.5f ? "Single" : v < 1.5f ? "Slices" : v < 2.5f ? "Kit" : "Multi";
     case kParamSliceMode: return v > 0.5f ? "At transients" : "Equal";
     case kParamLoopMode: return v < 0.5f ? "Off" : v < 1.5f ? "Forward" : "Ping-pong";
     case kParamReverse: case kParamLimiter: return v > 0.5f ? "On" : "Off";
@@ -248,7 +251,7 @@ std::string format_param(ParamId id, float v) {
 bool SamplerSettings::operator==(const SamplerSettings& o) const {
   if (mode != o.mode || sample != o.sample || root != o.root || fine != o.fine || start != o.start ||
       end != o.end || loop != o.loop || loop_start != o.loop_start || loop_end != o.loop_end ||
-      reverse != o.reverse || slices != o.slices || slice_transients != o.slice_transients)
+      reverse != o.reverse || slices != o.slices || slice_transients != o.slice_transients || preset != o.preset)
     return false;
   for (int i = 0; i < kKitSlots; ++i)
     if (!(kit[i] == o.kit[i])) return false;
@@ -432,6 +435,55 @@ std::string cc_label(int cc) {
   return use ? std::to_string(cc) + " (" + use + ")" : std::to_string(cc);
 }
 
+namespace {
+
+// The macro oscillator's chords (its chord bank, in order), which the chord engine (14) and the
+// chiptune arpeggio (7) read from Harmonics at 1.02 times the setting, and the arpeggio's patterns,
+// read from Timbre: four directions, each over one, two or four octaves.
+constexpr int kNumChords = 11, kNumArpPatterns = 12;
+const char* const kChordNames[kNumChords] = {"Octave", "Fifth", "Sus4", "Minor", "Minor 7th", "Minor 9th",
+                                             "Minor 11th", "6/9", "Major 9th", "Major 7th", "Major"};
+const char* const kArpPatternNames[kNumArpPatterns] = {
+    "Up, 1 octave",       "Up, 2 octaves",     "Up, 4 octaves",     "Down, 1 octave",
+    "Down, 2 octaves",    "Down, 4 octaves",   "Up-down, 1 octave", "Up-down, 2 octaves",
+    "Up-down, 4 octaves", "Random, 1 octave",  "Random, 2 octaves", "Random, 4 octaves"};
+
+// The steps a track's engine reads a setting in: their names, how many, and the scale it applies.
+struct Steps {
+  const char* const* names = nullptr;
+  int count = 0;
+  float scale = 1;
+  int index(float v) const { return std::max(0, std::min(count - 1, int(v * scale * count))); }
+};
+Steps steps_of(const Track& t, ParamId id) {
+  if (t.instrument != InstrumentType::Macro) return {};
+  if (id == kParamHarmonics && (t.macro.engine == 7 || t.macro.engine == 14)) return {kChordNames, kNumChords, 1.02f};
+  if (id == kParamTimbre && t.macro.engine == 7) return {kArpPatternNames, kNumArpPatterns, 1};
+  return {};
+}
+
+}  // namespace
+
+std::string format_track_param(const Track& t, ParamId id, float v) {
+  const Steps s = steps_of(t, id);
+  return s.count ? std::string(s.names[s.index(v)]) : format_param(id, v);
+}
+
+float step_track_param(const Track& t, ParamId id, float v, int step, bool coarse, float fine) {
+  const ParamInfo* info = param_info(id);
+  if (!info) return v;
+  const Steps s = steps_of(t, id);
+  if (s.count) {
+    const int i = std::max(0, std::min(s.count - 1, s.index(v) + step * (coarse ? 3 : 1)));
+    v = (i + 0.5f) / s.count / s.scale;  // the middle of its step
+  } else if (info->integer) {
+    v += float(step * (coarse ? (id == kParamRootNote ? 12 : 4) : 1));
+  } else {
+    v += step * (info->max - info->min) * (coarse ? fine * 10 : fine);
+  }
+  return std::max(info->min, std::min(info->max, v));
+}
+
 std::string param_name(const Track& t, ParamId id) {
   if (id == kParamMidiCcA || id == kParamMidiCcB) return "CC " + std::to_string(t.midi_cc[id - kParamMidiCcA]);
   const ParamInfo* info = param_info(id);
@@ -473,7 +525,8 @@ void Clip::sort() {
 bool MacroSettings::operator==(const MacroSettings& o) const {
   return engine == o.engine && harmonics == o.harmonics && timbre == o.timbre && morph == o.morph &&
          decay == o.decay && lpg_colour == o.lpg_colour && fm_amount == o.fm_amount &&
-         timbre_amount == o.timbre_amount && morph_amount == o.morph_amount && output == o.output;
+         timbre_amount == o.timbre_amount && morph_amount == o.morph_amount && output == o.output &&
+         arp_rate == o.arp_rate;
 }
 
 float MacroSettings::get(ParamId id) const {

@@ -194,17 +194,20 @@ void ArrangementView::open_track_settings(int track, int select_row) {
   if (select_row > 0) app.select_inspector_row(select_row);
 }
 
-void ArrangementView::open_project_settings() {
+void ArrangementView::open_main_menu() {
   App& app = app_;
   std::vector<InspectorField> fields;
-  // Every button combination first, then the app's own setting, then the project's.
-  fields.push_back({"Controls", [] { return std::string("press A"); }, nullptr, [&app] { app.open_controls(); }});
-  fields.push_back({"Theme", [&app] { return std::string(app.dark_mode() ? "Dark" : "Light"); },
-                    [&app](int, bool) { app.set_dark_mode(!app.dark_mode()); }});
-  fields.push_back({"New song names", [&app] { return std::string(app.auto_names() ? "Made up" : "Untitled"); },
-                    [&app](int, bool) { app.set_auto_names(!app.auto_names()); }});
-  fields.push_back({"Audio buffer", [&app] { return app.audio_buffer_text(); },
-                    [&app](int, bool) { app.set_safe_audio(!app.safe_audio()); }});
+  // In sections, as a desktop app's menus run: the song's file (new, load, save, render) first,
+  // then its music, MIDI, and last the app's own settings and help, which are rarely changed.
+  auto heading = [&fields](const char* name) {
+    InspectorField h{name, nullptr, nullptr};
+    h.heading = true;
+    fields.push_back(h);
+  };
+  heading("Song");
+  app.add_song_fields(fields);
+  app.add_render_fields(fields);
+  heading("Music");
   fields.push_back({"Tempo",
                     [&app] {
                       char b[16];
@@ -219,9 +222,24 @@ void ArrangementView::open_project_settings() {
                       const int n = int(ScaleType::kCount);
                       app.history().set_key_scale(app.project().key, ScaleType((int(app.project().scale) + step + n) % n));
                     }});
-  app.add_project_fields(fields);
+  heading("MIDI");
+  app.add_midi_fields(fields);
+  heading("Settings");
+  fields.push_back({"Theme", [&app] { return std::string(app.dark_mode() ? "Dark" : "Light"); },
+                    [&app](int, bool) { app.set_dark_mode(!app.dark_mode()); }});
+  fields.push_back({"New song names", [&app] { return std::string(app.auto_names() ? "Made up" : "Untitled"); },
+                    [&app](int, bool) { app.set_auto_names(!app.auto_names()); }});
+  // Louder playback on a device that plays quietly; renders stay as mixed.
+  fields.push_back({"Output boost",
+                    [&app] { return app.output_boost_db() ? "+" + std::to_string(app.output_boost_db()) + " dB" : std::string("Off"); },
+                    [&app](int step, bool) { app.set_output_boost_db(app.output_boost_db() + 3 * step); }});
+  if (!app.platform().system_sets_audio_buffer())
+    fields.push_back({"Audio buffer", [&app] { return app.audio_buffer_text(); },
+                      [&app](int, bool) { app.set_safe_audio(!app.safe_audio()); }});
+  heading("Help");
+  fields.push_back({"Controls", [] { return std::string("press A"); }, nullptr, [&app] { app.open_controls(); }});
   fields.push_back({"About", [] { return std::string("press A"); }, nullptr, [&app] { app.open_about(); }});
-  app.open_inspector("Settings", std::move(fields));
+  app.open_inspector(App::kMainMenuTitle, std::move(fields), App::build_id());
 }
 
 void ArrangementView::handle_input() {
@@ -275,6 +293,21 @@ void ArrangementView::handle_input() {
       h.set_arrangement(track, arr);
       a_used_ = true;
     }
+    // Y: no repeats. The clip's loop becomes as long as the placement plays it (its notes stay
+    // where they are; a longer loop has empty bars at its end, a shorter one hides later notes).
+    // Every placement of the clip plays the new loop.
+    if (in.pressed(kY) && pi >= 0) {
+      const Placement& pl = arr[size_t(pi)];
+      if (const Clip* c = p.find_clip(pl.clip_id)) {
+        Clip copy = *c;
+        copy.length = pl.offset + pl.length;
+        if (copy.length != c->length) h.change_clip(copy);
+        char b[64];
+        std::snprintf(b, sizeof b, "Loop %g bars: no repeats", double(copy.length) / kBar);
+        app_.message(b);
+      }
+      a_used_ = true;
+    }
   }
   if (in.released(kA)) h.end_group();
 
@@ -310,8 +343,8 @@ void ArrangementView::handle_input() {
     h.end_group();
   }
 
-  // Y: duplicate after the clip (the copy plays the same clip).
-  if (in.pressed(kY) && pi >= 0) {
+  // Y: duplicate after the clip (the copy plays the same clip). With A held, see above.
+  if (in.pressed(kY) && pi >= 0 && !in.held(kA)) {
     Placement copy = arr[size_t(pi)];
     copy.start += copy.length;
     bool clear = true;
@@ -336,15 +369,34 @@ void ArrangementView::handle_input() {
     } else if (cursor_bar_ < 0) {
       open_track_settings(track);
     } else {
-      open_project_settings();
+      app_.open_main_menu();
     }
     return;
   }
 
   // Plain d-pad: move.
   if (!in.held(kA) && !in.held(kB)) {
-    if (in.pressed_or_repeat(kLeft)) cursor_bar_ = std::max(-1, cursor_bar_ - 1), moved = true;
-    if (in.pressed_or_repeat(kRight)) cursor_bar_ = cursor_bar_ + 1, moved = true;
+    // Left and Right step a clip at a time, and an empty bar at a time between clips: whatever is
+    // done on a clip is done to all of it, so the cursor never sits part way along one.
+    auto bars_of = [&](int t, int bar, int& first, int& end) {
+      const int i = bar >= 0 ? placement_at(t, bar) : -1;
+      if (i < 0) return false;
+      const Placement& pl = p.tracks[size_t(t)].arrangement[size_t(i)];
+      first = int(pl.start / kBar);
+      end = int((pl.start + pl.length + kBar - 1) / kBar);  // the first bar after it
+      return true;
+    };
+    int first = 0, end = 0;
+    if (in.pressed_or_repeat(kLeft)) {
+      cursor_bar_ = bars_of(track, cursor_bar_, first, end) ? first - 1 : cursor_bar_ - 1;
+      if (bars_of(track, cursor_bar_, first, end)) cursor_bar_ = first;  // onto the clip before
+      cursor_bar_ = std::max(-1, cursor_bar_);
+      moved = true;
+    }
+    if (in.pressed_or_repeat(kRight)) {
+      cursor_bar_ = bars_of(track, cursor_bar_, first, end) ? end : cursor_bar_ + 1;
+      moved = true;
+    }
     if (in.pressed_or_repeat(kUp)) app_.set_track(track - 1), moved = true;
     if (in.pressed_or_repeat(kDown)) app_.set_track(track + 1), moved = true;
   }
@@ -376,11 +428,11 @@ void ArrangementView::tick() {
 std::vector<Hint> ArrangementView::hints() const {
   const InputTracker& in = app_.input();
   if (in.held(kA)) return cursor_bar_ < 0 ? std::vector<Hint>{{"Left/Right", "engine"}}
-                                          : std::vector<Hint>{{"Left/Right", "clip length"}};
+                                          : std::vector<Hint>{{"Left/Right", "clip length"}, {"Y", "no repeat"}};
   if (in.held(kB)) return {{"Left/Right", "move clip"}, {"release", "delete"}};
   if (in.held(kL) || in.held(kR)) return {{"Left/Right", "zoom"}, {"Up/Down", "page"}, {"Start", "from cursor"}};
   if (cursor_bar_ < 0) return {{"A+Left/Right", "engine"}, {"X", "track settings"}, {"Select+Right", "roll"}};
-  if (placement_at(app_.track(), cursor_bar_) < 0) return {{"A", "new clip"}, {"X", "project"}, {"Start", "play"}};
+  if (placement_at(app_.track(), cursor_bar_) < 0) return {{"A", "new clip"}, {"X", "menu"}, {"Start", "play"}};
   return {{"A", "select"}, {"B", "delete"}, {"Y", "duplicate"}, {"X", "open"}, {"Start", "play"}};
 }
 

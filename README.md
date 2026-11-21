@@ -42,6 +42,7 @@ them in anything, with or without credit. Music you make with Twill Studio is yo
 - Macro-oscillator DSP and Clouds' reverb from Emilie Gillet's eurorack code (MIT):
   `third_party/eurorack/`, see its README for the source commits and the naming rule for derivative
   works.
-- `dr_wav` 0.14.6 (public domain or MIT-0): `third_party/dr_libs/`.
+- `dr_wav` 0.14.6 and `dr_flac` 0.13.4 (public domain or MIT-0): `third_party/dr_libs/`.
+- pugixml 1.14 (MIT): `third_party/pugixml/`, for sample library presets.
 - Inter and Barlow Condensed fonts (SIL Open Font License 1.1): `third_party/fonts/inter/`,
   `third_party/fonts/barlow-condensed/`. `tools/mkfonts.py` turns them into `src/gfx/gen/fonts.cpp`.

@@ -17,6 +17,8 @@
 #include <vector>
 
 #include "app/App.h"
+#include "app/Paper.h"
+#include "app/ArrangementView.h"
 #include "app/FactorySounds.h"
 #include "app/ClockFollower.h"
 #include "app/SongNames.h"
@@ -24,6 +26,7 @@
 #include "engine/Effects.h"
 #include "engine/Engine.h"
 #include "engine/PlaitsVoice.h"
+#include "model/Multisample.h"
 #include "engine/Sample.h"
 #include "model/Edit.h"
 #include "model/ProjectFile.h"
@@ -306,6 +309,8 @@ twill::Project rich_project() {
   n.probability = 75;
   n.glide = true;
   n.set_lock(twill::kParamMorph, 0.125f);
+  p.tracks[0].macro.arp_rate = twill::ArpRate::ThirtySecond;
+  p.tracks[1].sampler.preset = "Libraries/Piano/Piano.dspreset";
   twill::EditHistory h(p);
   h.add_note(p.clips[0].id, n);
   h.add_note(p.clips[1].id, note_at(Q, 40));
@@ -575,9 +580,10 @@ void test_legato_keeps_modulators() {
   for (double j : touching_note_jumps(0, 1, 0, &env)) CHECK_MSG(j < 1.4, "legato: %.2f", j);
 }
 
-// Out of voices: a chord bigger than the engine's voice pool cuts held notes off, and says so.
+// Out of voices: a chord bigger than the engine's voice pool cuts held notes off, and says so. So
+// does a synth chord bigger than the synth voices (a pool of 8 with 2 for the macro oscillator).
 void test_voices_stolen_counted() {
-  for (int pool : {8, 2}) {
+  for (int pool : {8, 2, -2}) {
     twill::Project p;
     twill::Track t;
     t.voices = 4;
@@ -593,12 +599,13 @@ void test_voices_stolen_counted() {
       c.notes.push_back(n);
     }
     p.tracks[0].arrangement.push_back(twill::Placement{0, c.id, 0, 4 * Q});
-    twill::Engine e(pool);
+    twill::Engine e(pool < 0 ? 8 : pool, pool < 0 ? -pool : 0);
     e.submit(twill::build_snapshot(p, 8, 1));
     e.play();
     std::vector<float> buf(512);
     for (int b = 0; b < 20; ++b) e.render(buf.data(), 256);
     CHECK(pool == 8 ? e.voices_stolen() == 0 : e.voices_stolen() == 2);
+    CHECK_MSG(e.active_voices() == (pool == 8 ? 4 : 2), "pool %d: %d voices", pool, e.active_voices());
   }
 }
 
@@ -723,8 +730,33 @@ void test_sample_decode_and_resample() {
   double err_sum = 0;
   for (int i = 1000; b && i < 1100; ++i) err_sum += std::fabs(b->left(i) - 0.5 * std::sin(6.2831853 * 440 * i / 48000));
   CHECK_MSG(err_sum / 100 < 0.01, "mean error %.4f", err_sum / 100);
+  // Kept at 16 bits and the file's own channels: the mono one is one channel, read on both sides.
+  CHECK(a && a->channels == 2 && a->bytes() == size_t(a->frames) * 4);
+  CHECK(b && b->channels == 1 && b->bytes() == size_t(b->frames) * 2 && b->left(1234) == b->right(1234));
   std::vector<uint8_t> junk(100, 7);
   CHECK(!twill::decode_sample(junk.data(), junk.size(), "junk", err));
+  // FLAC: a quarter second of a 440 Hz sine at half scale, 44.1 kHz mono (made with sox).
+  std::vector<uint8_t> flac;
+  if (FILE* f = std::fopen((g_golden_dir + "/sine-440-44k1-mono.flac").c_str(), "rb")) {
+    uint8_t buf[4096];
+    size_t n;
+    while ((n = std::fread(buf, 1, sizeof buf, f)) > 0) flac.insert(flac.end(), buf, buf + n);
+    std::fclose(f);
+  }
+  auto c = twill::decode_sample(flac.data(), flac.size(), "c", err);
+  CHECK_MSG(c && c->source_rate == 44100 && c->channels == 1 && std::abs(c->frames - 12000) <= 1, "%s", err.c_str());
+  double peak = 0, cerr = 0;
+  for (int i = 0; c && i < c->frames; ++i) peak = std::max(peak, double(std::fabs(c->left(i))));
+  // Its phase is the generator's, so compare the zero crossings' spacing: 440 Hz at 48 kHz.
+  int first = -1, last = -1, crossings = 0;
+  for (int i = 1; c && i < c->frames; ++i)
+    if (c->left(i - 1) < 0 && c->left(i) >= 0) {
+      if (first < 0) first = i;
+      last = i;
+      ++crossings;
+    }
+  if (crossings > 1) cerr = std::fabs((crossings - 1) * 48000.0 / (last - first) - 440);
+  CHECK_MSG(peak > 0.45 && peak < 0.55 && crossings > 1 && cerr < 1, "peak %.3f, %.2f Hz off", peak, cerr);
 }
 
 // A sampler track whose sample is `sample`, and the resolver the snapshot needs.
@@ -747,6 +779,267 @@ struct SamplerFixture {
   }
 };
 
+// --- Multisamples ----------------------------------------------------------------------------
+
+// A DecentSampler preset: the zones, and what the documentation says about each attribute.
+void test_dspreset_reader() {
+  const std::string xml = R"(<?xml version="1.0" encoding="UTF-8"?>
+<DecentSampler minVersion="1.0.0">
+  <ui><tab><labeled-knob parameterName="Tone"/></tab></ui>
+  <effects><effect type="reverb"/></effects>
+  <groups globalVolume="-6dB" globalTuning="0.5" pan="20" attack="0.01" release="0.4" loopEnabled="true">
+    <group name="Soft" groupVolume="0.5" groupPan="-10">
+      <sample path="Samples/Soft C4.wav" rootNote="60" loNote="0" hiNote="65" loVel="0" hiVel="63" volume="0.5"
+              tuning="-0.25" loopStart="100" loopEnd="999" loopCrossfade="50"/>
+      <sample path="Samples\Soft G4.flac" rootNote="67" loNote="66" hiNote="127" hiVel="63" pan="-100"/>
+      <sample path="Samples/Soft release.wav" rootNote="60" trigger="release"/>
+    </group>
+    <group name="Hits" seqMode="round_robin" transpose="12" loopEnabled="false">
+      <sample path="hit1.wav" rootNote="48" loNote="48" hiNote="48" seqPosition="1"/>
+      <sample path="hit2.wav" rootNote="48" loNote="48" hiNote="48" seqPosition="2"/>
+    </group>
+    <group enabled="false"><sample path="off.wav" rootNote="60"/></group>
+  </groups>
+</DecentSampler>)";
+  twill::Multisample m;
+  std::string err;
+  CHECK_MSG(twill::read_dspreset(xml, "Libraries/Piano/", m, err), "%s", err.c_str());
+  CHECK_MSG(m.zones.size() == 4, "%zu zones", m.zones.size());
+  if (m.zones.size() == 4) {
+    const twill::Zone& a = m.zones[0];
+    CHECK(a.sample == "Libraries/Piano/Samples/Soft C4.wav" && a.root == 60 && a.lo_key == 0 && a.hi_key == 65);
+    CHECK(a.lo_vel == 0 && a.hi_vel == 63);
+    // The volumes multiply: -6 dB, then 0.5 and 0.5.
+    CHECK_MSG(std::fabs(a.gain - std::pow(10.0f, -6 / 20.0f) * 0.25f) < 1e-4f, "gain %.4f", a.gain);
+    CHECK(std::fabs(a.tune - 0.25f) < 1e-5f);              // 0.5 + -0.25
+    CHECK(std::fabs(a.pan - 0.1f) < 1e-5f);                // 20 inherited, -10 for the group
+    CHECK(a.loop && a.loop_start == 100 && a.loop_end == 999);
+    CHECK(a.loop_crossfade == 50 && !a.crossfade_linear);  // equal power unless said
+    CHECK(m.zones[1].sample == "Libraries/Piano/Samples/Soft G4.flac");  // backslashes are folders
+    CHECK(std::fabs(m.zones[1].pan - -1.0f) < 1e-5f);     // -100 - 10, clamped
+    // Transposed up 12: the zone answers the key 12 below, at its own pitch.
+    const twill::Zone& h = m.zones[2];
+    CHECK(h.lo_key == 36 && h.hi_key == 36 && h.root == 36 && !h.loop);
+    CHECK(h.seq == twill::SeqMode::RoundRobin && h.seq_length == 2 && h.seq_position == 1 && m.zones[3].seq_position == 2);
+    CHECK(h.seq_group != a.seq_group);
+  }
+  CHECK(m.has_envelope && std::fabs(m.envelope.attack - 0.01f) < 1e-6f && std::fabs(m.envelope.release - 0.4f) < 1e-6f);
+  std::string unused;
+  for (const std::string& u : m.unused) unused += u + ", ";
+  CHECK(unused.find("crossfade") == std::string::npos);  // played now
+  for (const char* want : {"effects", "the controls", "release triggers"})
+    CHECK_MSG(unused.find(want) != std::string::npos, "unused: %s (no %s)", unused.c_str(), want);
+  CHECK(m.lowest_key() == 0 && m.highest_key() == 127);
+  CHECK(!twill::read_dspreset("<html/>", "", m, err) && !err.empty());
+  CHECK(!twill::read_dspreset("<DecentSampler><groups/></DecentSampler>", "", m, err));
+}
+
+// Playing a multisample: zones by key and velocity, layers, and each round-robin mode.
+void test_multisample_playing() {
+  // Each zone's sample is a constant level of its own, so the level heard says which played.
+  std::map<std::string, std::shared_ptr<twill::SampleData>> samples;
+  auto level_sample = [&](const std::string& name, float level) {
+    auto d = std::make_shared<twill::SampleData>();
+    d->source_rate = 48000;
+    d->set_from_float(std::vector<float>(48000, level), 1);
+    samples[name] = d;
+  };
+  twill::Multisample m;
+  auto zone = [&](const char* name, float level, int lo, int hi, int lo_vel = 0, int hi_vel = 127) {
+    level_sample(name, level);
+    twill::Zone z;
+    z.sample = name;
+    z.lo_key = lo, z.hi_key = hi, z.lo_vel = lo_vel, z.hi_vel = hi_vel, z.root = lo;
+    m.zones.push_back(z);
+    return &m.zones.back();
+  };
+  zone("low", 0.1f, 0, 59);
+  zone("soft", 0.2f, 60, 69, 0, 63);
+  zone("loud", 0.3f, 60, 69, 64, 127);
+  zone("layer1", 0.1f, 70, 70);
+  zone("layer2", 0.1f, 70, 70);
+  for (int i = 0; i < 3; ++i) {  // a round robin of three on key 80
+    twill::Zone* z = zone(i == 0 ? "rr1" : i == 1 ? "rr2" : "rr3", 0.1f * (i + 1), 80, 80);
+    z->seq = twill::SeqMode::RoundRobin, z->seq_group = 5, z->seq_length = 3, z->seq_position = i + 1;
+  }
+  for (int i = 0; i < 3; ++i) {  // random, never twice running, on key 90
+    twill::Zone* z = zone(i == 0 ? "rand1" : i == 1 ? "rand2" : "rand3", 0.1f * (i + 1), 90, 90);
+    z->seq = twill::SeqMode::Random, z->seq_group = 6;
+  }
+  twill::Project p = make_project();
+  p.tracks[0].instrument = twill::InstrumentType::Sampler;
+  p.tracks[0].sampler.mode = twill::SamplerMode::Multi;
+  p.tracks[0].sampler.preset = "test.dspreset";
+  p.tracks[0].voices = 8;
+  p.tracks[0].tone.attack = 0;
+  p.tracks[0].tone.sustain = 1;
+  p.tracks[0].level = 0.5f;
+  twill::Engine e(16);
+  e.submit(twill::build_snapshot(p, 16, 1, [&](const std::string& path) { return samples.count(path) ? samples[path].get() : nullptr; },
+                                 [&](const std::string&) { return &m; }));
+  // One live note at a time: its level a moment in, and how many voices it took.
+  std::vector<float> buf(2 * 4800);
+  auto play = [&](int pitch, int velocity, int* voices = nullptr) {
+    e.live_note(0, uint8_t(pitch), uint8_t(velocity));
+    e.render(buf.data(), 4800);
+    const float level = std::fabs(buf[2 * 4000]);
+    if (voices) *voices = e.active_voices();
+    e.live_note(0, uint8_t(pitch), 0);
+    e.render(buf.data(), 4800);
+    e.render(buf.data(), 4800);  // let it die away
+    return level;
+  };
+  const float low = play(40, 127), soft = play(65, 40), loud = play(65, 127);
+  CHECK_MSG(low > 0 && soft > 0 && loud > soft, "low %.3f, soft %.3f, loud %.3f", low, soft, loud);
+  CHECK(play(65, 64) > 0 && play(127, 127) == 0);  // velocity 64 is the loud zone's; nothing up at 127
+  int voices = 0;
+  play(70, 127, &voices);
+  CHECK_MSG(voices == 2, "%d voices for two layers", voices);
+  // Round robin: 1, 2, 3, then 1 again.
+  float rr[4];
+  for (float& v : rr) v = play(80, 127);
+  CHECK_MSG(rr[0] < rr[1] && rr[1] < rr[2] && std::fabs(rr[3] - rr[0]) < 1e-4f, "%.3f %.3f %.3f %.3f", rr[0], rr[1], rr[2], rr[3]);
+  // Random: one zone each time, never the same twice running, and all three come up.
+  float last = -1;
+  bool repeat = false;
+  std::set<int> heard;
+  for (int i = 0; i < 30; ++i) {
+    int vcount = 0;
+    const float v = play(90, 127, &vcount);
+    CHECK(vcount == 1);
+    repeat |= std::fabs(v - last) < 1e-4f;
+    heard.insert(int(std::lround(v * 1000)));
+    last = v;
+  }
+  CHECK_MSG(!repeat && heard.size() == 3, "repeat %d, %zu different", repeat, heard.size());
+  // A held note keeps playing through an edit (any new snapshot, such as a track renamed).
+  // (Key 2, near the zone's root, so its second of sample lasts.)
+  e.live_note(0, 2, 127);
+  e.render(buf.data(), 4800);
+  p.tracks.emplace_back();  // another track, renamed
+  p.tracks.back().name = "Renamed";
+  e.submit(twill::build_snapshot(p, 16, 2, [&](const std::string& path) { return samples.count(path) ? samples[path].get() : nullptr; },
+                                 [&](const std::string&) { return &m; }));
+  e.render(buf.data(), 4800);
+  CHECK_MSG(e.active_voices() == 1 && std::fabs(buf[2 * 4000]) > 0, "%d voices after an edit", e.active_voices());
+  // The zone map can see which zone it is ("low", the first).
+  std::vector<int> sounding;
+  e.sounding_zones(0, sounding);
+  CHECK_MSG(sounding.size() == 1 && sounding[0] == 0, "%zu sounding", sounding.size());
+  e.sounding_zones(1, sounding);
+  CHECK(sounding.empty());
+  e.live_note(0, 2, 0);
+}
+
+// A looped zone keeps playing past its sample's end while the note is held; an unlooped one stops.
+// The send effects sleep once they have nothing left to play, and wake with the next thing sent:
+// a burst into each plays its tail (the delay's echoes over a second later), then exact silence,
+// then a second burst sounds again.
+void test_effects_sleep_and_wake() {
+  for (int which = 0; which < 3; ++which) {
+    twill::Effects fx;
+    twill::MixSettings m;
+    const int n = 64;
+    std::vector<float> in(2 * n), none(2 * n, 0.0f), out(2 * n);
+    auto block = [&](bool burst) {
+      for (int i = 0; i < 2 * n; ++i) in[size_t(i)] = burst ? 0.5f * std::sin(0.3f * float(i)) : 0;
+      std::fill(out.begin(), out.end(), 0.0f);
+      fx.process(m, 120, which == 0 ? in.data() : none.data(), which == 1 ? in.data() : none.data(),
+                 which == 2 ? in.data() : none.data(), out.data(), n);
+      float peak = 0;
+      for (float x : out) peak = std::max(peak, std::fabs(x));
+      return peak;
+    };
+    for (int b = 0; b < 40; ++b) block(true);
+    float tail = 0;  // 1 to 1.5 s after the burst
+    for (int b = 0; b < 3000; ++b) {
+      const float p = block(false);
+      if (b >= 750 && b < 1125) tail = std::max(tail, p);
+    }
+    const float asleep = block(false);
+    float woke = 0;
+    for (int b = 0; b < 640; ++b) woke = std::max(woke, block(b < 40));  // the delay's first echo: 375 ms
+    CHECK_MSG(which == 0 || tail > 1e-3f, "effect %d: tail %g", which, tail);  // the chorus has none
+    CHECK_MSG(asleep == 0, "effect %d: %g while asleep", which, asleep);
+    CHECK_MSG(woke > 0.01f, "effect %d: %g after waking", which, woke);
+  }
+}
+
+// The drive's tanh, approximated: within 0.0001 everywhere, and exactly +-1 far out.
+void test_fast_tanh() {
+  float worst = 0;
+  for (int i = -20000; i <= 20000; ++i) {
+    const float x = i / 1000.0f;
+    worst = std::max(worst, std::fabs(twill::fast_tanh(x) - std::tanh(x)));
+  }
+  CHECK_MSG(worst < 1e-4f, "off by %g", worst);
+  CHECK(twill::fast_tanh(50) == 1 && twill::fast_tanh(-50) == -1 && twill::fast_tanh(0) == 0);
+}
+
+// A note on a preset with two layers plays both, and counts once against the track's voices: two
+// voices hold two notes, four layers sounding (they used to count twice, cutting the first note off).
+void test_multisample_layers_count_once() {
+  auto d = std::make_shared<twill::SampleData>();
+  d->source_rate = 48000;
+  d->set_from_float(std::vector<float>(48000, 0.3f), 1);
+  twill::Multisample m;
+  for (int layer = 0; layer < 2; ++layer) {
+    twill::Zone z;
+    z.sample = "layer.wav";
+    z.root = 60;
+    m.zones.push_back(z);
+  }
+  twill::Project p = make_project();
+  p.tracks[0].instrument = twill::InstrumentType::Sampler;
+  p.tracks[0].sampler.mode = twill::SamplerMode::Multi;
+  p.tracks[0].sampler.preset = "x.dspreset";
+  p.tracks[0].voices = 2;
+  p.tracks[0].tone.attack = 0;
+  p.tracks[0].tone.sustain = 1;
+  twill::Engine e(8);
+  e.submit(twill::build_snapshot(p, 16, 1, [&](const std::string&) { return d.get(); },
+                                 [&](const std::string&) { return &m; }));
+  std::vector<float> buf(2 * 4800);
+  e.live_note(0, 60, 127);
+  e.render(buf.data(), 2400);
+  e.live_note(0, 64, 127);
+  e.render(buf.data(), 4800);
+  std::vector<int> zones;
+  e.sounding_zones(0, zones);
+  CHECK_MSG(zones.size() == 4, "%zu layers sounding", zones.size());
+}
+
+void test_multisample_loop() {
+  auto d = std::make_shared<twill::SampleData>();
+  d->source_rate = 48000;
+  d->set_from_float(std::vector<float>(4800, 0.3f), 1);  // a tenth of a second
+  for (bool looped : {false, true}) {
+    twill::Multisample m;
+    twill::Zone z;
+    z.sample = "short.wav";
+    z.root = 60;
+    z.loop = looped;
+    z.loop_start = 1000;
+    z.loop_end = 3999;
+    m.zones.push_back(z);
+    twill::Project p = make_project();
+    p.tracks[0].instrument = twill::InstrumentType::Sampler;
+    p.tracks[0].sampler.mode = twill::SamplerMode::Multi;
+    p.tracks[0].sampler.preset = "x.dspreset";
+    p.tracks[0].tone.attack = 0;
+    p.tracks[0].tone.sustain = 1;
+    twill::Engine e(8);
+    e.submit(twill::build_snapshot(p, 16, 1, [&](const std::string&) { return d.get(); },
+                                   [&](const std::string&) { return &m; }));
+    std::vector<float> buf(2 * 24000);
+    e.live_note(0, 60, 127);
+    e.render(buf.data(), 24000);  // half a second: five times the sample's length
+    const float late = std::fabs(buf[2 * 20000]);
+    CHECK_MSG(looped ? late > 0.05f : late == 0, "%s: %.3f at 0.42 s", looped ? "looped" : "not looped", late);
+    e.live_note(0, 60, 0);
+  }
+}
+
 // Zero crossings per second on the left channel: twice the frequency.
 double frequency(const std::vector<float>& st, int from, int to) {
   int crossings = 0;
@@ -768,9 +1061,9 @@ void test_sampler_pitch_follows_note() {
 void test_sampler_slices_and_kit() {
   // A sample of eight equal "slices", each a constant level 1/8, 2/8, ...
   auto s = std::make_shared<twill::SampleData>();
-  s->frames = 8000;
-  s->data.resize(16000);
-  for (int i = 0; i < 8000; ++i) s->data[size_t(2 * i)] = s->data[size_t(2 * i + 1)] = (i / 1000 + 1) / 8.0f;
+  std::vector<float> d(16000);
+  for (int i = 0; i < 8000; ++i) d[size_t(2 * i)] = d[size_t(2 * i + 1)] = (i / 1000 + 1) / 8.0f;
+  s->set_from_float(d, 2);
   SamplerFixture f(s);
   f.p.tracks[0].sampler.mode = twill::SamplerMode::Slice;
   f.p.tracks[0].sampler.slices = 8;
@@ -802,8 +1095,7 @@ void test_sampler_slices_and_kit() {
 // Slicing at transients: a "drum loop" of four decaying noise hits at uneven places and levels.
 void test_sampler_transient_slices() {
   auto s = std::make_shared<twill::SampleData>();
-  s->frames = 48000;
-  s->data.assign(96000, 0.0f);
+  std::vector<float> buf(96000, 0.0f);
   const int hits[4] = {0, 9000, 21000, 33500};
   const float levels[4] = {0.9f, 0.6f, 0.15f, 0.8f};
   uint32_t rng = 1;
@@ -812,8 +1104,9 @@ void test_sampler_transient_slices() {
       rng = rng * 1664525u + 1013904223u;
       const float noise = (rng >> 8) / float(1 << 24) * 2 - 1;
       const float x = levels[h] * noise * std::exp(-i / 1200.0f);
-      s->data[size_t(2 * (hits[h] + i))] = s->data[size_t(2 * (hits[h] + i) + 1)] = x;
+      buf[size_t(2 * (hits[h] + i))] = buf[size_t(2 * (hits[h] + i) + 1)] = x;
     }
+  s->set_from_float(buf, 2);
   s->onsets = twill::find_onsets(*s);
   // The hit at the very start is the sample's start, not an onset.
   CHECK_MSG(s->onsets.size() == 3, "%zu onsets", s->onsets.size());
@@ -850,8 +1143,7 @@ void test_sampler_transient_slices() {
 
 void test_kit_voices_per_drum() {
   auto s = std::make_shared<twill::SampleData>();
-  s->frames = 48000;  // one second of a constant level, so overlapping hits add up
-  s->data.assign(96000, 0.1f);
+  s->set_from_float(std::vector<float>(96000, 0.1f), 2);  // one second of a constant level, so overlapping hits add up
   SamplerFixture f(s);
   f.p.tracks[0].sampler.mode = twill::SamplerMode::Kit;
   f.p.tracks[0].sampler.kit[0].sample = "test.wav";
@@ -879,8 +1171,7 @@ void test_kit_one_shot() {
   // sounds after the note has ended. Voices per drum still decide whether hits of the same drum
   // overlap, and Single mode still stops at the note's end.
   auto s = std::make_shared<twill::SampleData>();
-  s->frames = 48000;  // one second at a constant level
-  s->data.assign(96000, 0.1f);
+  s->set_from_float(std::vector<float>(96000, 0.1f), 2);  // one second at a constant level
   SamplerFixture f(s);
   twill::Track& t = f.p.tracks[0];
   t.sampler.mode = twill::SamplerMode::Kit;
@@ -944,13 +1235,13 @@ void test_sampler_loop_sustains() {
 void test_filter_darkens() {
   // White-ish noise through the low-pass at a low cutoff loses most of its high frequencies.
   auto s = std::make_shared<twill::SampleData>();
-  s->frames = 48000;
-  s->data.resize(96000);
+  std::vector<float> d(96000);
   uint32_t x = 1;
-  for (float& v : s->data) {
+  for (float& v : d) {
     x = x * 1664525u + 1013904223u;
     v = (int32_t(x) >> 8) / float(1 << 23) * 0.5f;
   }
+  s->set_from_float(d, 2);
   SamplerFixture f(s);
   f.p.clips[0].notes = {note_at(0, 60, 2 * Q)};
   auto hf = [](const std::vector<float>& o) {  // energy of the first difference: high frequencies
@@ -983,13 +1274,13 @@ void test_modulators() {
   CHECK(std::fabs(frequency(plain, 2000, 14000) - frequency(plain, 48000, 60000)) < 8);
 
   auto noise = std::make_shared<twill::SampleData>();
-  noise->frames = 96000;
-  noise->data.resize(192000);
+  std::vector<float> nd(192000);
   uint32_t x = 7;
-  for (float& v : noise->data) {
+  for (float& v : nd) {
     x = x * 1664525u + 1013904223u;
     v = (int32_t(x) >> 8) / float(1 << 23) * 0.5f;
   }
+  noise->set_from_float(nd, 2);
   SamplerFixture g(noise);
   g.p.clips[0].notes = {note_at(0, 60, 4 * Q)};
   g.p.tracks[0].tone.filter = twill::FilterType::LowPass;
@@ -1068,8 +1359,7 @@ void test_automation_lane() {
 void test_send_effects() {
   // A 10 ms burst. Sent to the delay at 1/4 (120 BPM: 24000 samples), it echoes there.
   auto click = std::make_shared<twill::SampleData>();
-  click->frames = 480;
-  click->data.assign(960, 0.5f);
+  click->set_from_float(std::vector<float>(960, 0.5f), 2);
   SamplerFixture f(click);
   f.p.tracks[0].tone.attack = 0;
   f.p.clips[0].notes = {note_at(0, 60, Q / 8)};
@@ -1098,8 +1388,7 @@ void test_send_effects() {
 // moves the delay from 1/4 to 1/2, and the master level fades out.
 void test_effect_automation() {
   auto click = std::make_shared<twill::SampleData>();
-  click->frames = 480;
-  click->data.assign(960, 0.5f);
+  click->set_from_float(std::vector<float>(960, 0.5f), 2);
   SamplerFixture f(click);
   f.p.tracks[0].send_delay = 1;
   f.p.mix.delay_time = 4 / 6.0f;  // 1/4: 24000 samples at 120 BPM
@@ -1532,6 +1821,30 @@ struct UiDriver {
     step(hold | buttons);
     step(hold);
   }
+  // Moves the open panel's selection down to the row called `label`; false if there's none.
+  bool go_to_row(const char* label) {
+    for (int i = 0; i < 64; ++i) {
+      const auto& f = app.inspector_fields();
+      const int sel = app.inspector_selection();
+      if (sel >= 0 && sel < int(f.size()) && f[size_t(sel)].label == label) return true;
+      tap(twill::kDown);
+    }
+    return false;
+  }
+  // Frames until no preset is loading (they load on a thread; real time passes meanwhile).
+  bool wait_for_loads() {
+    std::string name;
+    int done, total;
+    for (int i = 0; i < 2000; ++i) {
+      if (!app.loading_status(name, done, total)) {
+        step(0);  // the frame that takes the result
+        if (!app.loading_status(name, done, total)) return true;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      step(0);
+    }
+    return false;
+  }
   const twill::Clip& clip() { return *app.open_clip(); }
   int notes_at(Tick start) {
     int n = 0;
@@ -1721,6 +2034,304 @@ void test_ui_arrangement_new_clip_and_undo() {
   CHECK(ui.app.project().tracks[1].arrangement.size() == placed);
 }
 
+// Left and Right step a clip at a time: on a four-bar clip the cursor goes straight past it, never
+// part way along it where nothing shows it moving.
+void test_ui_arrangement_steps_over_clips() {
+  UiDriver ui;
+  const uint32_t id = ui.app.project().tracks[0].arrangement.at(0).clip_id;
+  const Tick bar = 4 * twill::kTicksPerQuarter;
+  ui.app.history().set_arrangement(0, {twill::Placement{0, id, 0, 4 * bar}, twill::Placement{5 * bar, id, 0, 2 * bar}});
+  auto at = [&](int want) {
+    const int got = int(ui.app.arrangement().cursor_song_position() / bar);
+    CHECK_MSG(got == want, "cursor at bar %d, wanted %d", got + 1, want + 1);
+  };
+  at(0);
+  ui.tap(twill::kRight); at(4);  // past the four-bar clip, to the empty bar after it
+  ui.tap(twill::kRight); at(5);  // the next clip
+  ui.tap(twill::kRight); at(7);  // past it
+  ui.tap(twill::kLeft);  at(5);  // back onto its start
+  ui.tap(twill::kLeft);  at(4);
+  ui.tap(twill::kLeft);  at(0);  // the long clip, at its start
+  ui.tap(twill::kLeft);          // the track's header
+  CHECK(ui.app.arrangement().cursor_song_position() == 0);
+}
+
+// Undo after deleting a clip, letting go of Select before B: the clip comes back and stays. (B's
+// release used to reach the arrangement as a plain B, which deletes on release.)
+void test_ui_undo_delete_select_first() {
+  UiDriver ui;
+  const size_t placed = ui.app.project().tracks[0].arrangement.size();
+  CHECK(placed > 0 && ui.app.project().tracks[0].arrangement[0].start == 0);  // the cursor's on it
+  ui.tap(twill::kB);  // delete
+  CHECK(ui.app.project().tracks[0].arrangement.size() == placed - 1);
+  ui.step(twill::kSelect);
+  ui.step(twill::kSelect | twill::kB);  // undo
+  ui.step(twill::kB);                   // Select up first
+  ui.step(0);
+  CHECK_MSG(ui.app.project().tracks[0].arrangement.size() == placed, "%zu clips, wanted %zu",
+            ui.app.project().tracks[0].arrangement.size(), placed);
+  // And the other way round, B up first.
+  ui.tap(twill::kB);
+  ui.step(twill::kSelect);
+  ui.step(twill::kSelect | twill::kB);
+  ui.step(twill::kSelect);
+  ui.step(0);
+  CHECK(ui.app.project().tracks[0].arrangement.size() == placed);
+}
+
+// The app loads a preset with its samples in the background, keeps them while a track uses it, and
+// refuses one that needs more memory than the platform allows.
+void test_app_multisample() {
+  UiDriver ui;
+  ui.audio = true;
+  const std::string xml = R"(<DecentSampler><groups release="0.5">
+    <group><sample path="s/low.wav" rootNote="48" loNote="0" hiNote="59"/>
+           <sample path="s/high.wav" rootNote="72" loNote="60" hiNote="127"/>
+           <sample path="s/gone.wav" rootNote="100" loNote="100" hiNote="100"/></group>
+  </groups></DecentSampler>)";
+  ui.platform.write_file("lib/Test.dspreset", std::vector<uint8_t>(xml.begin(), xml.end()));
+  ui.platform.write_file("lib/s/low.wav", sine_wav(48000, 1));
+  ui.platform.write_file("lib/s/high.wav", sine_wav(48000, 2));
+  std::string err;
+  // Not there at once: it's on its way.
+  CHECK(!ui.app.load_multisample("lib/Test.dspreset", &err) && err.empty());
+  CHECK(ui.app.multisample_loading("lib/Test.dspreset"));
+  ui.app.finish_loading();
+  CHECK(!ui.app.multisample_loading("lib/Test.dspreset"));
+  const twill::Multisample* m = ui.app.load_multisample("lib/Test.dspreset", &err);
+  CHECK_MSG(m && m->zones.size() == 3 && m->name == "Test", "%s", err.c_str());
+  CHECK(ui.app.multisample_missing("lib/Test.dspreset") == 1);
+  CHECK(m && m->zones[0].sample == "lib/s/low.wav");
+  CHECK(ui.app.multisample_bytes("lib/Test.dspreset") == 48000 * 2 + 48000 * 2 * 2);  // 16-bit: mono, then stereo
+  // On a track, it plays; its samples stay loaded while it's used, though no track names them.
+  twill::Track t = ui.app.project().tracks[0];
+  t.instrument = twill::InstrumentType::Sampler;
+  t.sampler.mode = twill::SamplerMode::Multi;
+  t.sampler.preset = "lib/Test.dspreset";
+  ui.app.history().change_track(0, t);
+  ui.step(0);
+  ui.app.engine().live_note(0, 50, 100);
+  for (int i = 0; i < 5; ++i) ui.step(0);
+  CHECK(ui.app.engine().active_voices() == 1);
+  ui.app.engine().live_note(0, 50, 0);
+  for (int i = 0; i < 120; ++i) ui.step(0);  // two seconds: the unused check runs
+  CHECK(ui.app.loaded_samples() >= 2);
+  CHECK(ui.app.load_multisample("lib/Test.dspreset") == m);
+  // Past the budget: not loaded, and said.
+  ui.platform.budget = 1000;
+  std::string big = xml;  // samples of its own: shared ones cost nothing more
+  for (size_t at; (at = big.find("\"s/")) != std::string::npos;) big.replace(at, 3, "\"s2/");
+  ui.platform.write_file("lib/Big.dspreset", std::vector<uint8_t>(big.begin(), big.end()));
+  ui.platform.write_file("lib/s2/low.wav", sine_wav(48000, 1));
+  const size_t before = ui.app.loaded_samples();
+  ui.app.load_multisample("lib/Big.dspreset", &err);
+  ui.app.finish_loading();
+  CHECK_MSG(!ui.app.load_multisample("lib/Big.dspreset", &err) && err.find("Too big") == 0, "%s", err.c_str());
+  CHECK(ui.app.loaded_samples() == before);
+  ui.app.load_multisample("lib/Nothing.dspreset", &err);
+  ui.app.finish_loading();
+  CHECK(!ui.app.load_multisample("lib/Nothing.dspreset", &err) && !err.empty());
+  // A preset that loads while the song plays reaches the engine without an edit.
+  ui.platform.budget = 0;
+  t.sampler.preset = "lib/Other.dspreset";
+  ui.platform.write_file("lib/Other.dspreset", std::vector<uint8_t>(xml.begin(), xml.end()));
+  ui.app.history().change_track(0, t);
+  CHECK(ui.wait_for_loads());
+  ui.app.engine().live_note(0, 50, 100);
+  for (int i = 0; i < 5; ++i) ui.step(0);
+  CHECK_MSG(ui.app.engine().active_voices() == 1, "%d voices", ui.app.engine().active_voices());
+  ui.app.engine().live_note(0, 50, 0);
+  // The one no track uses any more is let go.
+  for (int i = 0; i < 120; ++i) ui.step(0);
+  CHECK(!ui.app.multisample_loading("lib/Test.dspreset"));
+  ui.app.load_multisample("lib/Test.dspreset");
+  CHECK(ui.app.multisample_loading("lib/Test.dspreset"));  // loading again
+  ui.app.finish_loading();
+}
+
+// Picking a preset in the sound view: Multi mode, the browser showing presets, the preset loading,
+// then its amp envelope becoming the track's.
+void test_ui_pick_multisample() {
+  UiDriver ui;
+  const std::string xml = R"(<DecentSampler><groups attack="0.02" release="0.5">
+    <group><sample path="s/c4.wav" rootNote="60"/></group></groups></DecentSampler>)";
+  ui.platform.write_file("samples/Piano/Piano.dspreset", std::vector<uint8_t>(xml.begin(), xml.end()));
+  ui.platform.write_file("samples/Piano/s/c4.wav", sine_wav(48000, 1));
+  ui.tap(twill::kLeft, twill::kSelect);  // arrangement -> mixer
+  ui.tap(twill::kLeft, twill::kSelect);  // -> sound view
+  for (int i = 0; i < 3; ++i) ui.tap(twill::kRight);  // engine -> sampler
+  ui.tap(twill::kDown);                               // mode
+  for (int i = 0; i < 3; ++i) ui.tap(twill::kRight);  // single -> slices -> kit -> multi
+  CHECK(ui.app.project().tracks[0].sampler.mode == twill::SamplerMode::Multi);
+  ui.tap(twill::kDown);  // Preset
+  ui.tap(twill::kA);     // the browser, in samples/: [Up a folder], Factory/ (selected), Piano/
+  ui.tap(twill::kDown);
+  ui.tap(twill::kA);     // into Piano/: [Up a folder], s/ (selected), Piano.dspreset; no WAVs listed
+  ui.tap(twill::kDown);
+  ui.tap(twill::kA);     // pick it
+  CHECK(ui.wait_for_loads());
+  const twill::Track& t = ui.app.project().tracks[0];
+  CHECK_MSG(t.sampler.preset == "samples/Piano/Piano.dspreset", "preset \"%s\"", t.sampler.preset.c_str());
+  CHECK_MSG(std::fabs(twill::env_seconds(t.tone.release) - 0.5f) < 0.01f, "release %.3f s", twill::env_seconds(t.tone.release));
+  CHECK(std::fabs(twill::env_seconds(t.tone.attack) - 0.02f) < 0.001f);
+  // Everything in it plays: no notice, unless the track plays one note at a time.
+  CHECK(ui.app.notice_open() == (t.voices <= 1));
+  ui.tap(twill::kA);
+  ui.tap(twill::kB, twill::kSelect);  // one undo takes the preset and its envelope back
+  CHECK(ui.app.project().tracks[0].sampler.preset.empty());
+  {
+    twill::Track one = ui.app.project().tracks[0];
+    one.voices = 1;
+    ui.app.history().change_track(0, one);
+    ui.app.pick_multisample(0, "samples/Piano/Piano.dspreset");
+    CHECK(ui.wait_for_loads());
+    CHECK(ui.app.notice_open() && ui.app.notice_text().find("raise Voices") != std::string::npos);
+    ui.tap(twill::kA);
+    one = ui.app.project().tracks[0];
+    one.voices = 8;
+    ui.app.history().change_track(0, one);
+    ui.app.pick_multisample(0, "samples/Piano/Piano.dspreset");
+    CHECK(ui.wait_for_loads());
+    CHECK(!ui.app.notice_open());
+    CHECK(ui.app.project().tracks[0].voices == 8);  // the voices are the user's to set
+  }
+
+  // One with things the app doesn't play: a notice says what, until A.
+  const std::string fx = R"(<DecentSampler><effects><effect type="reverb"/></effects>
+    <groups><group><sample path="s/c4.wav" rootNote="60" trigger="release"/><sample path="s/c4.wav" rootNote="60"/></group></groups></DecentSampler>)";
+  ui.platform.write_file("samples/Piano/Wet.dspreset", std::vector<uint8_t>(fx.begin(), fx.end()));
+  ui.app.pick_multisample(0, "samples/Piano/Wet.dspreset");
+  CHECK(ui.wait_for_loads());
+  CHECK(ui.app.project().tracks[0].sampler.preset == "samples/Piano/Wet.dspreset");
+  CHECK(ui.app.notice_open());
+  const std::string text = ui.app.notice_text();
+  CHECK(text.find("raise Voices") == std::string::npos);  // eight voices: no reminder
+  CHECK_MSG(text.find("effects") != std::string::npos && text.find("release triggers") != std::string::npos, "%s", text.c_str());
+  const uint64_t before = ui.app.history().revision();
+  ui.tap(twill::kRight);  // the notice holds the buttons: nothing changes
+  CHECK(ui.app.history().revision() == before);
+  ui.tap(twill::kA);
+  CHECK(!ui.app.notice_open());
+  // A preset that can't load leaves the track as it was.
+  ui.app.pick_multisample(0, "samples/Piano/None.dspreset");
+  CHECK(ui.wait_for_loads());
+  CHECK(ui.app.project().tracks[0].sampler.preset == "samples/Piano/Wet.dspreset");
+}
+
+// An SFZ file: headers and what they pass down, defines and includes, note names, and the opcodes
+// as the format's documentation describes them.
+void test_sfz_reader() {
+  const std::string sfz = R"(// a comment
+<control> default_path=Samples\Piano/ note_offset=0
+#define $LOUD 64
+<global> volume=-6 ampeg_release=0.8 /* a block
+comment */ fil_type=lpf_2p cutoff=2000
+#include "env.sfzh"
+<group> lovel=1 hivel=$LOUD amp_veltrack=50
+<region> sample=Soft C4.wav lokey=c4 hikey=e4 pitch_keycenter=c4 tune=-25 pan=-50
+<region> sample=Soft F#4.flac key=f#4 transpose=1 loop_mode=loop_continuous loop_start=10 loop_end=999 loop_crossfade=0.02
+<group> lovel=65 seq_length=2
+<region> sample=hit1.wav key=36 seq_position=1 loop_mode=one_shot pitch_keytrack=0
+<region> sample=hit2.wav key=36 seq_position=2 trigger=release
+<group> lorand=0 hirand=0.5
+<region> sample=r1.wav key=48
+<group> lorand=0.5 hirand=1
+<region> sample=r2.wav key=48 locc64=64
+<region> sample=r3.wav key=48 hicc64=63
+<region> sample=*sine key=50
+<curve> v000=0
+)";
+  const std::string env = "<master> ampeg_attack=0.005 ampeg_sustain=50\n";
+  twill::Multisample m;
+  std::string err;
+  auto includes = [&](const std::string& path, std::string& text) {
+    if (path != "lib/env.sfzh") return false;
+    text = env;
+    return true;
+  };
+  CHECK_MSG(twill::read_multisample("lib/Piano.sfz", sfz, m, err, includes), "%s", err.c_str());
+  CHECK_MSG(m.zones.size() == 5, "%zu zones", m.zones.size());
+  CHECK(m.name == "Piano");
+  if (m.zones.size() == 5) {
+    const twill::Zone& a = m.zones[0];
+    CHECK_MSG(a.sample == "lib/Samples/Piano/Soft C4.wav", "%s", a.sample.c_str());  // spaces kept, backslash a folder
+    CHECK(a.lo_key == 60 && a.hi_key == 64 && a.root == 60 && a.lo_vel == 0 && a.hi_vel == 64);
+    CHECK(std::fabs(a.tune - -0.25f) < 1e-5f && a.tune_after_keytrack);
+    CHECK(std::fabs(a.gain - std::pow(10.0f, -6 / 20.0f)) < 1e-4f && std::fabs(a.pan - -0.5f) < 1e-5f);
+    CHECK(std::fabs(a.veltrack - 0.5f) < 1e-5f && a.loop_if_marked && !a.loop);
+    const twill::Zone& b = m.zones[1];
+    CHECK(b.lo_key == 66 && b.hi_key == 66 && b.root == 66 && std::fabs(b.tune - 1) < 1e-5f);  // transpose: pitch only
+    CHECK(b.loop && !b.loop_if_marked && b.loop_start == 10 && b.loop_end == 999 && b.loop_crossfade_s == 0.02f);
+    const twill::Zone& h = m.zones[2];
+    CHECK(h.one_shot && h.keytrack == 0 && h.seq == twill::SeqMode::RoundRobin && h.seq_length == 2 && h.lo_vel == 65);
+    CHECK(h.veltrack == 1);  // the earlier group's veltrack ended with it
+    // Random ranges, and the controller range played as if the pedal were up.
+    CHECK(m.zones[3].sample == "lib/Samples/Piano/r1.wav" && m.zones[3].hi_rand == 0.5f);
+    CHECK(m.zones[4].sample == "lib/Samples/Piano/r3.wav" && m.zones[4].lo_rand == 0.5f);
+  }
+  CHECK(m.has_envelope && std::fabs(m.envelope.attack - 0.005f) < 1e-6f && std::fabs(m.envelope.sustain - 0.5f) < 1e-6f &&
+        std::fabs(m.envelope.release - 0.8f) < 1e-6f);
+  std::string unused;
+  for (const std::string& u : m.unused) unused += u + ", ";
+  for (const char* want : {"filters", "release triggers", "built-in waveforms", "velocity curves", "controller ranges"})
+    CHECK_MSG(unused.find(want) != std::string::npos, "unused: %s (no %s)", unused.c_str(), want);
+  // Key switches: only the default articulation plays.
+  const std::string ks = "<control> sw_default=c1\n<group> sw_last=c1\n<region> sample=a.wav\n<group> sw_last=d1\n<region> sample=b.wav\n";
+  CHECK(twill::read_multisample("k.sfz", ks, m, err) && m.zones.size() == 1 && m.zones[0].sample == "a.wav");
+  CHECK(!twill::read_multisample("e.sfz", "<control> default_path=x/\n", m, err) && !err.empty());
+  CHECK(twill::is_multisample_file("A.SFZ") && twill::is_multisample_file("b.dspreset") && !twill::is_multisample_file("c.wav"));
+}
+
+// SFZ playing: a one-shot plays past its note's end, key tracking off keeps the pitch, velocity
+// tracking off keeps the level, and random ranges pick one zone a note.
+void test_sfz_playing() {
+  std::map<std::string, std::shared_ptr<twill::SampleData>> samples;
+  auto level_sample = [&](const std::string& name, float level, int frames) {
+    auto d = std::make_shared<twill::SampleData>();
+    d->source_rate = 48000;
+    d->set_from_float(std::vector<float>(size_t(frames), level), 1);
+    samples[name] = d;
+  };
+  level_sample("long.wav", 0.2f, 48000);
+  level_sample("lo.wav", 0.1f, 48000);
+  level_sample("hi.wav", 0.3f, 48000);
+  std::string err;
+  twill::Multisample m;
+  CHECK(twill::read_sfz("<region> sample=long.wav key=36 loop_mode=one_shot pitch_keytrack=0 amp_veltrack=0\n"
+                        "<region> sample=lo.wav key=48 lorand=0 hirand=0.5\n<region> sample=hi.wav key=48 lorand=0.5\n",
+                        "", m, err));
+  twill::Project p = make_project();
+  p.tracks[0].instrument = twill::InstrumentType::Sampler;
+  p.tracks[0].sampler.mode = twill::SamplerMode::Multi;
+  p.tracks[0].sampler.preset = "x.sfz";
+  p.tracks[0].voices = 8;
+  p.tracks[0].tone.attack = 0;
+  p.tracks[0].tone.sustain = 1;
+  p.tracks[0].tone.release = 0;
+  p.tracks[0].level = 0.5f;
+  twill::Engine e(16);
+  e.submit(twill::build_snapshot(p, 16, 1, [&](const std::string& path) { return samples.count(path) ? samples[path].get() : nullptr; },
+                                 [&](const std::string&) { return &m; }));
+  std::vector<float> buf(2 * 4800);
+  e.live_note(0, 36, 30);  // soft, but velocity doesn't matter here
+  e.render(buf.data(), 4800);
+  const float held = std::fabs(buf[2 * 4000]);
+  e.live_note(0, 36, 0);
+  e.render(buf.data(), 4800);
+  CHECK_MSG(held > 0 && std::fabs(std::fabs(buf[2 * 4000]) - held) < 1e-4f, "one-shot %.3f then %.3f", held, std::fabs(buf[2 * 4000]));
+  for (int i = 0; i < 12; ++i) e.render(buf.data(), 4800);
+  std::set<int> heard;
+  for (int i = 0; i < 40; ++i) {
+    e.live_note(0, 48, 127);
+    e.render(buf.data(), 4800);
+    CHECK(e.active_voices() == 1);
+    heard.insert(int(std::lround(std::fabs(buf[2 * 4000]) * 1000)));
+    e.live_note(0, 48, 0);
+    e.render(buf.data(), 4800);
+  }
+  CHECK_MSG(heard.size() == 2, "%zu levels", heard.size());
+}
+
 void test_ui_track_settings_engine_to_sampler() {
   UiDriver ui;
   ui.tap(twill::kLeft);  // Kick's header
@@ -1753,6 +2364,114 @@ void test_ui_browser_up_a_folder() {
   CHECK(ui.app.project().tracks[0].sampler.sample == "samples/Factory/36 Kick.wav");
 }
 
+// A loop crossfade: a sample that rises steadily, looped from a tenth of the way to the end, jumps
+// at each turn of a plain loop; crossfaded (either curve), its steps stay small.
+void test_multisample_loop_crossfade() {
+  auto d = std::make_shared<twill::SampleData>();
+  d->source_rate = 48000;
+  std::vector<float> ramp(4800);
+  for (size_t i = 0; i < ramp.size(); ++i) ramp[i] = 0.8f * float(i) / float(ramp.size());
+  d->set_from_float(ramp, 1);
+  auto biggest_step = [&](int xfade, bool linear) {
+    twill::Multisample m;
+    twill::Zone z;
+    z.sample = "ramp.wav";
+    z.root = 60;
+    z.loop = true;
+    z.loop_start = 1000;
+    z.loop_end = 4499;
+    z.loop_crossfade = xfade;
+    z.crossfade_linear = linear;
+    m.zones.push_back(z);
+    twill::Project p = make_project();
+    p.tracks[0].instrument = twill::InstrumentType::Sampler;
+    p.tracks[0].sampler.mode = twill::SamplerMode::Multi;
+    p.tracks[0].sampler.preset = "x.dspreset";
+    p.tracks[0].tone.attack = 0;
+    p.tracks[0].tone.sustain = 1;
+    p.tracks[0].send_reverb = p.tracks[0].send_delay = p.tracks[0].send_chorus = 0;
+    twill::Engine e(8);
+    e.submit(twill::build_snapshot(p, 16, 1, [&](const std::string&) { return d.get(); },
+                                   [&](const std::string&) { return &m; }));
+    std::vector<float> buf(2 * 24000);
+    e.live_note(0, 60, 127);
+    e.render(buf.data(), 24000);
+    float most = 0;
+    for (int i = 6000; i < 24000; ++i) most = std::max(most, std::fabs(buf[size_t(2 * i)] - buf[size_t(2 * i - 2)]));
+    return most;
+  };
+  const float plain = biggest_step(0, false), equal = biggest_step(800, false), linear = biggest_step(800, true);
+  CHECK_MSG(plain > 0.1f, "plain loop's jump %.4f", plain);
+  CHECK_MSG(equal < plain / 10 && linear < plain / 10, "steps: plain %.4f, equal power %.4f, linear %.4f", plain, equal, linear);
+}
+
+// The preset browser and DecentSampler library bundles: one with a single preset is listed as that
+// preset, by the bundle's name; one with several opens to just its presets.
+void test_ui_browser_bundles() {
+  UiDriver ui;
+  const std::string xml = R"(<DecentSampler><groups><group><sample path="Samples/c4.wav" rootNote="60"/></group></groups></DecentSampler>)";
+  for (const char* f : {"samples/Libs/Piano.dsbundle/Piano.dspreset", "samples/Libs/Museum.dsbundle/A Lead.dspreset",
+                        "samples/Libs/Museum.dsbundle/B Bass.dspreset"})
+    ui.platform.write_file(f, std::vector<uint8_t>(xml.begin(), xml.end()));
+  for (const char* f : {"samples/Libs/Piano.dsbundle/Samples/c4.wav", "samples/Libs/Museum.dsbundle/Samples/c4.wav"})
+    ui.platform.write_file(f, sine_wav(48000, 1, 0.1f));
+  ui.platform.write_file("samples/Libs/Museum.dsbundle/Images/bg.png", {1, 2, 3});
+  ui.tap(twill::kLeft, twill::kSelect);
+  ui.tap(twill::kLeft, twill::kSelect);  // sound view
+  for (int i = 0; i < 3; ++i) ui.tap(twill::kRight);  // sampler
+  ui.tap(twill::kDown);
+  for (int i = 0; i < 3; ++i) ui.tap(twill::kRight);  // Multi
+  ui.tap(twill::kDown);  // Preset
+  ui.tap(twill::kA);     // samples/: [Up a folder], Factory/ (selected), Libs/
+  ui.tap(twill::kDown);
+  ui.tap(twill::kA);     // Libs/: [Up a folder], Museum (selected; a folder of presets), Piano (its preset)
+  ui.tap(twill::kDown);
+  ui.tap(twill::kA);     // Piano: picked, no folder to go into
+  CHECK(ui.wait_for_loads());
+  CHECK_MSG(ui.app.project().tracks[0].sampler.preset == "samples/Libs/Piano.dsbundle/Piano.dspreset", "%s",
+            ui.app.project().tracks[0].sampler.preset.c_str());
+  if (ui.app.notice_open()) ui.tap(twill::kA);
+  ui.tap(twill::kA);     // the browser again: in Libs/, on Piano
+  ui.tap(twill::kUp);    // Museum
+  ui.tap(twill::kA);     // inside: [Up a folder], A Lead (selected), B Bass; no Samples/ or Images/
+  ui.tap(twill::kLeft);  // the top, [Up a folder]
+  ui.tap(twill::kDown);  // the first entry: A Lead (were the folders listed, Images/ would come first)
+  ui.tap(twill::kA);
+  CHECK(ui.wait_for_loads());
+  CHECK_MSG(ui.app.project().tracks[0].sampler.preset == "samples/Libs/Museum.dsbundle/A Lead.dspreset", "%s",
+            ui.app.project().tracks[0].sampler.preset.c_str());
+}
+
+// The browser: Left to the top of the list, Right to the end, R + Up/Down ten at a time.
+void test_ui_browser_jumps() {
+  UiDriver ui;
+  for (int i = 0; i < 25; ++i) {
+    char name[64];
+    std::snprintf(name, sizeof name, "samples/Many/f%02d.wav", i);
+    ui.platform.write_file(name, sine_wav(48000, 1, 0.05f));
+  }
+  ui.tap(twill::kLeft, twill::kSelect);
+  ui.tap(twill::kLeft, twill::kSelect);  // sound view
+  for (int i = 0; i < 3; ++i) ui.tap(twill::kRight);  // sampler
+  ui.tap(twill::kDown);
+  ui.tap(twill::kDown);  // Sample
+  ui.tap(twill::kA);     // samples/: [Up a folder], Factory/ (selected), Many/
+  ui.tap(twill::kDown);
+  ui.tap(twill::kA);     // Many/: [Up a folder], f00 (selected) ... f24
+  ui.tap(twill::kRight);  // the end
+  ui.tap(twill::kA);
+  CHECK(ui.app.project().tracks[0].sampler.sample == "samples/Many/f24.wav");
+  ui.tap(twill::kA);      // the browser again, on f24
+  ui.tap(twill::kLeft);   // the top: [Up a folder]
+  ui.tap(twill::kDown, twill::kR);  // ten on: f09
+  ui.tap(twill::kDown, twill::kR);  // f19
+  ui.tap(twill::kDown, twill::kR);  // stops at the end: f24
+  ui.tap(twill::kUp, twill::kR);    // f14
+  ui.tap(twill::kA);
+  CHECK_MSG(ui.app.project().tracks[0].sampler.sample == "samples/Many/f14.wav", "%s",
+            ui.app.project().tracks[0].sampler.sample.c_str());
+}
+
 void test_ui_sound_view_kit() {
   UiDriver ui;
   CHECK(ui.platform.files.count("samples/Factory/36 Kick.wav") == 1);  // factory sounds were made
@@ -1782,6 +2501,18 @@ void test_ui_sound_view_kit() {
   CHECK(t.sampler.kit[38 - twill::kKitFirstNote].sample == "samples/Factory/38 Snare.wav");
   CHECK(t.sampler.kit[42 - twill::kKitFirstNote].choke == 1 && t.sampler.kit[46 - twill::kKitFirstNote].choke == 1);
   CHECK(t.sampler.kit[46 - twill::kKitFirstNote].decay < 1 && t.sampler.kit[51 - twill::kKitFirstNote].decay == 1);
+  // Once the kit has been changed, loading the factory kit again takes a second press.
+  twill::Track changed = t;
+  changed.sampler.kit[0].tune = 5;
+  ui.app.history().change_track(0, changed);
+  ui.tap(twill::kA);
+  CHECK(ui.app.project().tracks[0].sampler.kit[0].tune == 5);
+  ui.tap(twill::kA);
+  CHECK(ui.app.project().tracks[0].sampler.kit[0].tune == 0);
+  ui.tap(twill::kB, twill::kSelect);  // one undo brings the changed kit back
+  CHECK_MSG(ui.app.project().tracks[0].sampler.kit[0].tune == 5, "after undo: tune %.1f, %s",
+            ui.app.project().tracks[0].sampler.kit[0].tune, ui.app.project().tracks[0].sampler.kit[0].sample.c_str());
+  ui.tap(twill::kB, twill::kSelect);
   for (int i = 0; i < 6; ++i) ui.tap(twill::kB, twill::kSelect);  // undo all six changes
   CHECK(ui.app.project().tracks[0].instrument == twill::InstrumentType::Macro);
   CHECK(ui.app.project().tracks[0].sampler.kit[0].sample.empty());
@@ -1834,7 +2565,7 @@ void test_ui_lane_velocity_and_automation() {
   ui.tap(twill::kRight);            // an empty cell, so X opens the clip panel
   ui.tap(twill::kX);
   CHECK(ui.app.inspector_open());
-  for (int i = 0; i < 4; ++i) ui.tap(twill::kDown);  // from Grid past Key, Scale, Fold, to Lane
+  for (int i = 0; i < 5; ++i) ui.tap(twill::kDown);  // from Loop length past Grid, Key, Scale, Fold, to Lane
   ui.tap(twill::kRight);   // Velocity -> Harmonics
   ui.tap(twill::kRight);   // -> Timbre
   ui.tap(twill::kX);
@@ -1845,17 +2576,19 @@ void test_ui_lane_velocity_and_automation() {
   CHECK(lane && std::fabs(lane->points[0].value - 0.52f) < 1e-4f);
 }
 
+// Menu opens the settings of what the screen shows; Select + X the main menu from anywhere.
 void test_ui_menu_opens_project() {
   UiDriver ui;
-  ui.tap(twill::kRight, twill::kSelect);  // from the roll, say
-  ui.tap(twill::kMenu);                // Menu alone: the settings panel (Controls, Theme, New song names, Audio buffer, Tempo, ...)
-  CHECK(ui.app.inspector_open());
+  ui.tap(twill::kMenu);  // the arrangement: the main menu
+  CHECK(ui.app.inspector_title() == "Main menu");
   const float tempo = ui.app.project().tempo;
-  for (int i = 0; i < 4; ++i) ui.tap(twill::kDown);
+  CHECK(ui.go_to_row("Tempo"));
   ui.tap(twill::kRight);
   CHECK(ui.app.project().tempo == tempo + 1);
+  const size_t placed = ui.app.project().tracks[0].arrangement.size();
   ui.tap(twill::kB);  // close
   CHECK(!ui.app.inspector_open());
+  CHECK_MSG(ui.app.project().tracks[0].arrangement.size() == placed, "B closing the panel deleted a clip");
   // A second tap of Menu puts the panel away, as does B.
   ui.tap(twill::kMenu);
   CHECK(ui.app.inspector_open());
@@ -1868,6 +2601,60 @@ void test_ui_menu_opens_project() {
   CHECK_MSG(ui.app.inspector_title() == "About Twill Studio", "panel \"%s\"", ui.app.inspector_title().c_str());
   ui.tap(twill::kMenu);  // from the About panel too
   CHECK(!ui.app.inspector_open());
+
+  // The roll: Menu is the clip's panel, wherever the cursor is; its last row is the main menu.
+  ui.tap(twill::kRight, twill::kSelect);  // the roll, cursor on the first note
+  ui.tap(twill::kMenu);
+  CHECK_MSG(ui.app.inspector_title() == "Clip", "panel \"%s\"", ui.app.inspector_title().c_str());
+  CHECK(ui.app.inspector_fields().front().label == "Loop length");
+  CHECK(ui.app.inspector_fields().back().label == "Main menu");
+  ui.tap(twill::kUp);  // wraps to Main menu
+  ui.tap(twill::kA);
+  CHECK(ui.app.inspector_title() == "Main menu");
+  ui.tap(twill::kMenu);  // still Menu's: a tap puts it away
+  CHECK(!ui.app.inspector_open());
+  // X on the note is still the note's panel; Select + X the main menu, and again to close it.
+  ui.tap(twill::kX);
+  CHECK(ui.app.inspector_title() == "1 note");
+  ui.tap(twill::kB);
+  ui.tap(twill::kX, twill::kSelect);
+  CHECK(ui.app.inspector_title() == "Main menu");
+  ui.tap(twill::kX, twill::kSelect);
+  CHECK(!ui.app.inspector_open());
+  // The sound view: the track's settings.
+  ui.tap(twill::kRight, twill::kSelect);
+  ui.tap(twill::kMenu);
+  CHECK(ui.app.inspector_open() && ui.app.inspector_title() != "Main menu" && ui.app.inspector_title() != "Clip");
+  ui.tap(twill::kMenu);
+  CHECK(!ui.app.inspector_open());
+}
+
+// In the arrangement, A + Right plays a clip for longer (repeating it); A + Y then makes its loop
+// that long instead, so it doesn't repeat.
+void test_ui_arrange_no_repeat() {
+  UiDriver ui;  // the cursor starts on the Kick's clip (one bar, played for eight)
+  const twill::Placement pl = ui.app.project().tracks[0].arrangement[0];
+  const twill::Clip* c = ui.app.project().find_clip(pl.clip_id);
+  CHECK(c != nullptr);
+  if (!c) return;
+  const Tick loop = c->length;
+  const size_t notes = c->notes.size();
+  ui.step(twill::kA);
+  ui.step(twill::kA | twill::kRight);
+  ui.step(twill::kA);
+  ui.step(twill::kA | twill::kY);
+  ui.step(twill::kA);
+  ui.step(0);
+  const twill::Placement& now = ui.app.project().tracks[0].arrangement[0];
+  CHECK_MSG(now.length == pl.length + 4 * Q, "plays %d", int(now.length));
+  c = ui.app.project().find_clip(pl.clip_id);
+  CHECK_MSG(c && c->length == now.offset + now.length && c->length != loop, "loop %d", c ? int(c->length) : -1);
+  CHECK(c && c->notes.size() == notes);  // the notes stay
+  CHECK(ui.app.project().tracks[0].arrangement.size() == 1);  // Y didn't duplicate
+  ui.tap(twill::kB, twill::kSelect);  // one undo: the loop back
+  ui.tap(twill::kB, twill::kSelect);  // and the length
+  c = ui.app.project().find_clip(pl.clip_id);
+  CHECK(c && c->length == loop && ui.app.project().tracks[0].arrangement[0].length == pl.length);
 }
 
 // Select all in the roll: Y + A, or the clip panel's row.
@@ -1888,11 +2675,117 @@ void test_ui_select_all() {
   CHECK(ui.clip().notes.size() == notes);
 }
 
+// Choosing the chiptune engine plays a short preview, which ends: its voice is freed (it used to
+// hold on forever, the engine's own envelope never decaying).
+void test_ui_chiptune_preview_ends() {
+  UiDriver ui;
+  ui.audio = true;
+  twill::Track t = ui.app.project().tracks[0];
+  t.instrument = twill::InstrumentType::Macro;
+  t.macro.engine = 6;
+  ui.app.history().change_track(0, t);
+  ui.app.step_sound(0, 1);  // string machine -> chiptune, with its preview note
+  CHECK(ui.app.project().tracks[0].macro.engine == 7);
+  bool sounded = false;
+  for (int i = 0; i < 10; ++i) {
+    ui.step(0);
+    sounded |= ui.app.engine().active_voices() > 0;
+  }
+  CHECK(sounded);
+  for (int i = 0; i < 600; ++i) ui.step(0);  // ten seconds
+  CHECK_MSG(ui.app.engine().active_voices() == 0, "%d voices still playing", ui.app.engine().active_voices());
+}
+
+// A stepped setting reads and moves by its steps wherever it's shown: the sound view, a note's lock
+// and a lane all use format_track_param and step_track_param.
+void test_stepped_param_names() {
+  twill::Track t;
+  t.instrument = twill::InstrumentType::Macro;
+  t.macro.engine = 7;
+  float v = 0;
+  for (int i = 0; i < 3; ++i) v = twill::step_track_param(t, twill::kParamHarmonics, v, 1, false, 0.01f);
+  CHECK_MSG(twill::format_track_param(t, twill::kParamHarmonics, v) == "Minor", "%s",
+            twill::format_track_param(t, twill::kParamHarmonics, v).c_str());
+  CHECK(twill::format_track_param(t, twill::kParamHarmonics, 1) == "Major");
+  CHECK(twill::format_track_param(t, twill::kParamTimbre, 0) == "Up, 1 octave");
+  CHECK(twill::format_track_param(t, twill::kParamTimbre, twill::step_track_param(t, twill::kParamTimbre, 0, 1, true, 0.01f)) ==
+        "Down, 1 octave");  // coarse: a direction at a time
+  t.macro.engine = 14;  // chords: the chord, but Timbre is the inversion, a plain amount
+  CHECK(twill::format_track_param(t, twill::kParamHarmonics, 1) == "Major");
+  CHECK(twill::format_track_param(t, twill::kParamTimbre, 0.5f) == twill::format_param(twill::kParamTimbre, 0.5f));
+  t.macro.engine = 8;
+  CHECK(twill::format_track_param(t, twill::kParamHarmonics, 0.5f) == twill::format_param(twill::kParamHarmonics, 0.5f));
+  CHECK(std::fabs(twill::step_track_param(t, twill::kParamHarmonics, 0.5f, 1, false, 0.01f) - 0.51f) < 1e-5f);
+}
+
+// The settings menu: the song, its music, export, MIDI, then the app's own settings and help.
+void test_ui_settings_order() {
+  UiDriver ui;
+  ui.tap(twill::kMenu);
+  std::string got;
+  for (const twill::InspectorField& f : ui.app.inspector_fields()) got += (got.empty() ? "" : ", ") + f.label;
+  const std::string want = "Song, Name, New project, Load, Save, Render to WAV, Render stems, Music, Tempo, Key, "
+                           "Scale, MIDI, Record from MIDI, MIDI clock, MIDI devices, Settings, Theme, New song "
+                           "names, Output boost, Audio buffer, Help, Controls, About";
+  CHECK_MSG(got == want, "%s", got.c_str());
+  CHECK(ui.app.inspector_title() == "Main menu");
+  CHECK(ui.app.inspector_fields()[size_t(ui.app.inspector_selection())].label == "Name");  // past the heading
+}
+
+// Output boost: louder live playback (peaks still under the limiter's ceiling), kept in
+// settings.txt; renders are as mixed.
+void test_ui_output_boost() {
+  UiDriver ui;
+  ui.audio = true;
+  const std::vector<float> plain = ui.app.render_offline(ui.app.project(), true);
+  auto live_rms = [&] {
+    std::vector<float> buf(2 * 48000);
+    ui.app.engine().locate(0);
+    ui.app.engine().play();
+    for (int pos = 0; pos < 48000; pos += 256) ui.app.engine().render(&buf[size_t(pos) * 2], std::min(256, 48000 - pos));
+    ui.app.engine().stop();
+    for (int i = 0; i < 20; ++i) ui.app.engine().render(&buf[0], 256);  // let it stop
+    double s = 0, peak = 0;
+    for (float v : buf) s += double(v) * v, peak = std::max(peak, double(std::fabs(v)));
+    CHECK(peak <= 1.0);
+    return std::sqrt(s / buf.size());
+  };
+  const double before = live_rms();
+  ui.tap(twill::kMenu);
+  CHECK(ui.go_to_row("Output boost"));
+  ui.tap(twill::kRight);
+  ui.tap(twill::kRight);  // +6 dB
+  CHECK(ui.app.output_boost_db() == 6);
+  ui.tap(twill::kB);
+  const double after = live_rms();
+  CHECK_MSG(after > before * 1.5, "rms %.4f -> %.4f", before, after);
+  // Renders are as mixed.
+  const std::vector<float> again = ui.app.render_offline(ui.app.project(), true);
+  CHECK(again.size() == plain.size() && again == plain);
+  // Kept for the next start.
+  twill::App next(ui.platform);
+  next.start();
+  CHECK(next.output_boost_db() == 6);
+  next.stop();
+}
+
+// A settings value too long for its row is cut short with "...", never past the room it has.
+void test_fit_text() {
+  const twill::Font& f = twill::Font::get(twill::FontFace::CondensedBold, 16);
+  CHECK(twill::fit_text(f, "Short", 500) == "Short");
+  const std::string longer = "UMP: Studio Keys 37 MIDI 1, Roland A-49 MIDI 1, Through Port-0";
+  const std::string fitted = twill::fit_text(f, longer, 120);
+  CHECK_MSG(fitted.size() > 3 && fitted.compare(fitted.size() - 3, 3, "...") == 0 && f.measure(fitted.c_str()) <= 120,
+            "\"%s\"", fitted.c_str());
+  CHECK(longer.compare(0, fitted.size() - 3, fitted, 0, fitted.size() - 3) == 0);  // the start, kept
+  CHECK(twill::fit_text(f, longer, 1).empty());
+}
+
 void test_ui_dark_mode_setting() {
   UiDriver ui;
   CHECK(!ui.app.dark_mode());
-  ui.tap(twill::kMenu);   // settings, on Controls
-  ui.tap(twill::kDown);   // Theme
+  ui.tap(twill::kMenu);   // settings
+  CHECK(ui.go_to_row("Theme"));
   ui.tap(twill::kRight);  // dark
   CHECK(ui.app.dark_mode());
   CHECK(ui.platform.files.count("settings.txt") == 1);
@@ -2010,8 +2903,8 @@ void test_ui_song_names() {
 
   UiDriver ui;
   ui.tap(twill::kDown);  // Snare row, bar 1 empty
-  ui.tap(twill::kX);     // settings panel; Name is the eighth row
-  for (int i = 0; i < 7; ++i) ui.tap(twill::kDown);
+  ui.tap(twill::kX);     // settings panel
+  CHECK(ui.go_to_row("Name"));
   ui.tap(twill::kA);  // the name editor
   ui.tap(twill::kX);  // make one up
   ui.tap(twill::kA);
@@ -2143,7 +3036,7 @@ void test_audio_buffer_setting() {
   UiDriver ui;
   CHECK(!ui.app.safe_audio());
   ui.tap(twill::kMenu);
-  for (int i = 0; i < 3; ++i) ui.tap(twill::kDown);  // Audio buffer
+  CHECK(ui.go_to_row("Audio buffer"));
   ui.tap(twill::kRight);
   CHECK(ui.app.safe_audio());
   CHECK(ui.platform.opened_block == 1024);
@@ -2171,13 +3064,82 @@ void test_audio_buffer_setting() {
 void test_ui_project_tempo() {
   UiDriver ui;
   ui.tap(twill::kDown);  // Snare: bar 1 is empty
-  ui.tap(twill::kX);     // settings panel: Controls, Theme, New song names, Tempo, ...
+  ui.tap(twill::kX);     // settings panel
   CHECK(ui.app.inspector_open());
   const float tempo = ui.app.project().tempo;
-  for (int i = 0; i < 4; ++i) ui.tap(twill::kDown);
+  CHECK(ui.go_to_row("Tempo"));
   ui.tap(twill::kRight);
   ui.tap(twill::kRight, twill::kR);
   CHECK(ui.app.project().tempo == tempo + 11);
+}
+
+// The chiptune engine arpeggiates a held note at the set rate, and every note starts on its own
+// pitch (the engine alone steps on from wherever the last note left it).
+void test_chiptune_arpeggio() {
+  // Frequency over [from, to) samples, from rising zero crossings.
+  auto freq = [](const std::vector<float>& x, int from, int to) {
+    int first = -1, last = -1, n = 0;
+    for (int i = from + 1; i < to; ++i)
+      if (x[size_t(i - 1)] < 0 && x[size_t(i)] >= 0) {
+        if (first < 0) first = i;
+        last = i;
+        ++n;
+      }
+    return n > 1 ? (n - 1) * 48000.0 / (last - first) : 0.0;
+  };
+  auto near = [](double f, double want) { return std::fabs(std::log2(f / want)) < 0.03; };  // half a semitone
+  twill::PlaitsVoice::seed_random(1);
+  twill::PlaitsVoice v;
+  twill::MacroParams p;
+  p.engine = 7;
+  p.note = 57;          // A3, 220 Hz
+  p.harmonics = 1;      // the major chord: 0, 4 and 7 semitones
+  p.timbre = 0;         // upwards, one octave
+  p.morph = 0.25f;      // a plain pulse wave
+  p.use_lpg = false;
+  p.arp_step = 4800;    // a step every 0.1 s
+  const int len = 4 * 4800;
+  std::vector<float> out(static_cast<size_t>(len)), aux(static_cast<size_t>(len));
+  v.note_on();
+  v.render(p, out.data(), aux.data(), len);
+  // The arpeggio runs over the chord's three notes and starts again.
+  const double root = 220, steps[] = {root, root * std::pow(2, 4 / 12.0), root * std::pow(2, 7 / 12.0), root};
+  for (int i = 0; i < 4; ++i) {
+    const double f = freq(out, i * 4800 + 600, i * 4800 + 4400);
+    CHECK_MSG(near(f, steps[i]), "step %d: %.1f Hz, wanted %.1f", i, f, steps[i]);
+  }
+  // A new note starts on its root, not on the next step.
+  v.note_off();
+  v.render(p, out.data(), aux.data(), 240);
+  v.note_on();
+  v.render(p, out.data(), aux.data(), 4800);
+  CHECK_MSG(near(freq(out, 600, 4400), root), "next note: %.1f Hz", freq(out, 600, 4400));
+  // With the low-pass gate (the default amplifier), a released note dies away like any other.
+  {
+    twill::PlaitsVoice w;
+    twill::MacroParams q;
+    q.engine = 7;
+    q.note = 60;
+    q.arp_step = 4800;
+    q.decay = 0.25f;     // about 0.9 s to -60 dB
+    std::vector<float> o(48000), x(48000);
+    w.note_on();
+    w.render(q, o.data(), x.data(), 4800);
+    double held = 0;
+    for (int i = 2400; i < 4800; ++i) held = std::max(held, double(std::fabs(o[size_t(i)])));
+    w.note_off();
+    w.render(q, o.data(), x.data(), 48000);
+    double tail = 0;
+    for (int i = 43200; i < 48000; ++i) tail = std::max(tail, double(std::fabs(o[size_t(i)])));
+    CHECK_MSG(held > 0.05 && tail < 0.001, "held %.3f, 0.9 s after release %.4f", held, tail);
+  }
+  // Without a rate it holds the note.
+  p.arp_step = 0;
+  v.note_off();
+  v.render(p, out.data(), aux.data(), 240);
+  v.note_on();
+  v.render(p, out.data(), aux.data(), len);
+  CHECK_MSG(near(freq(out, 3 * 4800 + 600, 3 * 4800 + 4400), root), "held: %.1f Hz", freq(out, 3 * 4800 + 600, 3 * 4800 + 4400));
 }
 
 // With the ADSR as the amplifier, the FM, timbre and morph amounts follow the ADSR, not the
@@ -2288,8 +3250,8 @@ void test_ui_mixer() {
 void test_ui_project_files() {
   UiDriver ui;
   ui.tap(twill::kDown);  // Snare row, bar 1 empty
-  ui.tap(twill::kX);     // settings panel: Controls, Theme, New song names, Audio buffer, Tempo, Key, Scale, Name, Save, Load, New, Render
-  for (int i = 0; i < 7; ++i) ui.tap(twill::kDown);
+  ui.tap(twill::kX);     // settings panel
+  CHECK(ui.go_to_row("Name"));
   // Rename: the first letter "D" of "Demo" up by one, to "E".
   ui.tap(twill::kA);
   for (int i = 0; i < 4; ++i) ui.tap(twill::kLeft);
@@ -2298,7 +3260,7 @@ void test_ui_project_files() {
   CHECK(ui.app.project().name == "Eemo");
   // Save.
   ui.tap(twill::kX);
-  for (int i = 0; i < 8; ++i) ui.tap(twill::kDown);
+  CHECK(ui.go_to_row("Save"));
   ui.tap(twill::kA);
   CHECK(ui.platform.files.count("projects/Eemo.twill") == 1);
   CHECK(!ui.app.has_unsaved_changes());
@@ -2307,8 +3269,7 @@ void test_ui_project_files() {
   // Change something, then New: the first press only warns.
   ui.app.history().set_tempo(150);
   CHECK(ui.app.has_unsaved_changes());
-  ui.tap(twill::kDown);  // Load
-  ui.tap(twill::kDown);  // New project
+  CHECK(ui.go_to_row("New project"));
   ui.tap(twill::kA);
   CHECK(ui.app.project().tempo == 150);
   ui.tap(twill::kA);  // second press: discard and start anew
@@ -2455,6 +3416,25 @@ int main(int argc, char** argv) {
   }
   const TestCase tests[] = {
       {"timing_at_120", test_timing_at_120},
+      {"chiptune_arpeggio", test_chiptune_arpeggio},
+      {"ui_settings_order", test_ui_settings_order},
+      {"ui_arrange_no_repeat", test_ui_arrange_no_repeat},
+      {"ui_output_boost", test_ui_output_boost},
+      {"fit_text", test_fit_text},
+      {"ui_pick_multisample", test_ui_pick_multisample},
+      {"sfz_reader", test_sfz_reader},
+      {"ui_browser_jumps", test_ui_browser_jumps},
+      {"sfz_playing", test_sfz_playing},
+      {"app_multisample", test_app_multisample},
+      {"dspreset_reader", test_dspreset_reader},
+      {"multisample_playing", test_multisample_playing},
+      {"multisample_loop", test_multisample_loop},
+      {"multisample_loop_crossfade", test_multisample_loop_crossfade},
+      {"ui_browser_bundles", test_ui_browser_bundles},
+      {"stepped_param_names", test_stepped_param_names},
+      {"ui_undo_delete_select_first", test_ui_undo_delete_select_first},
+      {"ui_arrangement_steps_over_clips", test_ui_arrangement_steps_over_clips},
+      {"ui_chiptune_preview_ends", test_ui_chiptune_preview_ends},
       {"timing_at_odd_tempo", test_timing_at_odd_tempo},
       {"loop_region", test_loop_region},
       {"placement_loops_its_clip", test_placement_loops_its_clip},
@@ -2472,6 +3452,9 @@ int main(int argc, char** argv) {
       {"same_output_at_any_block_size", test_same_output_at_any_block_size},
       {"touching_notes_retrigger_unless_legato", test_touching_notes_retrigger_unless_legato},
       {"voices_stolen_counted", test_voices_stolen_counted},
+      {"multisample_layers_count_once", test_multisample_layers_count_once},
+      {"fast_tanh", test_fast_tanh},
+      {"effects_sleep_and_wake", test_effects_sleep_and_wake},
       {"master_compressor", test_master_compressor},
       {"master_limiter", test_master_limiter},
       {"golden_render", test_golden_render},

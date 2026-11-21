@@ -1,5 +1,6 @@
-// Audio samples (design §6, "Samples"): decoded from WAV or AIFF and converted to stereo float at
-// the engine's 48 kHz, so voices never convert while playing.
+// Audio samples (design §6, "Samples"): decoded from WAV or AIFF, resampled to the engine's 48 kHz
+// so voices never resample twice, and kept as 16-bit at the file's own channel count (mono stays
+// mono): a quarter of the memory of stereo float for a mono sample, half for stereo.
 #pragma once
 #include <cstdint>
 #include <memory>
@@ -19,14 +20,24 @@ struct SampleData {
   int frames = 0;           // at 48 kHz
   int source_rate = 0;      // the file's own rate
   int source_channels = 0;  // 1 or 2 (more are mixed to two)
-  std::vector<float> data;  // interleaved stereo, frames * 2
+  int channels = 2;         // as kept: 1 or 2
+  int loop_start = -1, loop_end = -1;  // the file's own loop (a WAV's smpl chunk), in frames at 48 kHz; -1: none
+  std::vector<int16_t> pcm; // interleaved, frames * channels
   std::vector<Onset> onsets;  // in order; found when decoded (find_onsets)
 
-  float left(int i) const { return data[size_t(2 * i)]; }
-  float right(int i) const { return data[size_t(2 * i + 1)]; }
+  // Frame i of channel ch (0 left, 1 right; a mono sample's one channel is both), -1..1. No range
+  // check: callers clamp.
+  float at(int i, int ch) const {
+    return pcm[size_t(i * channels + (ch < channels ? ch : 0))] * (1.0f / 32767.0f);
+  }
+  float left(int i) const { return at(i, 0); }
+  float right(int i) const { return at(i, 1); }
+  size_t bytes() const { return pcm.size() * sizeof(int16_t); }
+  // Fills it from interleaved float at 48 kHz (`channels` of them), clipping at full scale.
+  void set_from_float(const std::vector<float>& interleaved, int channels);
 };
 
-// Decodes WAV or AIFF (8/16/24/32-bit, float, mono or stereo). Returns null and sets `error` on
+// Decodes WAV, AIFF or FLAC (8/16/24/32-bit, float, mono or stereo). Returns null and sets `error` on
 // failure.
 std::shared_ptr<const SampleData> decode_sample(const uint8_t* bytes, size_t size, const std::string& name,
                                                 std::string& error);

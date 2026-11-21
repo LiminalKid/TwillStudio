@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <set>
 
 #include "app/FactorySounds.h"
 #include "engine/PlaitsVoice.h"
@@ -18,14 +19,23 @@ namespace {
 // Sizes, in layout units.
 constexpr float kRowH = 24, kText = 13, kSmall = 11;
 
-bool is_audio_file(const std::string& name) {
+bool ends_with(const std::string& name, const char* ext) {
   std::string lower = name;
   for (char& c : lower) c = char(std::tolower(static_cast<unsigned char>(c)));
-  auto ends = [&](const char* ext) {
-    const size_t n = std::strlen(ext);
-    return lower.size() > n && lower.compare(lower.size() - n, n, ext) == 0;
-  };
-  return ends(".wav") || ends(".aif") || ends(".aiff");
+  const size_t n = std::strlen(ext);
+  return lower.size() > n && lower.compare(lower.size() - n, n, ext) == 0;
+}
+
+bool is_audio_file(const std::string& name) {
+  return ends_with(name, ".wav") || ends_with(name, ".aif") || ends_with(name, ".aiff") || ends_with(name, ".flac");
+}
+
+
+// A DecentSampler library folder ("Basic Piano.dsbundle"): its presets, its samples and images.
+bool is_bundle(const std::string& name) {
+  std::string n = name;
+  while (!n.empty() && n.back() == '/') n.pop_back();
+  return ends_with(n, ".dsbundle");
 }
 
 std::string file_name(const std::string& path) {
@@ -63,17 +73,19 @@ InstrumentView::Row InstrumentView::param_row(ParamId id, const char* label) {
   const ParamInfo* info = param_info(id);
   Row row;
   row.label = label ? label : info->name;
-  row.value = [&app, track, id] { return format_param(id, app.project().track_param(track, id)); };
+  // Named steps where the engine reads the setting in steps (format_track_param).
+  row.value = [&app, track, id] {
+    return format_track_param(app.project().tracks[size_t(track)], id, app.project().track_param(track, id));
+  };
   row.fraction = [&app, track, id, info] {
     return (app.project().track_param(track, id) - info->min) / (info->max - info->min);
   };
-  row.adjust = [&app, track, id, info](int step, bool coarse) {
-    float v = app.project().track_param(track, id);
-    if (info->integer) v += float(step * (coarse ? (id == kParamRootNote ? 12 : 4) : 1));
-    else v += step * (info->max - info->min) * (coarse ? 0.1f : 0.01f);
-    app.history().set_track_param(track, id, v);
+  row.adjust = [&app, track, id](int step, bool coarse) {
+    const float v = app.project().track_param(track, id);
+    app.history().set_track_param(track, id, step_track_param(app.project().tracks[size_t(track)], id, v, step, coarse, 0.01f));
   };
   row.reset = [&app, track, id, info] { app.history().set_track_param(track, id, info->default_value); };
+  row.param = id;
   return row;
 }
 
@@ -126,8 +138,10 @@ std::vector<InstrumentView::Row> InstrumentView::rows() {
 
   if (t.instrument == InstrumentType::Macro) {
     for (ParamId id : {kParamHarmonics, kParamTimbre, kParamMorph, kParamFmAmount, kParamTimbreAmount,
-                       kParamMorphAmount})
-      out.push_back(param_row(id));
+                       kParamMorphAmount}) {
+      Row row = param_row(id);
+      out.push_back(row);
+    }
     Row output;
     output.label = "Output";
     output.value = [&app, track] {
@@ -138,6 +152,19 @@ std::vector<InstrumentView::Row> InstrumentView::rows() {
       change([step](Track& tr) { tr.macro.output = MacroOutput((int(tr.macro.output) + step + 3) % 3); });
     };
     out.push_back(output);
+    if (t.macro.engine == 7) {  // chiptune: how fast a held note's arpeggio steps
+      Row arp;
+      arp.label = "Arpeggio";
+      arp.value = [&app, track] { return std::string(arp_rate_name(app.project().tracks[size_t(track)].macro.arp_rate)); };
+      arp.fraction = [&app, track] { return int(app.project().tracks[size_t(track)].macro.arp_rate) / float(kNumArpRates - 1); };
+      arp.adjust = [change](int step, bool) {
+        change([step](Track& tr) {
+          tr.macro.arp_rate = ArpRate(std::max(0, std::min(kNumArpRates - 1, int(tr.macro.arp_rate) + step)));
+        });
+      };
+      arp.reset = [change] { change([](Track& tr) { tr.macro.arp_rate = ArpRate::Sixteenth; }); };
+      out.push_back(arp);
+    }
     // The amplifier, then its own settings: the low-pass gate's decay and colour, or the ADSR. The
     // FM, timbre and morph amounts follow whichever it is.
     out.push_back(param_row(kParamAmpMode));
@@ -147,7 +174,44 @@ std::vector<InstrumentView::Row> InstrumentView::rows() {
       for (ParamId id : {kParamDecay, kParamLpgColour}) out.push_back(param_row(id));
   } else {
     out.push_back(param_row(kParamSamplerMode));
-    if (t.sampler.mode != SamplerMode::Kit) {
+    if (t.sampler.mode == SamplerMode::Multi) {
+      // A multisample: its preset, what's in it, and what of it isn't played.
+      Row preset;
+      preset.label = "Preset";
+      preset.value = [&app, track] {
+        const std::string& s = app.project().tracks[size_t(track)].sampler.preset;
+        if (s.empty()) return std::string("(none: press A)");
+        std::string name = file_name(s);
+        return name.substr(0, name.find_last_of('.'));
+      };
+      preset.press = [this, &app, track] {
+        // It loads in the background; the track takes it once it's ready (App::pick_multisample).
+        open_browser([&app, track](const std::string& path) { app.pick_multisample(track, path); },
+                     app.project().tracks[size_t(track)].sampler.preset, Browse::Presets);
+      };
+      preset.reset = [change] { change([](Track& tr) { tr.sampler.preset.clear(); }); };
+      out.push_back(preset);
+      if (!t.sampler.preset.empty()) {
+        Row zones;
+        zones.label = "Zones";
+        zones.value = [&app, track] {
+          const std::string& path = app.project().tracks[size_t(track)].sampler.preset;
+          std::string err;
+          if (const Multisample* m = app.load_multisample(path, &err)) {
+            char b[96];
+            std::snprintf(b, sizeof b, "%zu, %s to %s", m->zones.size(), note_name(m->lowest_key()).c_str(),
+                          note_name(m->highest_key()).c_str());
+            std::string text = b;
+            if (const int missing = app.multisample_missing(path)) text += ", " + std::to_string(missing) + " missing";
+            return text;
+          }
+          if (app.multisample_loading(path)) return std::string("Loading...");
+          return err.empty() ? std::string("Can't load") : "Can't load: " + err;
+        };
+        out.push_back(zones);
+      }
+      out.push_back(param_row(kParamFineTune));
+    } else if (t.sampler.mode != SamplerMode::Kit) {
       Row sample;
       sample.label = "Sample";
       sample.value = [&app, track] {
@@ -182,7 +246,16 @@ std::vector<InstrumentView::Row> InstrumentView::rows() {
       Row factory;
       factory.label = "Load the factory kit";
       factory.value = [] { return std::string("press A"); };
-      factory.press = [change, &app] {
+      factory.press = [change, &app, track] {
+        // A kit of samples that differs from the factory one would lose its changes: ask first.
+        const SamplerSettings& now = app.project().tracks[size_t(track)].sampler;
+        SamplerSettings factory_kit = now;
+        load_factory_kit(factory_kit);
+        bool has_samples = false;
+        for (const KitSlot& k : now.kit) has_samples |= !k.sample.empty();
+        if (has_samples && !(factory_kit == now) &&
+            !app.confirm_twice("load the factory kit", "Press A again to replace this kit with the factory kit"))
+          return;
         change([](Track& tr) { load_factory_kit(tr.sampler); });
         app.message("Factory kit loaded");
       };
@@ -384,31 +457,72 @@ int InstrumentView::audition_note() const {
 
 // --- Browser ----------------------------------------------------------------------------------
 
-void InstrumentView::open_browser(std::function<void(const std::string&)> on_pick, const std::string& start) {
+void InstrumentView::open_browser(std::function<void(const std::string&)> on_pick, const std::string& start,
+                                  Browse what) {
   Platform& p = app_.platform();
   on_pick_ = std::move(on_pick);
+  browse_ = what;
   // Start in the current sample's folder, else the app's samples folder.
   std::string dir = p.data_dir() + "samples/";
   if (!start.empty()) {
     std::string full = start[0] == '/' ? start : p.data_dir() + start;
     dir = full.substr(0, full.find_last_of('/') + 1);
   }
-  const std::string select = start.empty() ? std::string() : file_name(start);
+  std::string select = start.empty() ? std::string() : file_name(start);
+  // A preset in a one-preset bundle is listed in the bundle's folder, as the bundle.
+  if (what == Browse::Presets && is_bundle(dir)) {
+    std::vector<Platform::DirEntry> inside;
+    int count = 0;
+    if (p.list_dir(dir.c_str(), inside))
+      for (const Platform::DirEntry& f : inside) count += !f.is_dir && is_multisample_file(f.name);
+    if (count == 1) {
+      const std::string bundle = dir.substr(0, dir.size() - 1);
+      select = file_name(bundle) + "/" + select;
+      dir = bundle.substr(0, bundle.find_last_of('/') + 1);
+    }
+  }
   if (!list_browser_dir(dir, select)) list_browser_dir(p.data_dir(), "");
   browser_open_ = true;
   app_.invalidate_all();
 }
 
-// Folders and audio files in `dir`, after an "Up a folder" entry (".."), selecting `select`.
+// Folders and audio files (or presets) in `dir`, after an "Up a folder" entry (".."), selecting
+// `select`. Looking for presets, a library bundle (.dsbundle) with one preset is listed as that
+// preset ("Basic Piano.dsbundle/Basic Piano.dspreset", shown by the bundle's name); inside a bundle
+// only its presets are listed, not its samples and images.
 bool InstrumentView::list_browser_dir(const std::string& dir, const std::string& select) {
+  Platform& p = app_.platform();
   std::vector<Platform::DirEntry> e;
-  if (!app_.platform().list_dir(dir.c_str(), e)) return false;
-  e.erase(std::remove_if(e.begin(), e.end(),
-                         [](const Platform::DirEntry& d) { return !d.is_dir && !is_audio_file(d.name); }),
-          e.end());
-  if (dir != "/") e.insert(e.begin(), Platform::DirEntry{"..", true});
+  if (!p.list_dir(dir.c_str(), e)) return false;
+  const bool presets = browse_ == Browse::Presets;
+  const bool in_bundle = presets && is_bundle(dir);
+  std::vector<Platform::DirEntry> kept;
+  for (Platform::DirEntry& d : e) {
+    if (!d.is_dir) {
+      if (presets ? is_multisample_file(d.name) : is_audio_file(d.name)) kept.push_back(d);
+      continue;
+    }
+    if (in_bundle) continue;
+    if (presets && is_bundle(d.name)) {
+      std::vector<Platform::DirEntry> inside;
+      std::vector<std::string> found;
+      if (p.list_dir((dir + d.name).c_str(), inside))
+        for (const Platform::DirEntry& f : inside)
+          if (!f.is_dir && is_multisample_file(f.name)) found.push_back(f.name);
+      if (found.size() == 1) {
+        kept.push_back(Platform::DirEntry{d.name + "/" + found[0], false});
+        continue;
+      }
+    }
+    kept.push_back(d);
+  }
+  // Folders first, then by name (a one-preset bundle is listed among the presets).
+  std::stable_sort(kept.begin(), kept.end(), [](const Platform::DirEntry& a, const Platform::DirEntry& b) {
+    return a.is_dir != b.is_dir ? a.is_dir : a.name < b.name;
+  });
+  if (dir != "/") kept.insert(kept.begin(), Platform::DirEntry{"..", true});
   dir_ = dir;
-  entries_ = std::move(e);
+  entries_ = std::move(kept);
   bsel_ = btop_ = 0;
   for (size_t i = 0; i < entries_.size(); ++i)
     if (!select.empty() && entries_[i].name == select) bsel_ = int(i);
@@ -436,8 +550,17 @@ void InstrumentView::browser_input() {
   };
   const int n = int(entries_.size());
   if (in.pressed(kX)) return close();
-  if (n > 0 && in.pressed_or_repeat(kUp)) bsel_ = (bsel_ + n - 1) % n;
-  if (n > 0 && in.pressed_or_repeat(kDown)) bsel_ = (bsel_ + 1) % n;
+  // Up/Down a file at a time (wrapping round), ten with R held (stopping at the ends); Left and
+  // Right go to the top and the bottom.
+  if (n > 0 && in.held(kR)) {
+    if (in.pressed_or_repeat(kUp)) bsel_ = std::max(0, bsel_ - 10);
+    if (in.pressed_or_repeat(kDown)) bsel_ = std::min(n - 1, bsel_ + 10);
+  } else if (n > 0) {
+    if (in.pressed_or_repeat(kUp)) bsel_ = (bsel_ + n - 1) % n;
+    if (in.pressed_or_repeat(kDown)) bsel_ = (bsel_ + 1) % n;
+  }
+  if (n > 0 && in.pressed(kLeft)) bsel_ = 0;
+  if (n > 0 && in.pressed(kRight)) bsel_ = n - 1;
   if (in.pressed(kB)) {
     if (dir_ == "/") return close();
     up();
@@ -450,7 +573,13 @@ void InstrumentView::browser_input() {
       // Store paths inside the data folder relative to it, so projects move with the folder.
       const std::string data = p.data_dir();
       std::string path = full.compare(0, data.size(), data) == 0 ? full.substr(data.size()) : full;
-      if (in.pressed(kY)) {
+      if (browse_ == Browse::Presets) {
+        if (in.pressed(kA)) {
+          on_pick_(path);  // loads, and says if it can't
+          close();
+          return;
+        }
+      } else if (in.pressed(kY)) {
         std::string err;
         preview_ = app_.load_sample(path, &err);
         app_.engine().preview(preview_.get());
@@ -502,9 +631,25 @@ void InstrumentView::handle_input() {
 }
 
 std::vector<Hint> InstrumentView::hints() const {
-  if (browser_open_) return {{"A", "open/pick"}, {"Y", "listen"}, {"B", "up a folder"}, {"X", "cancel"}};
+  if (browser_open_)
+    return {{"A", "open/pick"}, {"Y", "listen"}, {"B", "up a folder"}, {"X", "cancel"}, {"Left/Right", "top/end"},
+            {"R+Up/Down", "by 10"}};
   return {{"Up/Down", "choose"}, {"Left/Right", "change"}, {"A", "browse"}, {"B", "reset"}, {"Y", "listen"},
           {"X", "track"}};
+}
+
+void InstrumentView::tick() {
+  // A multisample's zone map lights the zones sounding: redrawn when they change.
+  const Track& t = app_.project().tracks[size_t(app_.track())];
+  std::vector<int> now;
+  if (!browser_open_ && t.instrument == InstrumentType::Sampler && t.sampler.mode == SamplerMode::Multi)
+    app_.engine().sounding_zones(app_.track(), now);
+  std::sort(now.begin(), now.end());
+  now.erase(std::unique(now.begin(), now.end()), now.end());
+  if (now != sounding_) {
+    sounding_ = std::move(now);
+    app_.invalidate(app_.content_rect());
+  }
 }
 
 // --- Drawing ----------------------------------------------------------------------------------
@@ -536,8 +681,8 @@ void InstrumentView::draw(Canvas& c) {
     if (sel) c.fill(Rect{rr.x, rr.y + 1, rr.w, rr.h - 2}, th.chip_active);
     const int base = f.baseline_in(y, row_h - (row.fraction ? int(app_.u(3)) : 0));
     const std::string label = caps(row.label);
-    c.text(f, rr.x + app_.u(8), base, label.c_str(), sel ? th.chip_active_text : th.text_secondary, sp);
-    std::string v = row.value ? row.value() : "";
+    const float label_end = c.text(f, rr.x + app_.u(8), base, label.c_str(), sel ? th.chip_active_text : th.text_secondary, sp);
+    std::string v = fit_text(fb, row.value ? row.value() : "", rr.right() - app_.u(8) - (label_end + app_.u(10)));
     c.text(fb, rr.right() - app_.u(8) - fb.measure(v.c_str()), base, v.c_str(), sel ? th.chip_active_text : th.text);
     if (row.fraction) {
       const float fr = std::max(0.0f, std::min(1.0f, row.fraction()));
@@ -564,10 +709,20 @@ void InstrumentView::draw(Canvas& c) {
       const std::string cc = std::string(which == 0 ? "CC A: " : "CC B: ") + cc_label(t.midi_cc[which]);
       c.text(sm, pic.x + app_.u(16), pic.y + int(app_.u(116 + 18 * which)), cc.c_str(), th.text_secondary);
     }
+    return;
+  }
+  // The envelope while one of its settings is chosen; otherwise the instrument.
+  const ParamId selected = sel_ >= 0 && sel_ < int(list.size()) ? list[size_t(sel_)].param : kParamNone;
+  if (selected == kParamAttack || selected == kParamDecayTime || selected == kParamSustain || selected == kParamRelease) {
+    draw_adsr(c, pic, t, selected);
+  } else if (t.instrument == InstrumentType::Macro && (selected == kParamDecay || selected == kParamLpgColour)) {
+    draw_lpg(c, pic, t, selected);
   } else if (t.instrument == InstrumentType::Macro) {
     draw_macro(c, pic, t);
   } else if (t.sampler.mode == SamplerMode::Kit) {
     draw_kit(c, pic, t);
+  } else if (t.sampler.mode == SamplerMode::Multi) {
+    draw_zones(c, pic, t);
   } else {
     std::shared_ptr<const SampleData> s = t.sampler.sample.empty() ? nullptr : app_.load_sample(t.sampler.sample);
     if (s) {
@@ -616,6 +771,320 @@ void InstrumentView::draw_macro(Canvas& c, const Rect& r, const Track& t) {
     c.fill(Rect{bar.x + int(bar.w * v) - mw / 2, bar.y - int(app_.u(2)), mw, bar.h + int(app_.u(4))}, th.text);
     y += int(app_.u(44));
   }
+}
+
+namespace {
+
+// Text wrapped into lines no wider than `w`.
+std::vector<std::string> wrap(const Font& f, const std::string& text, float w) {
+  std::vector<std::string> lines;
+  std::string line, word;
+  auto flush = [&] {
+    if (word.empty()) return;
+    const std::string tried = line.empty() ? word : line + " " + word;
+    if (!line.empty() && f.measure(tried.c_str()) > w) {
+      lines.push_back(line);
+      line = word;
+    } else {
+      line = tried;
+    }
+    word.clear();
+  };
+  for (char ch : text) {
+    if (ch == ' ') flush();
+    else word += ch;
+  }
+  flush();
+  if (!line.empty()) lines.push_back(line);
+  return lines;
+}
+
+std::string seconds_text(float s) {
+  char b[24];
+  if (s < 1) std::snprintf(b, sizeof b, "%.0f ms", s * 1000);
+  else std::snprintf(b, sizeof b, "%.1f s", s);
+  return b;
+}
+
+std::string megabytes(size_t bytes) {
+  char b[24];
+  if (bytes < (10u << 20)) std::snprintf(b, sizeof b, "%.1f MB", bytes / 1048576.0);
+  else std::snprintf(b, sizeof b, "%.0f MB", bytes / 1048576.0);
+  return b;
+}
+
+}  // namespace
+
+void InstrumentView::draw_zones(Canvas& c, const Rect& r, const Track& t) {
+  const Theme& th = app_.theme();
+  const Font& f = Font::get(FontFace::Regular, app_.u(kSmall + 1));
+  const Font& fb = Font::get(FontFace::SemiBold, app_.u(kText));
+  const Font& tiny = Font::get(FontFace::CondensedSemiBold, app_.u(kSmall));
+  const int x = r.x + int(app_.u(12)), w = r.w - int(app_.u(24));
+  auto centred = [&](const char* msg, int y) { c.text(f, r.x + (r.w - f.measure(msg)) / 2, y, msg, th.text_secondary); };
+  if (t.sampler.preset.empty()) {
+    centred("No preset yet", r.y + r.h / 2);
+    return;
+  }
+  std::string err;
+  const Multisample* m = app_.load_multisample(t.sampler.preset, &err);
+  std::string name = file_name(t.sampler.preset);
+  name = name.substr(0, name.find_last_of('.'));
+  c.text(fb, x, r.y + int(app_.u(22)), name.c_str(), th.text);
+  if (!m) {
+    std::string lname;
+    int done = 0, total = 0;
+    if (app_.multisample_loading(t.sampler.preset)) {
+      // Its progress, when it's the one loading now.
+      const bool now = app_.loading_status(lname, done, total) && lname == name;
+      const std::string msg = now && total ? "Loading " + std::to_string(done) + " of " + std::to_string(total) + " samples"
+                                           : std::string("Waiting to load");
+      centred(msg.c_str(), r.y + r.h / 2 - int(app_.u(8)));
+      Rect bar{x + w / 6, r.y + r.h / 2 + int(app_.u(4)), w * 2 / 3, int(app_.u(6))};
+      c.fill(bar, th.grid_step);
+      if (now && total) c.fill(Rect{bar.x, bar.y, bar.w * done / total, bar.h}, app_.track_colour(app_.track()));
+    } else {
+      const std::vector<std::string> lines = wrap(f, err.empty() ? "Can't load this preset" : err, float(w));
+      int y = r.y + int(app_.u(50));
+      for (const std::string& l : lines) c.text(f, x, y, l.c_str(), th.text_secondary), y += int(app_.u(16));
+    }
+    return;
+  }
+  // What it is: zones, keys and memory.
+  char info[96];
+  std::snprintf(info, sizeof info, "%zu zones   %s", m->zones.size(), megabytes(app_.multisample_bytes(t.sampler.preset)).c_str());
+  c.text(f, x, r.y + int(app_.u(40)), info, th.text_secondary);
+
+  // The map: keys across, velocity up. Zones on top of each other (layers, round robins) show
+  // darker. Below it a keyboard, with a dot on each key a sample is recorded at.
+  int lo = std::max(0, m->lowest_key() - 2), hi = std::min(127, m->highest_key() + 2);
+  while (hi - lo < 24) lo = std::max(0, lo - 1), hi = std::min(127, hi + 1);
+  const int keys = hi - lo + 1;
+  const int kb_h = int(app_.u(14)), label_h = int(app_.u(14)), foot = int(app_.u(18));
+  Rect map{x, r.y + int(app_.u(52)), w, r.h - int(app_.u(52)) - kb_h - label_h - foot};
+  if (map.h < int(app_.u(30))) return;
+  auto kx = [&](int k) { return map.x + int(int64_t(k - lo) * map.w / keys); };
+  auto vy = [&](int v) { return map.bottom() - int(int64_t(v) * map.h / 128); };
+  c.fill(map, th.panel);
+  for (int k = lo; k <= hi; ++k)
+    if (k % 12 == 0) c.vline(kx(k), map.y, map.bottom(), th.grid_step);
+  const Color ink = th.track_ink(int(t.colour)), col = app_.track_colour(app_.track());
+  auto zone_rect = [&](const Zone& z) {
+    const int a = std::max(lo, z.lo_key), b = std::min(hi, z.hi_key);
+    if (b < a) return Rect{};
+    Rect zr{kx(a), vy(z.hi_vel + 1), std::max(1, kx(b + 1) - kx(a)), 0};
+    zr.h = std::max(1, vy(z.lo_vel) - zr.y);
+    return zr;
+  };
+  for (const Zone& z : m->zones) {
+    const Rect zr = zone_rect(z);
+    if (zr.empty()) continue;
+    c.fill(zr, col.with_alpha(70));
+    c.stroke_rect(zr, 1, ink.with_alpha(160));
+  }
+  // The zones sounding now, solid, on top.
+  for (int i : sounding_) {
+    if (i < 0 || i >= int(m->zones.size())) continue;
+    const Rect zr = zone_rect(m->zones[size_t(i)]);
+    if (zr.empty()) continue;
+    c.fill(zr, col);
+    c.stroke_rect(zr, std::max(1, int(app_.u(1.5f))), th.text);
+  }
+  c.stroke_rect(map, 1, th.divider);
+  // Keyboard.
+  Rect kb{map.x, map.bottom() + int(app_.u(2)), map.w, kb_h};
+  c.fill(kb, th.background);
+  for (int k = lo; k <= hi; ++k) {
+    const int n = k % 12;
+    const bool black = n == 1 || n == 3 || n == 6 || n == 8 || n == 10;
+    if (black) c.fill(Rect{kx(k), kb.y, std::max(1, kx(k + 1) - kx(k)), kb.h * 3 / 5}, th.text);
+    else if (n == 0 || n == 5) c.vline(kx(k), kb.y, kb.bottom(), th.divider);
+  }
+  c.stroke_rect(kb, 1, th.divider);
+  std::set<int> roots;
+  for (const Zone& z : m->zones) roots.insert(z.root);
+  const int dot = std::max(2, int(app_.u(3)));
+  for (int k : roots)
+    if (k >= lo && k <= hi)
+      c.fill(Rect{(kx(k) + kx(k + 1)) / 2 - dot / 2, kb.bottom() - dot - int(app_.u(2)), dot, dot}, app_.track_colour(app_.track()));
+  // Octave names under the Cs, as room allows.
+  int last_right = -1000;
+  for (int k = lo; k <= hi; ++k) {
+    if (k % 12) continue;
+    const std::string nm = note_name(k);
+    const int tx = kx(k);
+    if (tx < last_right + int(app_.u(4)) || tx + tiny.measure(nm.c_str()) > r.right()) continue;
+    c.text(tiny, tx, kb.bottom() + int(app_.u(12)), nm.c_str(), th.text_secondary);
+    last_right = tx + int(tiny.measure(nm.c_str()));
+  }
+  // The memory all samples take, of what the device allows.
+  std::string mem = "All samples " + megabytes(app_.loaded_sample_bytes());
+  if (app_.sample_budget()) mem += " of " + megabytes(app_.sample_budget());
+  c.text(tiny, x, r.bottom() - int(app_.u(6)), caps(mem).c_str(), th.text_secondary, app_.u(kCapsSpacing));
+}
+
+void InstrumentView::draw_adsr(Canvas& c, const Rect& r, const Track& t, ParamId selected) {
+  const Theme& th = app_.theme();
+  const Font& label = Font::get(FontFace::CondensedSemiBold, app_.u(kSmall + 1));
+  const Font& value = Font::get(FontFace::CondensedBold, app_.u(kText));
+  const float sp = app_.u(kCapsSpacing);
+  const int x = r.x + int(app_.u(14)), w = r.w - int(app_.u(28));
+  c.text(label, x, r.y + int(app_.u(24)), "AMP ENVELOPE", th.text_secondary, sp);
+  Rect g{x, r.y + int(app_.u(40)), w, r.h - int(app_.u(96))};
+  if (g.h < int(app_.u(30))) return;
+  const ToneSettings& tone = t.tone;
+  const float A = env_seconds(tone.attack), D = env_seconds(tone.decay), R = env_seconds(tone.release), S = tone.sustain;
+  // Each stage's width follows its time on a log scale (1 ms to 10 s), so short and long times
+  // both show; the held part of the note is a fixed stretch.
+  const float wa = 0.12f + tone.attack, wd = 0.12f + tone.decay, ws = 0.45f, wr = 0.12f + tone.release;
+  const float total = wa + wd + ws + wr;
+  const int xa = g.x, xd = xa + int(g.w * wa / total), xs = xd + int(g.w * wd / total), xr = xs + int(g.w * ws / total),
+            xe = g.right();
+  // The level across the graph: linear attack, exponential decay and release (as the engine does).
+  auto level = [&](int px) -> float {
+    if (px < xd) return float(px - xa) / std::max(1, xd - xa);
+    if (px < xs) {
+      const float f = float(px - xd) / std::max(1, xs - xd);
+      return S + (1 - S) * std::exp(-4.6f * f);
+    }
+    if (px < xr) return S;
+    const float f = float(px - xr) / std::max(1, xe - xr);
+    return S * std::exp(-4.6f * f);
+  };
+  c.fill(g, th.panel);
+  const Color col = app_.track_colour(app_.track()), fill = th.track_fill(int(t.colour));
+  // The selected stage tinted behind the curve.
+  int sa = -1, sb = -1;
+  if (selected == kParamAttack) sa = xa, sb = xd;
+  else if (selected == kParamDecayTime) sa = xd, sb = xs;
+  else if (selected == kParamSustain) sa = xs, sb = xr;
+  else if (selected == kParamRelease) sa = xr, sb = xe;
+  const int pad = int(app_.u(6));
+  auto py = [&](float lv) { return float(g.bottom() - pad) - lv * float(g.h - 2 * pad); };
+  for (int px = g.x; px < g.right(); ++px)
+    c.vline(px, int(py(level(px))), g.bottom() - pad, px >= sa && px < sb ? col.with_alpha(170) : fill);
+  for (int px = g.x; px + 1 < g.right(); ++px) {
+    c.line(float(px), py(level(px)), float(px + 1), py(level(px + 1)), th.text);
+    c.line(float(px), py(level(px)) + 1, float(px + 1), py(level(px + 1)) + 1, th.text);
+  }
+  for (int sx : {xd, xs, xr}) c.vline(sx, g.y, g.bottom(), th.grid_step);
+  c.stroke_rect(g, 1, th.divider);
+  // Each stage's name and value under it; the selected one in ink.
+  struct Stage {
+    const char* name;
+    std::string text;
+    int a, b;
+    ParamId id;
+  };
+  char sus[16];
+  std::snprintf(sus, sizeof sus, "%.0f%%", S * 100);
+  const Stage stages[] = {{"A", seconds_text(A), xa, xd, kParamAttack},
+                          {"D", seconds_text(D), xd, xs, kParamDecayTime},
+                          {"S", sus, xs, xr, kParamSustain},
+                          {"R", seconds_text(R), xr, xe, kParamRelease}};
+  const int ly = g.bottom() + int(app_.u(16));
+  for (const Stage& s : stages) {
+    const bool on = s.id == selected;
+    const int cx = (s.a + s.b) / 2;
+    c.text(label, cx - label.measure(s.name) / 2, ly, s.name, on ? th.text : th.text_secondary);
+    const Font& vf = on ? value : label;
+    c.text(vf, cx - vf.measure(s.text.c_str()) / 2, ly + int(app_.u(16)), s.text.c_str(), on ? th.text : th.text_secondary);
+  }
+}
+
+void InstrumentView::draw_lpg(Canvas& c, const Rect& r, const Track& t, ParamId selected) {
+  const Theme& th = app_.theme();
+  const Font& label = Font::get(FontFace::CondensedSemiBold, app_.u(kSmall + 1));
+  const Font& f = Font::get(FontFace::Regular, app_.u(kSmall + 1));
+  const float sp = app_.u(kCapsSpacing);
+  const int x = r.x + int(app_.u(14)), w = r.w - int(app_.u(28));
+  c.text(label, x, r.y + int(app_.u(24)), "LOW-PASS GATE", th.text_secondary, sp);
+  const int engine = t.macro.engine;
+  // Engines that shape their own sound over time don't go through the gate.
+  if ((engine >= 2 && engine <= 4) || engine >= 19) {
+    int y = r.y + int(app_.u(56));
+    for (const std::string& l :
+         wrap(f, "This engine makes its own envelope, so the low-pass gate isn't used: each note fades as the engine shapes it. "
+                 "Set Amp to ADSR to shape it yourself.", float(w)))
+      c.text(f, x, y, l.c_str(), th.text_secondary), y += int(app_.u(16));
+    return;
+  }
+  Rect g{x, r.y + int(app_.u(40)), w, r.h - int(app_.u(96))};
+  if (g.h < int(app_.u(30))) return;
+  const float decay = t.macro.decay, colour = t.macro.lpg_colour;
+  // A struck note, block by block (12 samples at 48 kHz), the way the engine's gate responds:
+  // its level, and how open its filter is.
+  std::vector<float> lvl, bright;
+  float seconds;
+  if (engine == 7) {
+    // Chiptune Arp: the app's own envelope, a 1 ms attack and a decay to -60 dB.
+    seconds = 0.35f * std::pow(10.0f, 1.6f * decay);
+    const float span = seconds * 1.1f;
+    for (int i = 0; i < 400; ++i) {
+      const float ts = span * i / 399;
+      lvl.push_back(ts < 0.001f ? ts / 0.001f : std::pow(0.001f, (ts - 0.001f) / seconds));
+    }
+  } else {
+    const float block = 12.0f / 48000.0f;
+    const float short_decay = 200.0f * block * std::pow(2.0f, -96.0f * decay / 12.0f);
+    const float tail = 20.0f * block * std::pow(2.0f, (-72.0f * decay + 12.0f * colour) / 12.0f) - short_decay;
+    const float attack = 261.6f / 48000.0f * 12.0f * 2.0f;  // middle C
+    float state = 0;
+    bool up = true;
+    std::vector<float> raw_l, raw_b;
+    for (int i = 0; i < 48000 * 12 / 12; ++i) {  // at most 12 s
+      if (up) {
+        state += attack;
+        if (state >= 1) state = 1, up = false;
+      }
+      const float in = up ? state : 0.0f;
+      const float err = in - state, s2 = state * state, s4 = s2 * s2;
+      state += (err > 0 ? 0.6f : short_decay + (1 - s4) * tail) * err;
+      const float tl = (1 - state) * (1 - state);
+      raw_l.push_back(state);
+      // Brightness: the filter's cutoff, and the highs let through around it.
+      const float freq = (0.003f + 0.3f * state * state * state * state + colour * 0.04f) / 0.343f;
+      const float bleed = (tl + (1 - tl) * colour) * colour * colour;
+      raw_b.push_back(std::min(1.0f, std::max(freq, bleed * state)));
+      if (!up && state < 0.001f) break;
+    }
+    seconds = raw_l.size() * block;
+    const size_t n = 400;
+    for (size_t i = 0; i < n; ++i) {
+      const size_t k = std::min(raw_l.size() - 1, i * raw_l.size() / n);
+      lvl.push_back(raw_l[k]);
+      bright.push_back(raw_b[k]);
+    }
+  }
+  c.fill(g, th.panel);
+  const int pad = int(app_.u(6));
+  auto py = [&](float v) { return float(g.bottom() - pad) - v * float(g.h - 2 * pad); };
+  auto at = [&](const std::vector<float>& v, int px) { return v[std::min(v.size() - 1, size_t(px - g.x) * v.size() / size_t(g.w))]; };
+  const Color fill = th.track_fill(int(t.colour)), col = app_.track_colour(app_.track());
+  for (int px = g.x; px < g.right(); ++px) c.vline(px, int(py(at(lvl, px))), g.bottom() - pad, fill);
+  for (int px = g.x; px + 1 < g.right(); ++px) {
+    c.line(float(px), py(at(lvl, px)), float(px + 1), py(at(lvl, px + 1)), th.text);
+    c.line(float(px), py(at(lvl, px)) + 1, float(px + 1), py(at(lvl, px + 1)) + 1, th.text);
+    if (!bright.empty()) {
+      c.line(float(px), py(at(bright, px)), float(px + 1), py(at(bright, px + 1)), col);
+      c.line(float(px), py(at(bright, px)) + 1, float(px + 1), py(at(bright, px + 1)) + 1, col);
+    }
+  }
+  c.stroke_rect(g, 1, th.divider);
+  // A key, and how long the note lasts.
+  const int ly = g.bottom() + int(app_.u(16));
+  const int sw = int(app_.u(12)), sh = std::max(2, int(app_.u(2)));
+  int lx = x;
+  c.fill(Rect{lx, ly - int(app_.u(4)), sw, sh}, th.text);
+  lx = int(c.text(label, lx + sw + int(app_.u(4)), ly, "LEVEL", selected == kParamDecay ? th.text : th.text_secondary, sp)) + int(app_.u(12));
+  if (!bright.empty()) {
+    c.fill(Rect{lx, ly - int(app_.u(4)), sw, sh}, col);
+    c.text(label, lx + sw + int(app_.u(4)), ly, "BRIGHTNESS", selected == kParamLpgColour ? th.text : th.text_secondary, sp);
+  }
+  const std::string len = seconds_text(seconds);
+  c.text(label, g.right() - label.measure(len.c_str()), ly, len.c_str(), th.text_secondary);
+  if (engine == 7 && selected == kParamLpgColour)
+    c.text(f, x, ly + int(app_.u(18)), "Chiptune Arp doesn't use the colour.", th.text_secondary);
 }
 
 void InstrumentView::draw_waveform(Canvas& c, const Rect& r, const SampleData& s, const Track& t) {
@@ -737,7 +1206,9 @@ void InstrumentView::draw_browser(Canvas& c, const Rect& r) {
   if (bsel_ < btop_) btop_ = bsel_;
   if (bsel_ >= btop_ + visible) btop_ = bsel_ - visible + 1;
   const bool empty = entries_.empty() || (entries_.size() == 1 && entries_[0].name == "..");
-  if (empty) c.text(f, r.x + app_.u(16), top_y + int(entries_.size() + 1) * row_h, "No folders or audio files here", th.text_secondary);
+  if (empty) c.text(f, r.x + app_.u(16), top_y + int(entries_.size() + 1) * row_h, 
+                         browse_ == Browse::Presets ? "No folders or presets here" : "No folders or audio files here",
+                         th.text_secondary);
   for (int i = btop_; i < int(entries_.size()) && i < btop_ + visible; ++i) {
     const int y = top_y + (i - btop_) * row_h;
     Rect rr{r.x + int(app_.u(6)), y, r.w - int(app_.u(12)), row_h};
@@ -745,7 +1216,12 @@ void InstrumentView::draw_browser(Canvas& c, const Rect& r) {
     if (sel) c.fill(Rect{rr.x, rr.y + 1, rr.w, rr.h - 2}, th.chip_active);
     const auto& e = entries_[size_t(i)];
     const int base = f.baseline_in(y, row_h);
+    // A library bundle by its name ("Basic Piano"), a folder of presets or the one it holds.
     std::string label = e.name == ".." ? std::string("Up a folder") : e.is_dir ? e.name + "/" : e.name;
+    if (e.name != ".." && is_bundle(e.is_dir ? e.name : e.name.substr(0, e.name.find('/')))) {
+      const std::string b = e.is_dir ? e.name : e.name.substr(0, e.name.find('/'));
+      label = b.substr(0, b.size() - 9) + (e.is_dir ? "/" : "");
+    }
     c.text(e.is_dir ? fb : f, rr.x + app_.u(10), base, label.c_str(),
            sel ? th.chip_active_text : e.is_dir ? th.text : th.text_secondary);
   }

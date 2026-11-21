@@ -170,6 +170,9 @@ class Voice {
   void ReloadUserData() {
     reload_user_data_ = true;
   }
+  // Twill Studio: the chiptune engine, to restart its arpeggio at each note.
+  ChiptuneEngine& chiptune_engine() { return chiptune_engine_; }
+
   void Render(
       const Patch& patch,
       const Modulations& modulations,

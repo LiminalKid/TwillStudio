@@ -88,6 +88,15 @@ class Adsr {
   float force_release_ = 0;
 };
 
+// tanh, within 0.0001 of it (a [7/6] Pade approximant, which reaches 1 at about 4.97): std::tanh
+// costs a voice on a handheld's CPU as much as everything else it does put together.
+inline float fast_tanh(float x) {
+  const float x2 = x * x;
+  const float v = x * (135135.0f + x2 * (17325.0f + x2 * (378.0f + x2))) /
+                  (135135.0f + x2 * (62370.0f + x2 * (3150.0f + 28.0f * x2)));
+  return std::max(-1.0f, std::min(1.0f, v));
+}
+
 // Filter (state-variable, 12 dB/octave) and drive, on a stereo pair.
 class ToneStage {
  public:
@@ -128,8 +137,8 @@ class ToneStage {
       const float g = 1 + drive_ * 9;
       const float makeup = 1.0f / std::tanh(g);
       for (int i = 0; i < n; ++i) {
-        l[i] = std::tanh(l[i] * g) * makeup;
-        r[i] = std::tanh(r[i] * g) * makeup;
+        l[i] = fast_tanh(l[i] * g) * makeup;
+        r[i] = fast_tanh(r[i] * g) * makeup;
       }
     }
   }

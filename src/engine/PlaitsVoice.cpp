@@ -19,7 +19,7 @@ const float kTuningCorrection = 12.0f * std::log2(48000.0f / plaits::kCorrectedS
 // Descriptive names, in Plaits' engine order (third_party/eurorack/plaits/dsp/voice.cc).
 const char* const kEngineNames[PlaitsVoice::kNumEngines] = {
     "Analog + filter", "Phase distortion", "6-op FM bank 1", "6-op FM bank 2", "6-op FM bank 3",
-    "Wave terrain",    "String machine",   "Chiptune",       "Virtual analog", "Waveshaper",
+    "Wave terrain",    "String machine",   "Chiptune Arp",   "Virtual analog", "Waveshaper",
     "Two-op FM",       "Formant",          "Additive",       "Wavetable",      "Chords",
     "Speech",          "Swarm",            "Filtered noise", "Particles",      "Plucked string",
     "Modal resonator", "Bass drum",        "Snare drum",     "Hi-hat",
@@ -63,10 +63,25 @@ void PlaitsVoice::render_block(const MacroParams& p) {
   patch.decay = p.decay;
   patch.lpg_colour = p.lpg_colour;
 
+  // The chiptune engine steps its arpeggio at each trigger: while a note is held, a new edge every
+  // arp_step samples (the gate dropped for one block, as for a retriggered note).
+  if (restart_arp_) {
+    voice_->chiptune_engine().restart_arpeggio();
+    restart_arp_ = false;
+  }
+  if (p.engine == 7 && p.arp_step > 0 && gate_) {
+    arp_pos_ += kBlockSize;
+    if (arp_pos_ >= p.arp_step) {
+      arp_pos_ = std::fmod(arp_pos_, p.arp_step);
+      retrigger_ = true;
+    }
+  }
+
   plaits::Modulations mod = {};
   mod.trigger_patched = true;
   mod.trigger = gate_ && !retrigger_ ? 1.0f : 0.0f;
   retrigger_ = false;
+  const bool was_high = rendered_high_;
   rendered_high_ = mod.trigger > 0;
   mod.level_patched = !p.use_lpg;
   mod.level = p.level;
@@ -89,9 +104,30 @@ void PlaitsVoice::render_block(const MacroParams& p) {
 
   plaits::Voice::Frame frames[kBlockSize];
   voice_->Render(patch, mod, frames, kBlockSize);
+  // Triggered, the chiptune engine makes its own envelope and passes the low-pass gate by, and that
+  // envelope only shapes each arpeggio step (with the timbre amount; at 0 it holds): left alone a
+  // note would never end. So under the gate setting the gate's part is played here: each trigger
+  // (a note, or an arpeggio step) rises to full in a millisecond, without a click, then dies away
+  // as the other engines do under the gate, held or not: to -60 dB in about 0.9 s at a decay of
+  // 0.25, 2 s at 0.5, 5.5 s at 0.75 and 14 s at 1.
+  float from = 1, to = 1;
+  if (p.engine == 7 && p.use_lpg) {
+    if (mod.trigger > 0 && !was_high) chip_attack_ = true;
+    from = chip_env_;
+    if (chip_attack_) {
+      chip_env_ += kBlockSize / (0.001f * kSampleRate);
+      if (chip_env_ >= 1) chip_env_ = 1, chip_attack_ = false;
+    } else {
+      const float t60 = 0.35f * std::pow(10.0f, 1.6f * p.decay);
+      chip_env_ *= std::exp(-6.9f * kBlockSize / (t60 * kSampleRate));
+      if (chip_env_ < 1e-5f) chip_env_ = 0;
+    }
+    to = chip_env_;
+  }
   for (int i = 0; i < kBlockSize; ++i) {
-    block_out_[i] = frames[i].out * (1.0f / 32768.0f);
-    block_aux_[i] = frames[i].aux * (1.0f / 32768.0f);
+    const float g = from + (to - from) * float(i + 1) / kBlockSize;
+    block_out_[i] = frames[i].out * (g / 32768.0f);
+    block_aux_[i] = frames[i].aux * (g / 32768.0f);
   }
   block_pos_ = 0;
 }

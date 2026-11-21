@@ -8,7 +8,7 @@ namespace twill {
 namespace {
 
 constexpr uint32_t kFormatVersion = 1;
-constexpr uint16_t kProjVersion = 6, kTrakVersion = 8, kClipVersion = 2;
+constexpr uint16_t kProjVersion = 6, kTrakVersion = 10, kClipVersion = 2;
 
 class Writer {
  public:
@@ -168,6 +168,8 @@ std::vector<uint8_t> save_project(const Project& p) {
     w.u8(t.sampler.slice_transients);  // version 6
     for (const Modulator& m : t.mods) w.u8(m.retrigger);  // version 7
     for (const KitSlot& k : t.sampler.kit) w.f32(k.decay);  // version 8
+    w.u8(uint8_t(t.macro.arp_rate));                        // version 9
+    w.str(t.sampler.preset);                                 // version 10
     w.end_chunk(c);
   }
 
@@ -292,7 +294,7 @@ bool load_project(const uint8_t* data, size_t size, Project& out, std::string& e
       }
       if (version >= 2) {
         SamplerSettings& sm = t.sampler;
-        sm.mode = SamplerMode(std::min<uint8_t>(r.u8(), 2));
+        sm.mode = SamplerMode(std::min<uint8_t>(r.u8(), 3));
         sm.sample = r.str();
         sm.root = r.u8() & 127;
         for (float* v : {&sm.fine, &sm.start, &sm.end, &sm.loop_start, &sm.loop_end}) *v = r.f32();
@@ -334,6 +336,8 @@ bool load_project(const uint8_t* data, size_t size, Project& out, std::string& e
         for (Modulator& m : t.mods) m.retrigger = r.u8() != 0;
       if (version >= 8)
         for (KitSlot& k : t.sampler.kit) k.decay = std::max(0.0f, std::min(1.0f, r.f32()));
+      if (version >= 9) t.macro.arp_rate = ArpRate(std::min<uint8_t>(r.u8(), kNumArpRates - 1));
+      if (version >= 10) t.sampler.preset = r.str();
       if (r.ok() && p.tracks.size() < size_t(kMaxTracks)) p.tracks.push_back(std::move(t));
     } else if (std::memcmp(tag, "CLIP", 4) == 0) {
       Clip cl;

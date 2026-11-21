@@ -50,6 +50,7 @@ void ChiptuneEngine::Init(BufferAllocator* allocator) {
   envelope_shape_ = NO_ENVELOPE;
   envelope_state_ = 0.0f;
   aux_envelope_amount_ = 0.0f;
+  restart_arpeggio_ = false;
 }
 
 void ChiptuneEngine::Reset() {
@@ -77,7 +78,12 @@ void ChiptuneEngine::Render(
       int pattern = arpeggiator_pattern_selector_.Process(parameters.timbre);
       arpeggiator_.set_mode(ArpeggiatorMode(pattern / 3));
       arpeggiator_.set_range(1 << (pattern % 3));
-      arpeggiator_.Clock(chords_.num_notes());
+      if (restart_arpeggio_) {  // Twill Studio
+        arpeggiator_.Reset();
+        restart_arpeggio_ = false;
+      } else {
+        arpeggiator_.Clock(chords_.num_notes());
+      }
       envelope_state_ = 1.0f;
     }
     const float octave = float(1 << arpeggiator_.octave());

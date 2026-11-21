@@ -27,7 +27,7 @@ class ArrangementView {
   Tick cursor_song_position() const { return std::max(0, cursor_bar_) * kBar; }
   void copy();   // the clip under the cursor
   void paste();  // an independent copy at the cursor, on any track (Y makes a linked one)
-  void open_project_settings();  // tempo, key, scale, files, MIDI clock (Menu, from any view)
+  void open_main_menu();  // see App::kMainMenuTitle; call App::open_main_menu()
   void open_track_settings(int track, int select_row = 1);  // opens on Engine (row 1), under Name
 
   // A global chord used L or R (L/R + Start): releasing it then does nothing here.

@@ -92,10 +92,18 @@ class Platform {
   // start with the longer one unless the user chose otherwise: handhelds whose sound goes through
   // PipeWire (KNULLI on the TrimUI Brick Pro clicks a few times every 10 minutes at 512 frames).
   virtual bool prefers_long_audio_buffer() const { return false; }
+  // True where the system sets the buffer size for every app (sndstation's Audio page), so the app
+  // offers no setting of its own.
+  virtual bool system_sets_audio_buffer() const { return false; }
+
+  // How many bytes of samples may be loaded at once (multisamples stop loading past it); 0: no limit.
+  virtual size_t sample_budget() const { return 0; }
 
   // Limits from this platform's benchmarks (design §6).
   virtual int max_tracks() const = 0;
   virtual int max_voices() const = 0;
+  // How many of them may play the macro oscillator at once; 0: all of them.
+  virtual int max_synth_voices() const { return 0; }
 
   virtual uint64_t micros() const = 0;
   virtual void log(const char* fmt, ...) = 0;
