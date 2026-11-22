@@ -196,7 +196,11 @@ struct Placement {
   }
 };
 
+#if TWILL_PLUGINS
+enum class InstrumentType : uint8_t { Macro = 0, Sampler = 1, MidiOut = 2, Plugin = 3 };
+#else
 enum class InstrumentType : uint8_t { Macro = 0, Sampler = 1, MidiOut = 2 };
+#endif
 enum class MacroOutput : uint8_t { Main = 0, Aux = 1, Mix = 2 };
 // How fast the chiptune engine's arpeggio steps while a note is held: eighth, sixteenth,
 // thirty-second or sixty-fourth notes at the song's tempo.
@@ -298,6 +302,21 @@ struct ToneSettings {
   void set(ParamId id, float value);
 };
 
+#if TWILL_PLUGINS
+// A plugin the platform hosts (platform/Plugins.h), as a Plugin track keeps it: which, and its
+// state for the file (a PLUG chunk, ProjectFile.cpp).
+struct PluginSettings {
+  std::string id;      // the plugin's own id: found by it wherever it is installed
+  std::string path;    // where it was loaded from: a hint
+  std::string name;    // as shown, even where it is not installed
+  uint32_t slot = 0;   // the loaded instance it plays (the app's), unique in the project; 0: none
+  std::vector<uint8_t> state;  // its own state, as last saved (not compared: the plugin's, not an edit)
+  bool operator==(const PluginSettings& o) const {
+    return id == o.id && path == o.path && name == o.name && slot == o.slot;
+  }
+};
+#endif
+
 struct Track {
   std::string name;
   uint32_t colour = 0;  // index into the theme's track colours, kept when the track moves
@@ -312,6 +331,9 @@ struct Track {
   Modulator mods[kModulators];
   int midi_channel = 0;  // MIDI Out tracks: 0-15 (track chunk version 4)
   int midi_cc[2] = {1, 74};  // MIDI Out tracks: the controllers kParamMidiCcA/B send (version 5)
+#if TWILL_PLUGINS
+  PluginSettings plugin;     // Plugin tracks
+#endif
   bool mute = false, solo = false;
   std::vector<Placement> arrangement;  // sorted by start
 

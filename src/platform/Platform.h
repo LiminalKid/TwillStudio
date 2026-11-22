@@ -7,6 +7,9 @@
 
 #include "gfx/Geometry.h"
 #include "platform/Midi.h"
+#if TWILL_PLUGINS
+#include "platform/Plugins.h"
+#endif
 
 namespace twill {
 
@@ -80,6 +83,10 @@ class Platform {
 
   // MIDI: every connected device, merged; null if the platform has no MIDI.
   virtual MidiPort* midi() { return nullptr; }
+#if TWILL_PLUGINS
+  // Instruments it hosts (Plugin tracks); null if it has none.
+  virtual PluginHost* plugins() { return nullptr; }
+#endif
   // False when time is simulated (tests): the app then sends MIDI from its frame loop at once
   // rather than from a thread on the wall clock.
   virtual bool real_time() const { return true; }

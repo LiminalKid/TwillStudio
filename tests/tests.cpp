@@ -3406,6 +3406,133 @@ void test_ui_autosave_and_reload() {
   second.stop();
 }
 
+#if TWILL_PLUGINS
+// --- Plugin tracks (TWILL_PLUGINS: sndstation builds) --------------------------------------------
+
+// A plugin that plays 0.5 while any note is held, and keeps every note it was given, by the sample
+// it was meant for: process() call k plays the plugin block gathered before it, k - 1.
+struct FakePlugin : twill::PluginInstance {
+  struct Ev {
+    uint64_t at;
+    uint8_t pitch, velocity;
+  };
+  std::vector<Ev> evs;
+  uint64_t calls = 0;
+  int held = 0;
+  std::vector<uint8_t> state = {1, 2, 3};
+  std::string name() const override { return "fake"; }
+  void process(const twill::PluginEvent* e, int n, float* l, float* r, int frames) override {
+    for (int i = 0; i < n; ++i) {
+      evs.push_back(Ev{(calls - 1) * uint64_t(frames) + e[i].time, e[i].pitch, e[i].velocity});
+      held += e[i].velocity ? 1 : -1;
+    }
+    for (int i = 0; i < frames; ++i) l[i] = r[i] = held > 0 ? 0.5f : 0.0f;
+    ++calls;
+  }
+  bool save_state(std::vector<uint8_t>& out) override { out = state; return true; }
+  bool load_state(const std::vector<uint8_t>& in) override { state = in; return true; }
+  std::vector<Param> params() override { return {}; }
+  std::string param_text(uint32_t, double) override { return ""; }
+  void set_param(uint32_t, double) override {}
+};
+
+twill::Project plugin_project() {
+  twill::Project p = make_project(1);
+  p.tracks[0].instrument = twill::InstrumentType::Plugin;
+  p.tracks[0].plugin = twill::PluginSettings{"org.example.fake", "/x/fake.clap", "Fake", 1, {9}};
+  twill::Clip& c = p.clips[0];
+  c.notes.push_back(note_at(0, 60, Q / 2));
+  c.notes.push_back(note_at(Q, 64, Q / 2));
+  return p;
+}
+
+std::vector<float> render_plugin(const twill::Project& p, FakePlugin& fake, float seconds, twill::Engine& e) {
+  e.set_master_bypass(true);  // the track's own output, to the sample
+  e.submit(twill::build_snapshot(p, 16, 1, nullptr, nullptr, [&fake](const twill::Track&) { return &fake; }));
+  e.play();
+  std::vector<float> out(size_t(seconds * kRate) * 2);
+  for (size_t pos = 0; pos < out.size() / 2; pos += 256) e.render(&out[pos * 2], int(std::min<size_t>(256, out.size() / 2 - pos)));
+  return out;
+}
+
+// Each note reaches the plugin timed within its block, at the sample the scheduler starts it (a
+// sub-block's precision, as every instrument), and its end the same; its sound comes out one plugin
+// block later, at the track's level.
+void test_plugin_track_plays() {
+  FakePlugin fake;
+  twill::Engine e(16);
+  const std::vector<float> out = render_plugin(plugin_project(), fake, 1.0f, e);
+  CHECK(fake.calls > 0);
+  CHECK_MSG(fake.evs.size() == 4, "%zu events", fake.evs.size());
+  if (fake.evs.size() == 4) {
+    const double q = 0.5 * kRate;  // a quarter at 120
+    CHECK(fake.evs[0].pitch == 60 && fake.evs[0].velocity > 0 && near_exact(fake.evs[0].at, 0));
+    CHECK(fake.evs[1].pitch == 60 && fake.evs[1].velocity == 0 && fake.evs[1].at <= uint64_t(q / 2) + 1 &&
+          fake.evs[1].at + twill::Engine::kSubBlock >= uint64_t(q / 2));
+    CHECK(fake.evs[2].pitch == 64 && fake.evs[2].velocity > 0 && near_exact(fake.evs[2].at, q));
+    CHECK(fake.evs[3].pitch == 64 && fake.evs[3].velocity == 0);
+  }
+  const int block = twill::Engine::kPluginBlock;
+  CHECK(out[size_t(2 * (block / 2))] == 0.0f);                       // nothing before its first block
+  CHECK(std::fabs(out[size_t(2 * (block + 10))] - 0.5f * 0.8f) < 1e-6f);  // then the plugin, at the level
+  CHECK(std::fabs(out[size_t(2 * (block + 10)) + 1] - 0.5f * 0.8f) < 1e-6f);
+}
+
+// A note played live reaches it; Stop lets go of every note it holds.
+void test_plugin_live_and_stop() {
+  FakePlugin fake;
+  twill::Engine e(16);
+  twill::Project p = plugin_project();
+  p.clips[0].notes.clear();
+  render_plugin(p, fake, 0.05f, e);
+  e.live_note(0, 70, 100);
+  std::vector<float> buf(512);
+  for (int i = 0; i < 4; ++i) e.render(buf.data(), 256);
+  CHECK(fake.held == 1);
+  e.stop();
+  for (int i = 0; i < 4; ++i) e.render(buf.data(), 256);
+  CHECK(fake.held == 0);
+  CHECK(!fake.evs.empty() && fake.evs.back().pitch == 70 && fake.evs.back().velocity == 0);
+}
+
+// The plugin, its slot and its state are kept in the file (a PLUG chunk), and read back.
+void test_plugin_file_round_trip() {
+  twill::Project p = plugin_project();
+  p.tracks[0].plugin.state = {0, 255, 7, 42};
+  twill::Project back;
+  std::string err;
+  const std::vector<uint8_t> bytes = twill::save_project(p);
+  CHECK(twill::load_project(bytes.data(), bytes.size(), back, err));
+  CHECK(back.tracks.size() == 1 && back.tracks[0].instrument == twill::InstrumentType::Plugin);
+  CHECK(back.tracks[0].plugin == p.tracks[0].plugin);
+  CHECK(back.tracks[0].plugin.state == p.tracks[0].plugin.state);
+}
+
+// A plugin track moved keeps its plugin, and what the plugin holds: nothing is cut off or repeated.
+void test_plugin_moves_with_its_track() {
+  FakePlugin fake;
+  twill::Engine e(16);
+  twill::Project p = plugin_project();
+  p.clips[0].notes.clear();
+  render_plugin(p, fake, 0.05f, e);
+  e.live_note(0, 50, 100);
+  std::vector<float> buf(512);
+  for (int i = 0; i < 4; ++i) e.render(buf.data(), 256);
+  twill::Project moved = p;  // the same plugin, now on track 2
+  twill::Track other;
+  moved.tracks.insert(moved.tracks.begin(), other);
+  e.submit(twill::build_snapshot(moved, 16, 2, nullptr, nullptr,
+                                 [&fake](const twill::Track& t) -> twill::PluginInstance* {
+                                   return t.instrument == twill::InstrumentType::Plugin ? &fake : nullptr;
+                                 }));
+  for (int i = 0; i < 4; ++i) e.render(buf.data(), 256);
+  CHECK(fake.held == 1);
+  e.stop();
+  for (int i = 0; i < 4; ++i) e.render(buf.data(), 256);
+  CHECK(fake.held == 0);  // let go of on its new track
+}
+#endif
+
 struct TestCase {
   const char* name;
   void (*fn)();
@@ -3520,6 +3647,12 @@ int main(int argc, char** argv) {
       {"ui_midi_record_and_clock", test_ui_midi_record_and_clock},
       {"ui_follow_midi_clock", test_ui_follow_midi_clock},
       {"ui_autosave_and_reload", test_ui_autosave_and_reload},
+#if TWILL_PLUGINS
+      {"plugin_track_plays", test_plugin_track_plays},
+      {"plugin_live_and_stop", test_plugin_live_and_stop},
+      {"plugin_file_round_trip", test_plugin_file_round_trip},
+      {"plugin_moves_with_its_track", test_plugin_moves_with_its_track},
+#endif
   };
   int run = 0;
   for (const TestCase& t : tests) {

@@ -18,6 +18,9 @@
 #include "engine/Snapshot.h"
 #include "engine/VoiceDsp.h"
 #include "platform/Midi.h"
+#if TWILL_PLUGINS
+#include "platform/Plugins.h"
+#endif
 
 namespace twill {
 
@@ -28,6 +31,11 @@ class Engine {
   // Audio leaves the engine this many frames after the sample clock it was made at (the master
   // limiter's look-ahead); MIDI out waits the same.
   static constexpr int kOutputDelay = Effects::kLimiterDelay;
+#if TWILL_PLUGINS
+  // Plugin tracks: their notes are gathered over this long, timed within it, and each plugin plays
+  // the whole of it at once at its end, so it sounds this much after the other instruments (2 ms).
+  static constexpr int kPluginBlock = 8 * kSubBlock;
+#endif
 
   // For tests: told about every note the scheduler starts. Called on the audio thread.
   struct Observer {
@@ -237,6 +245,29 @@ class Engine {
     int64_t samples = 0;
   };
   PendingOff pending_offs_[64] = {};
+#if TWILL_PLUGINS
+  // Plugin tracks (audio thread): each one's notes for the block being gathered, and what it played
+  // for the last, which sounds over this one. A plugin moved to another track keeps all of it.
+  struct PluginTrack {
+    PluginInstance* inst = nullptr;
+    PluginEvent events[256];
+    int count = 0;
+    float out[2][kPluginBlock] = {};
+    uint8_t held[128] = {};  // notes on, not yet off (a count: a note can be struck again while held)
+  };
+  PluginTrack plugin_[kMaxTracks];
+  struct PluginOff {
+    int track = -1;
+    uint8_t pitch = 0;
+    int64_t samples = 0;
+  };
+  PluginOff plugin_offs_[256] = {};
+  void plugin_event(int track, uint8_t pitch, uint8_t velocity, uint64_t sample);
+  void plugin_note(int track, uint8_t pitch, uint8_t velocity, int64_t gate);  // gate 0: held (live)
+  void plugins_all_off();
+  void sync_plugins();  // after a new snapshot: each track's instance, its state following it
+  void run_plugins();   // at a plugin block's start: the last one played
+#endif
   double next_midi_clock_ = 0;  // the sample of the next MIDI clock while playing
   int16_t cc_sent_[kMaxTracks][2] = {};       // the last value sent; -1: none since play
   uint64_t cc_held_until_[kMaxTracks][2] = {};  // a note's lock holds the value until this sample

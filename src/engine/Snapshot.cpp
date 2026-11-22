@@ -19,7 +19,11 @@ void SnapSampler::set(ParamId id, float v) {
 
 std::unique_ptr<Snapshot> build_snapshot(const Project& p, int max_tracks, uint64_t revision,
                                          const SampleResolver& samples,
-                                         const MultisampleResolver& multisamples) {
+                                         const MultisampleResolver& multisamples
+#if TWILL_PLUGINS
+                                         , const PluginResolver& plugins
+#endif
+) {
   auto s = std::make_unique<Snapshot>();
   s->revision = revision;
   s->tempo = p.tempo;
@@ -125,6 +129,9 @@ std::unique_ptr<Snapshot> build_snapshot(const Project& p, int max_tracks, uint6
     st.midi_channel = t.midi_channel;
     st.midi_cc[0] = t.midi_cc[0];
     st.midi_cc[1] = t.midi_cc[1];
+#if TWILL_PLUGINS
+    if (plugins && t.instrument == InstrumentType::Plugin) st.plugin = plugins(t);
+#endif
     st.audible = !t.mute && (!any_solo || t.solo);
     for (const Placement& pl : t.arrangement) {
       const SnapClip* c = snap_clip(pl.clip_id);

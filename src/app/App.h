@@ -116,7 +116,7 @@ class App {
   // from any view, Menu in the arrangement and mixer. It's titled kMainMenuTitle, with build_id()
   // beside the title.
   static constexpr const char* kMainMenuTitle = "Main menu";
-  static std::string build_id();  // "0.5.0 500fa1e"
+  static std::string build_id();  // "0.6.0 500fa1e"
   void open_main_menu();
   void toggle_main_menu();
   // Menu: the settings of what the screen shows (the main menu in the arrangement and mixer, the
@@ -136,7 +136,11 @@ class App {
   void open_track_settings(int track);
   // A track's sound, as one list: the macro oscillator's engines, then the sampler, then MIDI out.
   // "Engine" in the app means a place in this list.
+#if TWILL_PLUGINS
+  static constexpr int kNumSounds = PlaitsVoice::kNumEngines + 3;  // ... MIDI out, Plugin
+#else
   static constexpr int kNumSounds = PlaitsVoice::kNumEngines + 2;
+#endif
   static int sound_index(const Track& t);
   static const char* sound_name(const Track& t);
   void step_sound(int track, int step);  // one undo step; plays a note to hear it
@@ -207,6 +211,19 @@ class App {
   const std::string& notice_text() const { return notice_text_; }
   void free_unused_samples();  // every frame; checks twice a second
 
+#if TWILL_PLUGINS
+  // Plugin tracks (platform/Plugins.h). Each plays the instance in its slot: loaded the first time
+  // a snapshot needs it, with the track's saved state, and kept while the engine may play it, as a
+  // sample is. Null when the platform has none, the track has none chosen, or it won't load.
+  PluginHost* plugin_host() { return p_.plugins(); }
+  PluginInstance* plugin_instance(const Track& t);
+  std::string plugin_error(const Track& t) const;  // why it isn't loaded; "" if it is
+  // The track plays `info` from now: a new slot, no state yet. One undo step.
+  void choose_plugin(int track, const PluginInfo& info);
+  // A plugin's own parameter moved (not an edit of the project): the song is saved, as after one.
+  void plugin_changed();
+#endif
+
  private:
   void handle_global();
   void handle_inspector();
@@ -266,6 +283,22 @@ class App {
   std::unique_ptr<MixerView> mixer_;
   std::map<std::string, std::shared_ptr<const SampleData>> samples_;
   std::map<std::string, std::string> sample_errors_;  // so a missing file isn't retried every frame
+#if TWILL_PLUGINS
+  struct LoadedPlugin {
+    std::unique_ptr<PluginInstance> inst;
+    std::string id;
+    bool idle = false, released = false;  // in no snapshot since idle_snapshot; told so
+    uint64_t idle_snapshot = 0, idle_callbacks = 0;
+  };
+  std::map<uint32_t, LoadedPlugin> plugins_;         // by slot
+  std::vector<LoadedPlugin> retired_plugins_;        // another song's, freed once the engine let go
+  std::map<uint32_t, std::string> plugin_errors_;    // by slot: not tried again every snapshot
+  bool plugin_dirty_ = false;                        // a parameter moved since the last autosave
+  void capture_plugin_states();                      // into project_, before it is written
+  void tend_plugins();                               // every frame: idle(), and what nothing plays
+  void retire_plugins();                             // a new song: every instance let go of
+  uint32_t next_plugin_slot() const;
+#endif
   std::map<std::string, std::shared_ptr<Multisample>> multisamples_;
   std::map<std::string, std::string> multisample_errors_;
   std::map<std::string, int> multisample_missing_;

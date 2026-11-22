@@ -22,6 +22,12 @@ class Writer {
     put(s.data(), std::min<size_t>(s.size(), 0xffff));
   }
   void tag(const char* t) { put(t, 4); }
+#if TWILL_PLUGINS
+  void raw(const std::vector<uint8_t>& v) {
+    u32(uint32_t(v.size()));
+    put(v.data(), v.size());
+  }
+#endif
   // Starts a chunk; returns where its size goes, for end_chunk().
   size_t begin_chunk(const char* t) {
     tag(t);
@@ -65,6 +71,15 @@ class Reader {
     return s;
   }
   bool tag(char out[4]) { return get(out, 4); }
+#if TWILL_PLUGINS
+  std::vector<uint8_t> raw() {
+    const uint32_t n = u32();
+    if (!ok_ || pos_ + n > end_) return fail(), std::vector<uint8_t>();
+    std::vector<uint8_t> v(d_ + pos_, d_ + pos_ + n);
+    pos_ += n;
+    return v;
+  }
+#endif
 
  private:
   bool get(void* out, size_t n) {
@@ -172,6 +187,23 @@ std::vector<uint8_t> save_project(const Project& p) {
     w.str(t.sampler.preset);                                 // version 10
     w.end_chunk(c);
   }
+#if TWILL_PLUGINS
+  // Plugin tracks: a chunk of their own (PLUG), which a build without plugins skips as it skips
+  // any chunk it doesn't know, playing the track as MIDI out. Version 1.
+  for (size_t i = 0; i < p.tracks.size(); ++i) {
+    const PluginSettings& pl = p.tracks[i].plugin;
+    if (pl.id.empty() && p.tracks[i].instrument != InstrumentType::Plugin) continue;
+    c = w.begin_chunk("PLUG");
+    w.u16(1);
+    w.u8(uint8_t(i));
+    w.str(pl.id);
+    w.str(pl.path);
+    w.str(pl.name);
+    w.u32(pl.slot);
+    w.raw(pl.state);
+    w.end_chunk(c);
+  }
+#endif
 
   for (const Clip& cl : p.clips) {
     c = w.begin_chunk("CLIP");
@@ -229,6 +261,9 @@ bool load_project(const uint8_t* data, size_t size, Project& out, std::string& e
   Project p;
   p.tracks.clear();
   bool have_proj = false;
+#if TWILL_PLUGINS
+  std::vector<std::pair<size_t, PluginSettings>> plugs;  // PLUG chunks, put on their tracks at the end
+#endif
   while (r.ok() && !r.at_end()) {
     if (!r.tag(tag)) break;
     uint32_t len = r.u32();
@@ -271,7 +306,11 @@ bool load_project(const uint8_t* data, size_t size, Project& out, std::string& e
       t.name = r.str();
       t.colour = r.u32();
       if (t.colour > 7) t.colour = uint32_t(p.tracks.size() % 8);  // older files: an unused RGB value
+#if TWILL_PLUGINS
+      t.instrument = InstrumentType(std::min<uint8_t>(r.u8(), 3));
+#else
       t.instrument = InstrumentType(std::min<uint8_t>(r.u8(), 2));
+#endif
       t.voices = r.u8();
       t.level = r.f32();
       t.pan = r.f32();
@@ -383,6 +422,19 @@ bool load_project(const uint8_t* data, size_t size, Project& out, std::string& e
       }
       if (r.ok()) p.clips.push_back(std::move(cl));
     }
+#if TWILL_PLUGINS
+    else if (std::memcmp(tag, "PLUG", 4) == 0) {
+      r.u16();  // version 1
+      const size_t track = r.u8();
+      PluginSettings pl;
+      pl.id = r.str();
+      pl.path = r.str();
+      pl.name = r.str();
+      pl.slot = r.u32();
+      pl.state = r.raw();
+      if (r.ok()) plugs.emplace_back(track, std::move(pl));
+    }
+#endif
     // Unknown chunks, and anything newer at the end of a known one, are skipped.
     if (!r.ok()) {
       error = "project file is damaged";
@@ -395,6 +447,10 @@ bool load_project(const uint8_t* data, size_t size, Project& out, std::string& e
     error = "project file has no project settings";
     return false;
   }
+#if TWILL_PLUGINS
+  for (auto& [track, pl] : plugs)
+    if (track < p.tracks.size()) p.tracks[track].plugin = std::move(pl);
+#endif
   out = std::move(p);
   return true;
 }

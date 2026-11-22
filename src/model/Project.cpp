@@ -116,6 +116,9 @@ std::string lfo_rate_text(const Modulator& m) {
 }
 
 std::vector<ParamId> mod_destinations(InstrumentType t) {
+#if TWILL_PLUGINS
+  if (t == InstrumentType::Plugin) return {};  // a plugin's sound is its own
+#endif
   std::vector<ParamId> d = {kParamPitch};
   if (t == InstrumentType::Macro)
     for (ParamId id : {kParamHarmonics, kParamTimbre, kParamMorph, kParamDecay, kParamLpgColour}) d.push_back(id);
@@ -492,6 +495,13 @@ std::string param_name(const Track& t, ParamId id) {
 
 std::vector<ParamId> automatable_params(InstrumentType t) {
   std::vector<ParamId> v;
+#if TWILL_PLUGINS
+  if (t == InstrumentType::Plugin) {  // the track's mixer, and the mix
+    v = {kParamLevel, kParamPan, kParamSendChorus, kParamSendDelay, kParamSendReverb};
+    for (ParamId id : mix_automatable_params()) v.push_back(id);
+    return v;
+  }
+#endif
   if (t == InstrumentType::MidiOut) {
     v = {kParamMidiCcA, kParamMidiCcB};
     for (ParamId id : mix_automatable_params()) v.push_back(id);
@@ -566,6 +576,9 @@ bool Track::operator==(const Track& o) const {
          send_chorus == o.send_chorus && send_delay == o.send_delay && send_reverb == o.send_reverb &&
          std::equal(std::begin(mods), std::end(mods), std::begin(o.mods)) && midi_channel == o.midi_channel &&
          midi_cc[0] == o.midi_cc[0] && midi_cc[1] == o.midi_cc[1] &&
+#if TWILL_PLUGINS
+         plugin == o.plugin &&
+#endif
          mute == o.mute && solo == o.solo && arrangement == o.arrangement;
 }
 

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(TwillStudio VERSION 0.5.0 LANGUAGES CXX)
+project(TwillStudio VERSION 0.6.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -10,7 +10,36 @@ option(TWILL_HANDHELD "Build for a handheld: full-screen at the panel's resoluti
 # sndstation (BUILDING.md): sound, buttons and MIDI through the sndstation SDK, built from its source
 # in SNDSTATION_DIR. Off unless asked for; the SDK isn't part of this repository.
 option(TWILL_SNDSTATION "Build for sndstation, with its SDK (SNDSTATION_DIR)" OFF)
-set(SNDSTATION_DIR "$ENV{HOME}/SDKs/sndstation" CACHE PATH "The sndstation SDK's source tree")
+# Where the SDK is: -DSNDSTATION_DIR, else $SNDSTATION_DIR in the environment, else the usual
+# checkouts. A leading ~ is expanded, and a folder that holds a sndstation/ tree is followed into it.
+set(SNDSTATION_DIR "" CACHE PATH "The sndstation SDK's source tree")
+if(TWILL_SNDSTATION)
+  set(_snd_candidates)
+  if(SNDSTATION_DIR)
+    list(APPEND _snd_candidates "${SNDSTATION_DIR}")
+  elseif(DEFINED ENV{SNDSTATION_DIR} AND NOT "$ENV{SNDSTATION_DIR}" STREQUAL "")
+    list(APPEND _snd_candidates "$ENV{SNDSTATION_DIR}")
+  else()
+    list(APPEND _snd_candidates "$ENV{HOME}/github_sndstation/sndstation" "$ENV{HOME}/src/sndstation"
+         "$ENV{HOME}/sndstation" "$ENV{HOME}/SDKs/sndstation")
+  endif()
+  set(_snd_found "")
+  foreach(_c IN LISTS _snd_candidates)
+    string(REGEX REPLACE "^~" "$ENV{HOME}" _c "${_c}")
+    get_filename_component(_c "${_c}" ABSOLUTE BASE_DIR "$ENV{PWD}")
+    foreach(_d "${_c}" "${_c}/sndstation")
+      if(NOT _snd_found AND EXISTS "${_d}/CMakeLists.txt" AND EXISTS "${_d}/include/sndstation/audioout.h")
+        set(_snd_found "${_d}")
+      endif()
+    endforeach()
+  endforeach()
+  if(NOT _snd_found)
+    list(JOIN _snd_candidates "\n  " _tried)
+    message(FATAL_ERROR "TWILL_SNDSTATION: no sndstation SDK in:\n  ${_tried}\nSet SNDSTATION_DIR (-D or the environment)")
+  endif()
+  set(SNDSTATION_DIR "${_snd_found}" CACHE PATH "The sndstation SDK's source tree" FORCE)
+  message(STATUS "sndstation SDK: ${SNDSTATION_DIR}")
+endif()
 
 # Vendored macro-oscillator DSP (third_party/eurorack/README.md). TEST selects portable C over the
 # module's 32-bit ARM assembly and disables its flash-based user data.
@@ -20,10 +49,9 @@ add_library(eurorack STATIC ${EURORACK_SOURCES})
 target_include_directories(eurorack SYSTEM PUBLIC third_party/eurorack)
 target_compile_definitions(eurorack PUBLIC TEST)
 target_compile_options(eurorack PRIVATE -w)  # upstream code, built as is
-if(EMSCRIPTEN)
-  # user_data.h calls printf without including stdio.h; other compilers' headers happen to bring it in.
-  target_compile_options(eurorack PRIVATE -include cstdio)
-endif()
+# user_data.h calls printf without including stdio.h. Some compilers' headers happen to bring it
+# in; Emscripten's and GCC 13's libstdc++ (Ubuntu 24.04, Debian 13) don't.
+target_compile_options(eurorack PRIVATE -include cstdio)
 
 # XML, for sample library presets (third_party/pugixml/README.md).
 add_library(pugixml STATIC third_party/pugixml/pugixml.cpp)
@@ -69,18 +97,18 @@ add_library(twill_core STATIC
 )
 target_include_directories(twill_core PUBLIC src)
 # The factory kit's samples (assets/factory/), built into the binary.
-file(GLOB TWILL_FACTORY_FILES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/assets/factory/*.wav)
+file(GLOB TWILL_FACTORY_FILES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/assets/factory/*.wav)
 add_custom_command(
   OUTPUT ${CMAKE_BINARY_DIR}/gen/factory_data.cpp
-  COMMAND ${CMAKE_COMMAND} -DDIR=${CMAKE_SOURCE_DIR}/assets/factory -DOUT=${CMAKE_BINARY_DIR}/gen/factory_data.cpp
-          -P ${CMAKE_SOURCE_DIR}/cmake/embed.cmake
-  DEPENDS ${TWILL_FACTORY_FILES} ${CMAKE_SOURCE_DIR}/cmake/embed.cmake
+  COMMAND ${CMAKE_COMMAND} -DDIR=${CMAKE_CURRENT_SOURCE_DIR}/assets/factory -DOUT=${CMAKE_BINARY_DIR}/gen/factory_data.cpp
+          -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed.cmake
+  DEPENDS ${TWILL_FACTORY_FILES} ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed.cmake
   COMMENT "Embedding the factory kit")
 # Version.h (version, commit, build date) for the About panel, refreshed at every build.
 set(TWILL_GEN_DIR "${CMAKE_BINARY_DIR}/gen")
 add_custom_target(twill_version
-  COMMAND ${CMAKE_COMMAND} -DSRC=${CMAKE_SOURCE_DIR} -DOUT=${TWILL_GEN_DIR}/Version.h
-          -DVERSION=${PROJECT_VERSION} -P ${CMAKE_SOURCE_DIR}/cmake/version.cmake
+  COMMAND ${CMAKE_COMMAND} -DSRC=${CMAKE_CURRENT_SOURCE_DIR} -DOUT=${TWILL_GEN_DIR}/Version.h
+          -DVERSION=${PROJECT_VERSION} -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/version.cmake
   BYPRODUCTS ${TWILL_GEN_DIR}/Version.h)
 add_dependencies(twill_core twill_version)
 target_include_directories(twill_core PUBLIC ${TWILL_GEN_DIR})
@@ -127,9 +155,9 @@ if(EMSCRIPTEN)
   set_target_properties(twill PROPERTIES SUFFIX ".html")
   # --profiling-funcs keeps function names, so a crash in someone's browser says where it was.
   target_link_options(twill PRIVATE --profiling-funcs -sALLOW_MEMORY_GROWTH=1 -sINITIAL_MEMORY=64MB -lidbfs.js
-    --pre-js ${CMAKE_SOURCE_DIR}/web/pre.js --shell-file ${CMAKE_SOURCE_DIR}/web/shell.html)
+    --pre-js ${CMAKE_CURRENT_SOURCE_DIR}/web/pre.js --shell-file ${CMAKE_CURRENT_SOURCE_DIR}/web/shell.html)
   set_property(TARGET twill APPEND PROPERTY LINK_DEPENDS
-    ${CMAKE_SOURCE_DIR}/web/pre.js ${CMAKE_SOURCE_DIR}/web/shell.html)
+    ${CMAKE_CURRENT_SOURCE_DIR}/web/pre.js ${CMAKE_CURRENT_SOURCE_DIR}/web/shell.html)
 elseif(APPLE)
   target_sources(twill PRIVATE src/platform/sdl2/SystemMidiMac.cpp src/platform/sdl2/OutputCompressorNone.cpp)
   target_link_libraries(twill PRIVATE "-framework CoreMIDI" "-framework CoreFoundation")
@@ -146,9 +174,19 @@ if(TWILL_SNDSTATION)
   set(SNDSTATION_DEV_CONFIG OFF CACHE BOOL "" FORCE)
   add_subdirectory(${SNDSTATION_DIR} ${CMAKE_BINARY_DIR}/sndstation EXCLUDE_FROM_ALL)
   set_target_properties(sndstation PROPERTIES CXX_STANDARD 20)  # this project sets 17 for its own
-  target_sources(twill PRIVATE src/platform/sndstation/SndstationPlatform.cpp)
+  # Plugin tracks need the SDK's ClapPlayer playing into an engine of its own (process()).
+  file(STRINGS "${SNDSTATION_DIR}/include/sndstation/clapplayer.h" _process REGEX "void process\\(const Event")
+  if(NOT _process)
+    message(FATAL_ERROR "TWILL_SNDSTATION: the SDK in ${SNDSTATION_DIR} has no ClapPlayer::process(), which "
+                        "Plugin tracks play through: a newer sndstation is needed")
+  endif()
+  target_sources(twill PRIVATE src/platform/sndstation/SndstationPlatform.cpp
+                               src/platform/sndstation/SndstationPlugins.cpp)
   target_link_libraries(twill PRIVATE sndstation::sndstation)
   target_compile_definitions(twill PRIVATE TWILL_SNDSTATION=1)
+  # Plugin tracks (CLAP instruments, hosted by the SDK): sndstation builds only. Every target that
+  # reads the project's types sees the same, so the core and its tests are built with it too.
+  target_compile_definitions(twill_core PUBLIC TWILL_PLUGINS=1)
   set_target_properties(twill PROPERTIES CXX_STANDARD 20)
 endif()
 target_compile_options(twill PRIVATE -Wall -Wextra -fno-exceptions -fno-rtti)
@@ -166,7 +204,7 @@ endif()
 # there with --golden-dir pointing at a copy of tests/golden.
 add_executable(twill_tests tests/tests.cpp)
 target_link_libraries(twill_tests PRIVATE twill_core)
-target_compile_definitions(twill_tests PRIVATE TWILL_GOLDEN_DIR="${CMAKE_SOURCE_DIR}/tests/golden")
+target_compile_definitions(twill_tests PRIVATE TWILL_GOLDEN_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/golden")
 enable_testing()
 add_test(NAME twill_tests COMMAND twill_tests)
 if(EMSCRIPTEN)

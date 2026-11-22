@@ -37,14 +37,15 @@ icon from `packaging/trimui/`): unzip it at the top of the SD card and Twill Stu
 Apps. Songs go in the same `TwillStudio/` folder as with NextUI.
 
 **sndstation handhelds** (Debian with the sndstation launcher), cross-compiled with Zig. The build
-uses the sndstation SDK for sound, buttons and MIDI, built from its source: put a checkout (with
-its submodules) in `~/SDKs/sndstation`, or pass `-DSNDSTATION_DIR=<folder>`.
+uses the sndstation SDK for sound, buttons and MIDI, built from its source (a checkout, with its
+submodules): `-DSNDSTATION_DIR=<folder>`, or `SNDSTATION_DIR` in the environment, else the first of
+`~/github_sndstation/sndstation`, `~/src/sndstation`, `~/sndstation` and `~/SDKs/sndstation`.
 
     tools/make-sndstation-sysroot.sh sndy@<device>   # once: the device's SDL2 and alsa-lib, Debian's headers
     cmake --preset sndstation && cmake --build --preset sndstation --target twill
-    tools/make-sndstation-deb.py                     # build/sndstation-deb/twill-studio_<version>_arm64.deb
+    tools/make-sndstation-deb.py                     # build/sndstation-deb/twill-studio_<version>_sndstation_<arch>.deb (arm64 on a handheld)
 
-Install the package on the device with `sudo apt install ./twill-studio_<version>_arm64.deb`, then
+Install the package on the device with `sudo apt install ./twill-studio_<version>_sndstation_<arch>.deb`, then
 press X in the launcher's list to read it again. Twill plays through the unit's Audio settings
 (output, buffer size, volume) and its MIDI ports, so it has no Audio buffer setting of its own
 there. Songs, samples and renders go in `~/TwillStudio`, with the log of the last run,

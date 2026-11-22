@@ -24,6 +24,10 @@ class SndstationPlatform : public Sdl2Platform {
   bool prefers_long_audio_buffer() const override { return false; }
 
   const char* controller_name() const override;
+#if TWILL_PLUGINS
+  // CLAP instruments, through the SDK's host (SndstationPlugins.cpp).
+  PluginHost* plugins() override;
+#endif
 
  protected:
   std::unique_ptr<MidiPort> make_midi() override;
@@ -42,6 +46,9 @@ class SndstationPlatform : public Sdl2Platform {
   void* cb_user_ = nullptr;
   bool audio_open_ = false;
   sndstation::pad::State pad_;
+#if TWILL_PLUGINS
+  std::unique_ptr<PluginHost> plugins_;
+#endif
 };
 
 }  // namespace twill

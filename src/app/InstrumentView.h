@@ -28,7 +28,11 @@ class InstrumentView {
   void tick();  // the zone map follows the zones sounding
   void draw(Canvas& c);
   std::vector<Hint> hints() const;
+#if TWILL_PLUGINS
+  bool browsing() const { return browser_open_ || plugins_open_; }
+#else
   bool browsing() const { return browser_open_; }
+#endif
 
   // A global chord used L or R (L/R + Start): releasing it then does nothing here.
 
@@ -72,6 +76,18 @@ class InstrumentView {
   int bsel_ = 0, btop_ = 0;
   std::function<void(const std::string&)> on_pick_;
   std::shared_ptr<const SampleData> preview_;
+
+#if TWILL_PLUGINS
+  // The plugin list (a Plugin track's "Plugin" row): what the platform has installed.
+  // Up/Down choose (R held: by 10), A picks, B or X close.
+  bool plugins_open_ = false;
+  std::vector<PluginInfo> plugin_list_;
+  int psel_ = 0, ptop_ = 0;
+  void open_plugins();
+  void plugins_input();
+  void draw_plugins(Canvas& c, const Rect& r);
+  void draw_plugin(Canvas& c, const Rect& r, const Track& t);
+#endif
 
   // Waveform overview cache.
   const SampleData* wave_for_ = nullptr;

@@ -662,6 +662,9 @@ bool App::has_unsaved_changes() {
   std::vector<uint8_t> on_disk;
   const std::string path = std::string(kProjectsFolder) + "/" + file_safe(project_.name) + ".twill";
   if (!p_.read_file(path.c_str(), on_disk)) return true;
+#if TWILL_PLUGINS
+  capture_plugin_states();
+#endif
   return on_disk != save_project(project_);
 }
 
@@ -684,6 +687,9 @@ bool App::confirm_twice(const char* what, const std::string& prompt) {
 
 bool App::save_project_file() {
   p_.make_dir(kProjectsFolder);
+#if TWILL_PLUGINS
+  capture_plugin_states();
+#endif
   const std::string path = std::string(kProjectsFolder) + "/" + file_safe(project_.name) + ".twill";
   if (!p_.write_file(path.c_str(), save_project(project_))) {
     message("Couldn't save " + path);
@@ -694,6 +700,9 @@ bool App::save_project_file() {
 
 void App::replace_project(Project p) {
   engine_->stop();
+#if TWILL_PLUGINS
+  retire_plugins();  // its slots name other plugins in the new song
+#endif
   project_ = std::move(p);
   history_.clear();
   open_.assign(project_.tracks.size(), Placement{});
@@ -748,10 +757,37 @@ std::vector<float> App::render_offline(const Project& song, bool master) {
     if (t.instrument == InstrumentType::Sampler && t.sampler.mode == SamplerMode::Multi && !t.sampler.preset.empty())
       load_multisample(t.sampler.preset);
   finish_loading();
+#if TWILL_PLUGINS
+  // Plugins of its own: the live ones play on the audio thread. Each starts from the live one's
+  // state now (else the song's), by slot.
+  std::map<uint32_t, std::unique_ptr<PluginInstance>> offline;
+  if (PluginHost* host = p_.plugins())
+    for (const Track& t : p.tracks) {
+      if (t.instrument != InstrumentType::Plugin || t.plugin.id.empty() || offline.count(t.plugin.slot)) continue;
+      std::string err;
+      std::unique_ptr<PluginInstance> inst = host->load(t.plugin.id, t.plugin.path, Engine::kSampleRate, err);
+      if (!inst) {
+        p_.log("render: %s: %s", t.plugin.name.c_str(), err.c_str());
+        continue;
+      }
+      std::vector<uint8_t> state = t.plugin.state;
+      auto live = plugins_.find(t.plugin.slot);
+      if (live != plugins_.end() && live->second.id == t.plugin.id) live->second.inst->save_state(state);
+      if (!state.empty()) inst->load_state(state);
+      offline[t.plugin.slot] = std::move(inst);
+    }
+#endif
   Engine e(std::max(16, p_.max_voices()));
   e.set_master_bypass(!master);
   e.submit(build_snapshot(p, p_.max_tracks(), 1, [this](const std::string& path) { return load_sample(path).get(); },
-                                 [this](const std::string& path) { return load_multisample(path); }));
+                                 [this](const std::string& path) { return load_multisample(path); }
+#if TWILL_PLUGINS
+                                 , [&offline](const Track& t) -> PluginInstance* {
+                                   auto it = offline.find(t.plugin.slot);
+                                   return it == offline.end() ? nullptr : it->second.get();
+                                 }
+#endif
+                                 ));
   e.locate(0);
   e.play();
   const double seconds = end / double(kTicksPerQuarter) * 60.0 / p.tempo + 3.0;
@@ -1130,6 +1166,9 @@ int App::sound_index(const Track& t) {
     case InstrumentType::Macro: return t.macro.engine;
     case InstrumentType::Sampler: return PlaitsVoice::kNumEngines;
     case InstrumentType::MidiOut: return PlaitsVoice::kNumEngines + 1;
+#if TWILL_PLUGINS
+    case InstrumentType::Plugin: return PlaitsVoice::kNumEngines + 2;
+#endif
   }
   return 0;
 }
@@ -1139,6 +1178,9 @@ const char* App::sound_name(const Track& t) {
     case InstrumentType::Macro: return PlaitsVoice::engine_name(t.macro.engine);
     case InstrumentType::Sampler: return "Sampler";
     case InstrumentType::MidiOut: return "MIDI out";
+#if TWILL_PLUGINS
+    case InstrumentType::Plugin: return "Plugin";
+#endif
   }
   return "?";
 }
@@ -1146,12 +1188,21 @@ const char* App::sound_name(const Track& t) {
 void App::step_sound(int track, int step) {
   if (track < 0 || track >= int(project_.tracks.size())) return;
   Track t = project_.tracks[size_t(track)];
+#if TWILL_PLUGINS
+  int i = (sound_index(t) + step + kNumSounds) % kNumSounds;
+  // Plugin only where the platform hosts any: passed over otherwise.
+  if (i == PlaitsVoice::kNumEngines + 2 && !p_.plugins()) i = (i + (step < 0 ? -1 : 1) + kNumSounds) % kNumSounds;
+#else
   const int i = (sound_index(t) + step + kNumSounds) % kNumSounds;
+#endif
   if (i < PlaitsVoice::kNumEngines) {
     t.instrument = InstrumentType::Macro;
     t.macro.engine = i;
   } else {
     t.instrument = i == PlaitsVoice::kNumEngines ? InstrumentType::Sampler : InstrumentType::MidiOut;
+#if TWILL_PLUGINS
+    if (i == PlaitsVoice::kNumEngines + 2) t.instrument = InstrumentType::Plugin;
+#endif
   }
   history_.change_track(track, t);
   if (t.instrument != InstrumentType::MidiOut) audition(track, 60);
@@ -1300,14 +1351,30 @@ void App::sync_engine() {
   synced_loads_ = loads_done_;
   engine_->submit(build_snapshot(project_, p_.max_tracks(), ++snapshot_counter_,
                                  [this](const std::string& path) { return load_sample(path).get(); },
-                                 [this](const std::string& path) { return load_multisample(path); }));
+                                 [this](const std::string& path) { return load_multisample(path); }
+#if TWILL_PLUGINS
+                                 , [this](const Track& t) { return plugin_instance(t); }
+#endif
+                                 ));
 }
 
 void App::autosave(bool force) {
+#if TWILL_PLUGINS
+  if (history_.revision() == saved_revision_ && !plugin_dirty_) return;
+  if (!force && p_.micros() - last_edit_us_ < kAutosaveDelayUs) return;
+  capture_plugin_states();
+  if (p_.write_file(kAutosaveName, save_project(project_))) {
+    saved_revision_ = history_.revision();
+    plugin_dirty_ = false;
+  } else {
+    p_.log("autosave failed");
+  }
+#else
   if (history_.revision() == saved_revision_) return;  // (~0 forces a save after a rename)
   if (!force && p_.micros() - last_edit_us_ < kAutosaveDelayUs) return;
   if (p_.write_file(kAutosaveName, save_project(project_))) saved_revision_ = history_.revision();
   else p_.log("autosave failed");
+#endif
 }
 
 bool App::frame(const InputState& state, Canvas& canvas) {
@@ -1364,6 +1431,9 @@ bool App::frame(const InputState& state, Canvas& canvas) {
   sync_engine();
   engine_->collect_garbage();
   free_unused_samples();
+#if TWILL_PLUGINS
+  tend_plugins();
+#endif
   autosave(false);
 
   if (view_ == View::Arrangement) arrangement_->tick();
@@ -1738,5 +1808,134 @@ void App::draw_inspector(Canvas& c) {
   }
   c.set_clip(saved);
 }
+
+#if TWILL_PLUGINS
+// --- Plugin tracks ----------------------------------------------------------------------------
+
+PluginInstance* App::plugin_instance(const Track& t) {
+  PluginHost* host = p_.plugins();
+  if (!host || t.instrument != InstrumentType::Plugin || t.plugin.id.empty() || t.plugin.slot == 0) return nullptr;
+  auto it = plugins_.find(t.plugin.slot);
+  if (it != plugins_.end()) {
+    if (it->second.id == t.plugin.id) return it->second.inst.get();
+    retired_plugins_.push_back(std::move(it->second));  // the slot plays another plugin now
+    retired_plugins_.back().idle = false;
+    plugins_.erase(it);
+  }
+  auto failed = plugin_errors_.find(t.plugin.slot);
+  if (failed != plugin_errors_.end()) return nullptr;
+  std::string err;
+  std::unique_ptr<PluginInstance> inst = host->load(t.plugin.id, t.plugin.path, Engine::kSampleRate, err);
+  if (!inst) {
+    p_.log("plugin %s: %s", t.plugin.name.c_str(), err.c_str());
+    plugin_errors_[t.plugin.slot] = err.empty() ? "it would not load" : err;
+    return nullptr;
+  }
+  if (!t.plugin.state.empty() && !inst->load_state(t.plugin.state))
+    p_.log("plugin %s: its saved state was refused", t.plugin.name.c_str());
+  p_.log("plugin %s loaded (slot %u)", t.plugin.name.c_str(), unsigned(t.plugin.slot));
+  LoadedPlugin lp;
+  lp.inst = std::move(inst);
+  lp.id = t.plugin.id;
+  PluginInstance* raw = lp.inst.get();
+  plugins_[t.plugin.slot] = std::move(lp);
+  return raw;
+}
+
+std::string App::plugin_error(const Track& t) const {
+  if (t.plugin.id.empty()) return "";
+  auto it = plugin_errors_.find(t.plugin.slot);
+  return it == plugin_errors_.end() ? std::string() : it->second;
+}
+
+uint32_t App::next_plugin_slot() const {
+  uint32_t most = 0;
+  for (const Track& t : project_.tracks) most = std::max(most, t.plugin.slot);
+  for (const auto& kv : plugins_) most = std::max(most, kv.first);
+  for (const auto& kv : plugin_errors_) most = std::max(most, kv.first);
+  return most + 1;
+}
+
+void App::choose_plugin(int track, const PluginInfo& info) {
+  if (track < 0 || track >= int(project_.tracks.size())) return;
+  capture_plugin_states();  // the one it played keeps its sound, for an undo
+  Track t = project_.tracks[size_t(track)];
+  t.instrument = InstrumentType::Plugin;
+  t.plugin = PluginSettings{info.id, info.path, info.name, next_plugin_slot(), {}};
+  history_.change_track(track, t);
+}
+
+void App::plugin_changed() {
+  plugin_dirty_ = true;
+  last_edit_us_ = p_.micros();
+}
+
+void App::capture_plugin_states() {
+  for (Track& t : project_.tracks) {
+    if (t.plugin.id.empty()) continue;
+    auto it = plugins_.find(t.plugin.slot);
+    if (it == plugins_.end() || it->second.id != t.plugin.id) continue;
+    std::vector<uint8_t> state;
+    if (it->second.inst->save_state(state)) t.plugin.state = std::move(state);
+  }
+}
+
+void App::retire_plugins() {
+  for (auto& kv : plugins_) {
+    kv.second.idle = false;
+    retired_plugins_.push_back(std::move(kv.second));
+  }
+  plugins_.clear();
+  plugin_errors_.clear();
+}
+
+// Every frame. Each instance does what it asked to on this thread. One no snapshot plays any more
+// is let go of once the engine has (the snapshot after it playing, two callbacks on): told so,
+// so it lets go of its notes, and freed when no track names its slot (or it was another song's).
+void App::tend_plugins() {
+  const uint64_t callbacks = engine_->callbacks();
+  auto engine_done = [&](const LoadedPlugin& lp) {
+    return lp.idle && engine_->playing_revision() >= lp.idle_snapshot && callbacks >= lp.idle_callbacks + 2;
+  };
+  for (auto it = plugins_.begin(); it != plugins_.end();) {
+    LoadedPlugin& lp = it->second;
+    lp.inst->idle();
+    bool played = false, named = false;
+    for (const Track& t : project_.tracks)
+      if (t.plugin.slot == it->first && t.plugin.id == lp.id) {
+        named = true;
+        played = played || t.instrument == InstrumentType::Plugin;
+      }
+    if (played) {
+      lp.idle = lp.released = false;
+      ++it;
+      continue;
+    }
+    if (!lp.idle) {
+      lp.idle = true;
+      lp.idle_snapshot = snapshot_counter_;
+      lp.idle_callbacks = callbacks;
+    }
+    if (engine_done(lp) && !named) {
+      it = plugins_.erase(it);
+      continue;
+    }
+    if (engine_done(lp) && !lp.released) {
+      lp.inst->released();
+      lp.released = true;
+    }
+    ++it;
+  }
+  for (auto it = retired_plugins_.begin(); it != retired_plugins_.end();) {
+    if (!it->idle) {
+      it->idle = true;
+      it->idle_snapshot = snapshot_counter_;
+      it->idle_callbacks = callbacks;
+    }
+    if (engine_done(*it)) it = retired_plugins_.erase(it);
+    else ++it;
+  }
+}
+#endif
 
 }  // namespace twill

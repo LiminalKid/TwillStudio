@@ -5,7 +5,7 @@
 # The sysroot holds the device's SDL2, SDL2_ttf, SDL2_image and alsa-lib with their Debian headers
 # and pkg-config files; tools/make-sndstation-sysroot.sh builds it. Override its location with
 # -DTWILL_SYSROOT=... or the TWILL_SYSROOT environment variable. The sndstation SDK's source is
-# found with -DSNDSTATION_DIR=... (default ~/SDKs/sndstation).
+# found with -DSNDSTATION_DIR=..., $SNDSTATION_DIR, or the usual checkouts (CMakeLists.txt).
 
 set(CMAKE_SYSTEM_NAME Linux)
 set(CMAKE_SYSTEM_PROCESSOR aarch64)

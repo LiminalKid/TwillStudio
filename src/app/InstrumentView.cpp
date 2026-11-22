@@ -109,6 +109,63 @@ std::vector<InstrumentView::Row> InstrumentView::rows() {
   inst.adjust = [&app, track](int step, bool) { app.step_sound(track, step); };
   out.push_back(inst);
 
+#if TWILL_PLUGINS
+  if (t.instrument == InstrumentType::Plugin) {
+    Row pick;
+    pick.label = "Plugin";
+    pick.value = [&app, track] {
+      const PluginSettings& pl = app.project().tracks[size_t(track)].plugin;
+      return pl.name.empty() ? std::string("None: A to choose") : pl.name;
+    };
+    pick.press = [this] { open_plugins(); };
+    out.push_back(pick);
+    PluginInstance* inst = app.plugin_instance(t);
+    if (!inst) {
+      const std::string why = app.plugin_error(t);
+      if (!why.empty()) {
+        Row status;
+        status.label = "Not loaded";
+        status.value = [why] { return why; };
+        out.push_back(status);
+      }
+      return out;
+    }
+    // Its parameters, read once for the rows; each moves it at once (not an edit: its state is the
+    // plugin's, saved with the song).
+    auto ps = std::make_shared<std::vector<PluginInstance::Param>>(inst->params());
+    for (size_t i = 0; i < ps->size() && i < 64; ++i) {
+      Row row;
+      row.label = (*ps)[i].name;
+      row.value = [ps, i, inst] {
+        const PluginInstance::Param& q = (*ps)[i];
+        std::string v = inst->param_text(q.id, q.value);
+        if (v.empty()) {
+          char b[32];
+          std::snprintf(b, sizeof b, q.stepped ? "%.0f" : "%.2f", q.value);
+          v = b;
+        }
+        return v;
+      };
+      row.fraction = [ps, i] {
+        const PluginInstance::Param& q = (*ps)[i];
+        return q.max > q.min ? float((q.value - q.min) / (q.max - q.min)) : 0.0f;
+      };
+      row.adjust = [&app, ps, i, inst](int step, bool coarse) {
+        const PluginInstance::Param& q = (*ps)[i];
+        const double range = q.max - q.min;
+        const double by = q.stepped ? (coarse ? std::max(1.0, std::round(range / 10)) : 1.0) : range * (coarse ? 0.1 : 0.01);
+        inst->set_param(q.id, std::max(q.min, std::min(q.max, q.value + step * by)));
+        app.plugin_changed();
+      };
+      row.reset = [&app, ps, i, inst] {
+        inst->set_param((*ps)[i].id, (*ps)[i].def);
+        app.plugin_changed();
+      };
+      out.push_back(row);
+    }
+    return out;
+  }
+#endif
   if (t.instrument == InstrumentType::MidiOut) {
     Row ch;
     ch.label = "MIDI channel";
@@ -603,6 +660,9 @@ void InstrumentView::browser_input() {
 
 void InstrumentView::handle_input() {
   if (browser_open_) return browser_input();
+#if TWILL_PLUGINS
+  if (plugins_open_) return plugins_input();
+#endif
   const InputTracker& in = app_.input();
   std::vector<Row> list = rows();
   const int n = int(list.size());
@@ -631,6 +691,9 @@ void InstrumentView::handle_input() {
 }
 
 std::vector<Hint> InstrumentView::hints() const {
+#if TWILL_PLUGINS
+  if (plugins_open_) return {{"Up/Down", "move"}, {"R+Up/Down", "by 10"}, {"A", "pick"}, {"B", "cancel"}};
+#endif
   if (browser_open_)
     return {{"A", "open/pick"}, {"Y", "listen"}, {"B", "up a folder"}, {"X", "cancel"}, {"Left/Right", "top/end"},
             {"R+Up/Down", "by 10"}};
@@ -658,6 +721,9 @@ void InstrumentView::draw(Canvas& c) {
   const Theme& th = app_.theme();
   const Rect content = app_.content_rect();
   if (browser_open_) return draw_browser(c, content);
+#if TWILL_PLUGINS
+  if (plugins_open_) return draw_plugins(c, content);
+#endif
   const Track& t = app_.project().tracks[size_t(app_.track())];
   std::vector<Row> list = rows();
   const Font& f = Font::get(FontFace::CondensedSemiBold, app_.u(kText));
@@ -699,6 +765,9 @@ void InstrumentView::draw(Canvas& c) {
   const int rule = std::max(1, int(app_.u(1)));
   Rect pic{list_r.right() + rule, content.y, content.right() - list_r.right() - rule, content.h};
   c.fill(pic, th.background);
+#if TWILL_PLUGINS
+  if (t.instrument == InstrumentType::Plugin) return draw_plugin(c, pic, t);
+#endif
   if (t.instrument == InstrumentType::MidiOut) {
     const Font& big = Font::get(FontFace::CondensedBold, app_.u(26));
     const Font& sm = Font::get(FontFace::Regular, app_.u(kText));
@@ -1226,5 +1295,92 @@ void InstrumentView::draw_browser(Canvas& c, const Rect& r) {
            sel ? th.chip_active_text : e.is_dir ? th.text : th.text_secondary);
   }
 }
+
+#if TWILL_PLUGINS
+// --- Plugins ----------------------------------------------------------------------------------
+
+void InstrumentView::open_plugins() {
+  PluginHost* host = app_.plugin_host();
+  if (!host) return;
+  plugin_list_ = host->list();
+  if (plugin_list_.empty()) {
+    app_.message("No plugins installed");
+    return;
+  }
+  const PluginSettings& now = app_.project().tracks[size_t(app_.track())].plugin;
+  psel_ = ptop_ = 0;
+  for (size_t i = 0; i < plugin_list_.size(); ++i)
+    if (plugin_list_[i].id == now.id) psel_ = int(i);
+  plugins_open_ = true;
+  app_.invalidate_all();
+}
+
+void InstrumentView::plugins_input() {
+  const InputTracker& in = app_.input();
+  const int n = int(plugin_list_.size());
+  const int by = in.held(kR) ? 10 : 1;
+  if (in.pressed(kB) || in.pressed(kX)) {
+    plugins_open_ = false;
+    app_.invalidate_all();
+    return;
+  }
+  if (n > 0 && in.pressed_or_repeat(kUp)) psel_ = std::max(0, psel_ - by);
+  if (n > 0 && in.pressed_or_repeat(kDown)) psel_ = std::min(n - 1, psel_ + by);
+  if (n > 0 && in.pressed(kA)) {
+    app_.choose_plugin(app_.track(), plugin_list_[size_t(psel_)]);
+    plugins_open_ = false;
+    sel_ = 0;
+    app_.invalidate_all();
+    return;
+  }
+  app_.invalidate(app_.content_rect());
+}
+
+void InstrumentView::draw_plugins(Canvas& c, const Rect& r) {
+  const Theme& th = app_.theme();
+  const Font& f = Font::get(FontFace::Regular, app_.u(kText));
+  const Font& fb = Font::get(FontFace::SemiBold, app_.u(kText));
+  const Font& small = Font::get(FontFace::Regular, app_.u(kSmall));
+  c.fill(r, th.panel);
+  c.fill(Rect{r.x, r.y, r.w, int(app_.u(24))}, th.header);
+  const std::string title = "Plugins: " + std::to_string(plugin_list_.size()) + " installed";
+  c.text(small, r.x + app_.u(12), r.y + int(app_.u(16)), title.c_str(), th.text_secondary);
+  const int row_h = int(app_.u(kRowH));
+  const int top_y = r.y + int(app_.u(28));
+  const int visible = std::max(1, (r.bottom() - top_y) / row_h);
+  if (psel_ < ptop_) ptop_ = psel_;
+  if (psel_ >= ptop_ + visible) ptop_ = psel_ - visible + 1;
+  for (int i = ptop_; i < int(plugin_list_.size()) && i < ptop_ + visible; ++i) {
+    const int y = top_y + (i - ptop_) * row_h;
+    Rect rr{r.x + int(app_.u(6)), y, r.w - int(app_.u(12)), row_h};
+    const bool sel = i == psel_;
+    if (sel) c.fill(Rect{rr.x, rr.y + 1, rr.w, rr.h - 2}, th.chip_active);
+    const PluginInfo& p = plugin_list_[size_t(i)];
+    const int base = f.baseline_in(y, row_h);
+    const float vendor_w = f.measure(p.vendor.c_str());
+    const std::string name = fit_text(fb, p.name, rr.w - app_.u(30) - vendor_w);
+    c.text(fb, rr.x + app_.u(10), base, name.c_str(), sel ? th.chip_active_text : th.text);
+    c.text(f, rr.right() - app_.u(10) - vendor_w, base, p.vendor.c_str(),
+           sel ? th.chip_active_text : th.text_secondary);
+  }
+}
+
+void InstrumentView::draw_plugin(Canvas& c, const Rect& r, const Track& t) {
+  const Theme& th = app_.theme();
+  const Font& big = Font::get(FontFace::CondensedBold, app_.u(26));
+  const Font& sm = Font::get(FontFace::Regular, app_.u(kText));
+  const int x = r.x + int(app_.u(16)), w = r.w - int(app_.u(32));
+  c.text(big, x, r.y + int(app_.u(70)), "PLUGIN", th.track_ink(int(t.colour)));
+  if (t.plugin.name.empty()) {
+    c.text(sm, x, r.y + int(app_.u(96)), "None yet: A on Plugin to choose one", th.text_secondary);
+    return;
+  }
+  const std::string name = fit_text(sm, t.plugin.name, float(w));
+  c.text(sm, x, r.y + int(app_.u(96)), name.c_str(), th.text);
+  const std::string why = app_.plugin_error(t);
+  const std::string status = !why.empty() ? fit_text(sm, why, float(w)) : "Plays the notes; Y to hear it";
+  c.text(sm, x, r.y + int(app_.u(116)), status.c_str(), th.text_secondary);
+}
+#endif
 
 }  // namespace twill

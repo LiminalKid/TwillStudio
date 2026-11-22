@@ -211,6 +211,9 @@ void Engine::apply_command(const Command& c) {
       playing_.store(false);
       release_all();
       flush_midi_notes();
+#if TWILL_PLUGINS
+      plugins_all_off();
+#endif
       break;
     case Command::Locate:
       reset_midi_cc();
@@ -226,6 +229,12 @@ void Engine::apply_command(const Command& c) {
         n.velocity = 102;  // 0.8 of full scale
         const SnapTrack& t = snap_->tracks[size_t(c.track)];
         const int64_t gate = std::max<int64_t>(kSubBlock, int64_t(c.value * kSampleRate));
+#if TWILL_PLUGINS
+        if (t.instrument == InstrumentType::Plugin) {
+          plugin_note(c.track, c.pitch, uint8_t(n.velocity), gate);
+          break;
+        }
+#endif
         if (t.instrument == InstrumentType::MidiOut) {  // heard on the MIDI device
           midi_note(t, c.pitch, uint8_t(n.velocity), gate);
           break;
@@ -247,6 +256,12 @@ void Engine::apply_command(const Command& c) {
     case Command::LiveOn:
       if (snap_ && c.track >= 0 && c.track < int(snap_->tracks.size())) {
         const SnapTrack& t = snap_->tracks[size_t(c.track)];
+#if TWILL_PLUGINS
+        if (t.instrument == InstrumentType::Plugin) {
+          plugin_note(c.track, c.pitch, uint8_t(c.value), 0);
+          break;
+        }
+#endif
         if (t.instrument == InstrumentType::MidiOut) {
           midi_note(t, c.pitch, uint8_t(c.value), 0);
           break;
@@ -261,6 +276,13 @@ void Engine::apply_command(const Command& c) {
       }
       break;
     case Command::LiveOff:
+#if TWILL_PLUGINS
+      if (snap_ && c.track >= 0 && c.track < int(snap_->tracks.size()) &&
+          snap_->tracks[size_t(c.track)].instrument == InstrumentType::Plugin) {
+        plugin_event(c.track, c.pitch, 0, clock_);
+        break;
+      }
+#endif
       if (snap_ && c.track >= 0 && c.track < int(snap_->tracks.size()) &&
           snap_->tracks[size_t(c.track)].instrument == InstrumentType::MidiOut) {
         midi_out_.push(MidiEvent{MidiEvent::Now, clock_, 0,
@@ -578,6 +600,13 @@ void Engine::start_note(int track, const Note& n, double tps) {
     if (int(rng_ % 100) >= n.probability) return;
   }
   const SnapTrack& t = snap_->tracks[size_t(track)];
+#if TWILL_PLUGINS
+  if (t.instrument == InstrumentType::Plugin) {
+    plugin_note(track, n.pitch, n.velocity, std::max<int64_t>(kSubBlock, int64_t(n.length / tps)));
+    if (observer_) observer_->note_on(track, n.pitch, clock_, MacroParams());
+    return;
+  }
+#endif
   if (t.instrument == InstrumentType::MidiOut) {
     const int64_t gate = std::max<int64_t>(kSubBlock, int64_t(n.length / tps));
     // Locked controllers go out just before the note, and hold until it ends.
@@ -885,6 +914,9 @@ void Engine::render_block(float* out, int frames) {
       }
       if (!used) v->track = -1;
     }
+#if TWILL_PLUGINS
+    sync_plugins();
+#endif
     revision_.store(snap_->revision);
   }
   for (Snapshot*& slot : pending_free_)
@@ -918,6 +950,10 @@ void Engine::render_block(float* out, int frames) {
     const int n = std::min(int(kSubBlock - clock_ % kSubBlock), frames - pos);
     const bool grid_start = clock_ % kSubBlock == 0;
     const bool grid_end = (clock_ + uint64_t(n)) % kSubBlock == 0;
+#if TWILL_PLUGINS
+    // A plugin block ends here: each plugin plays it, and it sounds over the one starting.
+    if (clock_ % kPluginBlock == 0) run_plugins();
+#endif
     if (playing && grid_start) {
       // Notes for the whole grid block start at its first sample. Ticks come from the anchor
       // rather than being summed per block, so long playback doesn't drift.
@@ -943,6 +979,16 @@ void Engine::render_block(float* out, int frames) {
       } else if (p.samples > 0) {
         p.samples -= n;
       }
+#if TWILL_PLUGINS
+    // Plugin notes due to end.
+    for (PluginOff& p : plugin_offs_)
+      if (p.samples > 0 && p.samples <= n) {
+        plugin_event(p.track, p.pitch, 0, clock_ + uint64_t(p.samples));
+        p.samples = 0;
+      } else if (p.samples > 0) {
+        p.samples -= n;
+      }
+#endif
     // MIDI clock: 24 a beat, on its own steady grid (not the song position, which jumps at loops).
     if (playing && snap_->midi_clock_out) {
       const double every = 60.0 * kSampleRate / (tempo() * 24);
@@ -1112,6 +1158,40 @@ void Engine::render_block(float* out, int frames) {
       ++active;
     }
 
+#if TWILL_PLUGINS
+    // Plugin tracks: what each played for the last plugin block, through the track's level, pan
+    // (balance: a plugin is stereo) and sends, with their automation, as a voice is.
+    for (int ti = 0; ti < int(snap_->tracks.size()) && ti < kMaxTracks; ++ti) {
+      PluginTrack& pt = plugin_[ti];
+      if (!pt.inst) continue;
+      const SnapTrack& t = snap_->tracks[size_t(ti)];
+      float track_level = t.level, track_pan = t.pan;
+      float send_c = t.send_chorus, send_d = t.send_delay, send_r = t.send_reverb;
+      for (int li = 0; li < lane_counts_[ti]; ++li) {
+        const LaneValue& lv = lane_values_[ti][li];
+        if (lv.id == kParamLevel) track_level = lv.value;
+        if (lv.id == kParamPan) track_pan = lv.value;
+        if (lv.id == kParamSendChorus) send_c = lv.value;
+        if (lv.id == kParamSendDelay) send_d = lv.value;
+        if (lv.id == kParamSendReverb) send_r = lv.value;
+      }
+      const float pan = std::max(-1.0f, std::min(1.0f, track_pan));
+      const float gl = (pan > 0 ? 1 - pan : 1) * track_level, gr = (pan < 0 ? 1 + pan : 1) * track_level;
+      const int at = int(clock_ % kPluginBlock);
+      float* o = out + 2 * pos;
+      float& meter = peaks[ti];
+      for (int i = 0; i < n; ++i) {
+        const float l = pt.out[0][at + i] * gl, r = pt.out[1][at + i] * gr;
+        o[2 * i] += l;
+        o[2 * i + 1] += r;
+        bus_chorus[2 * i] += l * send_c, bus_chorus[2 * i + 1] += r * send_c;
+        bus_delay[2 * i] += l * send_d, bus_delay[2 * i + 1] += r * send_d;
+        bus_reverb[2 * i] += l * send_r, bus_reverb[2 * i + 1] += r * send_r;
+        meter = std::max(meter, std::max(std::fabs(l), std::fabs(r)));
+      }
+    }
+#endif
+
     // Effects returns. They run every block (their tails keep ringing after a send goes to zero);
     // with nothing sent their output is exactly zero.
     effects_->process(mix_, float(tempo()), bus_chorus, bus_delay, bus_reverb, out + 2 * pos, n);
@@ -1154,5 +1234,81 @@ void Engine::render_block(float* out, int frames) {
     voice_zones_[i].store(z, std::memory_order_relaxed);
   }
 }
+
+#if TWILL_PLUGINS
+// A note on or off for a plugin track, at `sample` on the engine's clock: timed within the plugin
+// block being gathered (an off due exactly at its end goes in as its last frame).
+void Engine::plugin_event(int track, uint8_t pitch, uint8_t velocity, uint64_t sample) {
+  if (track < 0 || track >= kMaxTracks || pitch > 127) return;
+  PluginTrack& pt = plugin_[track];
+  if (!pt.inst) return;
+  if (velocity == 0) {
+    if (pt.held[pitch] == 0) return;  // never struck, or already let go
+    --pt.held[pitch];
+  } else if (pt.held[pitch] < 255) {
+    ++pt.held[pitch];
+  }
+  if (pt.count >= int(sizeof pt.events / sizeof pt.events[0])) return;
+  const uint64_t block = clock_ - clock_ % kPluginBlock;
+  const uint64_t into = sample > block ? sample - block : 0;
+  pt.events[pt.count++] = PluginEvent{uint32_t(std::min<uint64_t>(into, kPluginBlock - 1)), pitch, velocity};
+}
+
+// A note now, and its end `gate` samples later (none: a live note, ended by the keyboard).
+void Engine::plugin_note(int track, uint8_t pitch, uint8_t velocity, int64_t gate) {
+  plugin_event(track, pitch, std::max<uint8_t>(1, velocity), clock_);
+  if (gate <= 0) return;
+  for (PluginOff& p : plugin_offs_)
+    if (p.samples <= 0) {
+      p = PluginOff{track, pitch, gate};
+      return;
+    }
+  plugin_event(track, pitch, 0, clock_);  // no room to wait: end it now
+}
+
+// Stop: every note a plugin holds let go of.
+void Engine::plugins_all_off() {
+  for (PluginOff& p : plugin_offs_) p.samples = 0;
+  for (int ti = 0; ti < kMaxTracks; ++ti)
+    for (int k = 0; k < 128; ++k)
+      while (plugin_[ti].held[k]) plugin_event(ti, uint8_t(k), 0, clock_);
+}
+
+// The new snapshot's instances, track by track. One that moved to another track takes its notes,
+// its pending block and its output with it; one that went is no longer played (the app lets go of
+// its notes once nothing plays it: PluginInstance::released).
+void Engine::sync_plugins() {
+  PluginTrack was[kMaxTracks];
+  for (int ti = 0; ti < kMaxTracks; ++ti) was[ti] = plugin_[ti];
+  for (int ti = 0; ti < kMaxTracks; ++ti) {
+    PluginInstance* inst = nullptr;
+    if (ti < int(snap_->tracks.size()) && snap_->tracks[size_t(ti)].instrument == InstrumentType::Plugin)
+      inst = snap_->tracks[size_t(ti)].plugin;
+    PluginTrack& pt = plugin_[ti];
+    if (pt.inst == inst) continue;
+    pt = PluginTrack{};
+    pt.inst = inst;
+    if (!inst) continue;
+    for (int from = 0; from < kMaxTracks; ++from)
+      if (was[from].inst == inst) {
+        pt = was[from];
+        for (PluginOff& p : plugin_offs_)
+          if (p.track == from && p.samples > 0) p.track = ti;
+        break;
+      }
+  }
+  // Notes waiting to end on a track that has no plugin now: gone with it.
+  for (PluginOff& p : plugin_offs_)
+    if (p.samples > 0 && (p.track < 0 || p.track >= kMaxTracks || !plugin_[p.track].inst)) p.samples = 0;
+}
+
+void Engine::run_plugins() {
+  for (PluginTrack& pt : plugin_) {
+    if (!pt.inst) continue;
+    pt.inst->process(pt.events, pt.count, pt.out[0], pt.out[1], kPluginBlock);
+    pt.count = 0;
+  }
+}
+#endif
 
 }  // namespace twill

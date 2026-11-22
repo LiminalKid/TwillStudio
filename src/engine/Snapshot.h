@@ -10,6 +10,9 @@
 
 #include "model/Multisample.h"
 #include "model/Project.h"
+#if TWILL_PLUGINS
+#include "platform/Plugins.h"
+#endif
 
 namespace twill {
 
@@ -17,6 +20,11 @@ struct SampleData;
 // Finds a loaded sample by path (on the UI thread, while building a snapshot). The samples must
 // stay alive while any snapshot or voice may use them (the app's sample cache keeps them).
 using SampleResolver = std::function<const SampleData*(const std::string& path)>;
+#if TWILL_PLUGINS
+// The loaded plugin a Plugin track plays (on the UI thread, while building a snapshot); null if none.
+// The app keeps it alive while any snapshot may use it.
+using PluginResolver = std::function<PluginInstance*(const Track& t)>;
+#endif
 // The same for a multisample's preset, read with its zones (and their samples loaded, so `samples`
 // finds them); null when it can't be read.
 using MultisampleResolver = std::function<const Multisample*(const std::string& path)>;
@@ -89,6 +97,9 @@ struct SnapTrack {
   Modulator mods[kModulators];
   int midi_channel = 0;
   int midi_cc[2] = {1, 74};
+#if TWILL_PLUGINS
+  PluginInstance* plugin = nullptr;  // Plugin tracks: what plays them
+#endif
   bool audible = true;  // mute and solo, already resolved
   std::vector<SnapPlacement> placements;  // sorted by start
 };
@@ -108,6 +119,10 @@ struct Snapshot {
 // device; design §6, "Track count").
 std::unique_ptr<Snapshot> build_snapshot(const Project& p, int max_tracks, uint64_t revision,
                                          const SampleResolver& samples = nullptr,
-                                         const MultisampleResolver& multisamples = nullptr);
+                                         const MultisampleResolver& multisamples = nullptr
+#if TWILL_PLUGINS
+                                         , const PluginResolver& plugins = nullptr
+#endif
+);
 
 }  // namespace twill
