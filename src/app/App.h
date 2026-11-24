@@ -2,8 +2,9 @@
 // current view; draws the top bar, the view and the hint bar; autosaves.
 //
 // Global buttons (design §7): Select + left/right switches view, Select + B undoes, Select + A
-// redoes, Select + up/down moves between notes and lanes in the roll, Select + X arms recording
-// from MIDI, Start plays/stops, Select + Start plays from the cursor, Menu + Start quits.
+// redoes, Select + up/down moves between notes and lanes in the roll, Menu or Select + X opens the
+// settings of what the screen shows, Start plays/stops, L or R + Start plays from the cursor, Menu +
+// Start quits.
 #pragma once
 #include <cstdint>
 #include <deque>
@@ -112,20 +113,22 @@ class App {
   void show(View v);
   // Moves through the views in order (arrangement, roll, sound, mixer), wrapping round.
   void step_view(int by);
-  // The main menu (song files, the song's tempo and key, MIDI, the app's settings, help): Select + X
-  // from any view, Menu in the arrangement and mixer. It's titled kMainMenuTitle, with build_id()
-  // beside the title.
+  // The main menu (song files, the song's tempo and key, MIDI, the app's settings, help): Menu or
+  // Select + X in the arrangement and mixer, and the last row of the clip's and the track's
+  // settings. It's titled kMainMenuTitle, with build_id() beside the title.
   static constexpr const char* kMainMenuTitle = "Main menu";
-  static std::string build_id();  // "0.6.0 500fa1e"
+  static std::string build_id();  // "0.7.0 500fa1e"
   void open_main_menu();
-  void toggle_main_menu();
-  // Menu: the settings of what the screen shows (the main menu in the arrangement and mixer, the
-  // clip in the roll, the track in the sound view), or puts them away if open.
+  // Menu, or Select + X: the settings of what the screen shows (the main menu in the arrangement
+  // and mixer, the clip in the roll, the track in the sound view), or puts them away if open. The
+  // clip's and the track's end with a row that opens the main menu.
   void toggle_screen_menu();
   // Arms or disarms recording from MIDI (the settings panel's "Record from MIDI").
   void toggle_recording();
   // A panel listing every button combination.
   void open_controls();
+  bool quit_menu_open() const { return quit_menu_; }
+  std::vector<std::string> quit_menu_items() const;  // as shown, top first
   View view() const { return view_; }
 
   void audition(int track, int pitch);
@@ -167,6 +170,11 @@ class App {
   void add_render_fields(std::vector<InspectorField>& fields);
   void add_midi_fields(std::vector<InspectorField>& fields);
   void open_about();  // version, commit and build date
+  // A screenshot on request, for a handheld whose screen can't be read from outside: when the file
+  // kScreenshotRequest appears in the data folder, the frame on screen is saved as
+  // screenshots/screen-N.bmp (the first N not taken) and the request removed. Checked twice a second.
+  static constexpr const char* kScreenshotRequest = "screenshot.request";
+  static std::vector<uint8_t> encode_bmp(const Canvas& c);  // 24-bit, the whole canvas
   // Project files, in projects/ in the data folder.
   bool save_project_file();
   bool load_project_file(const std::string& name);
@@ -222,10 +230,31 @@ class App {
   void choose_plugin(int track, const PluginInfo& info);
   // A plugin's own parameter moved (not an edit of the project): the song is saved, as after one.
   void plugin_changed();
+  // The track's plugin's own screen (PluginInstance::has_screen), over the whole display with the
+  // buttons its, until Menu (or the plugin asks to close it). The music plays on meanwhile. False
+  // if it has none or won't open it.
+  bool open_plugin_screen(int track);
+  bool plugin_screen_open() const { return screen_.inst != nullptr; }
+  void close_plugin_screen();
 #endif
 
  private:
   void handle_global();
+  // The quit menu, where Menu is for quitting (Platform::menu_quits: sndstation): over whatever
+  // shows, a plugin's screen too, until A on an item, B or Menu.
+  struct QuitItem {
+    std::string label;
+    enum Action { Back, Sleep, Quit } action;
+  };
+  bool quit_menu_ = false;
+  int quit_sel_ = 0;
+  std::vector<QuitItem> quit_items_;
+  void open_quit_menu();
+  void close_quit_menu();
+  void handle_quit_menu();
+  void draw_quit_menu(Canvas& c);
+  void screenshot_if_asked(const Canvas& c);
+  uint64_t screenshot_checked_us_ = 0;
   void handle_inspector();
   void pump_loads();  // takes a finished preset load, and starts the next
   void apply_pick(int track, const std::string& path, const Multisample& m);
@@ -298,6 +327,15 @@ class App {
   void tend_plugins();                               // every frame: idle(), and what nothing plays
   void retire_plugins();                             // a new song: every instance let go of
   uint32_t next_plugin_slot() const;
+  struct PluginScreen {
+    PluginInstance* inst = nullptr;  // null: none open
+    int w = 0, h = 0;                // the size it draws at
+    std::vector<uint32_t> pixels;    // its last frame
+    uint32_t ignored = 0;            // held when it opened: not its until let go of
+    bool cleared = false;            // the display is blanked round it
+  } screen_;
+  void run_plugin_screen(Canvas& c);  // a frame of it: its buttons, then what it drew
+  void forget_plugin_screen(const PluginInstance* inst);  // closed first if `inst` is its plugin
 #endif
   std::map<std::string, std::shared_ptr<Multisample>> multisamples_;
   std::map<std::string, std::string> multisample_errors_;

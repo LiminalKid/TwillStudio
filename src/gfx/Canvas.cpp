@@ -166,6 +166,17 @@ float Canvas::text(const Font& font, float x, int baseline, const char* s, Color
   return pen;
 }
 
+void Canvas::blit(const uint32_t* src, int w, int h, int stride, int x, int y) {
+  const Rect cr = Rect{x, y, w, h}.intersect(clip_);
+  if (cr.empty() || !src) return;
+  mark_dirty(cr);
+  for (int row = 0; row < cr.h; ++row) {
+    const uint32_t* s = src + size_t(cr.y - y + row) * size_t(stride) + (cr.x - x);
+    uint32_t* d = &pixels_[size_t(cr.y + row) * width_ + cr.x];
+    for (int i = 0; i < cr.w; ++i) d[i] = s[i] | 0xff000000u;
+  }
+}
+
 void Canvas::mark_dirty(const Rect& r) {
   if (r.empty()) return;
   for (Rect& d : dirty_) {

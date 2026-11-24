@@ -190,6 +190,8 @@ void ArrangementView::open_track_settings(int track, int select_row) {
                       app.history().clear_track(track);
                       open_track_settings(track, row);  // new name and sound; last, as above
                     }});
+  // The way up to the main menu (Menu and Select + X open this panel in the sound view).
+  fields.push_back({"Main menu", [] { return std::string("press A"); }, nullptr, [&app] { app.open_main_menu(); }});
   app.open_inspector(app.project().tracks[size_t(track)].name, std::move(fields));
   if (select_row > 0) app.select_inspector_row(select_row);
 }

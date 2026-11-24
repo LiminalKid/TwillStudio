@@ -2582,7 +2582,7 @@ void test_ui_lane_velocity_and_automation() {
   CHECK(lane && std::fabs(lane->points[0].value - 0.52f) < 1e-4f);
 }
 
-// Menu opens the settings of what the screen shows; Select + X the main menu from anywhere.
+// Menu, or Select + X, opens the settings of what the screen shows.
 void test_ui_menu_opens_project() {
   UiDriver ui;
   ui.tap(twill::kMenu);  // the arrangement: the main menu
@@ -2619,19 +2619,36 @@ void test_ui_menu_opens_project() {
   CHECK(ui.app.inspector_title() == "Main menu");
   ui.tap(twill::kMenu);  // still Menu's: a tap puts it away
   CHECK(!ui.app.inspector_open());
-  // X on the note is still the note's panel; Select + X the main menu, and again to close it.
+  // X on the note is still the note's panel; Select + X is Menu: the clip's panel, and again to
+  // close it.
   ui.tap(twill::kX);
   CHECK(ui.app.inspector_title() == "1 note");
   ui.tap(twill::kB);
   ui.tap(twill::kX, twill::kSelect);
-  CHECK(ui.app.inspector_title() == "Main menu");
+  CHECK_MSG(ui.app.inspector_title() == "Clip", "panel \"%s\"", ui.app.inspector_title().c_str());
   ui.tap(twill::kX, twill::kSelect);
   CHECK(!ui.app.inspector_open());
-  // The sound view: the track's settings.
+  // The sound view: the track's settings, from Menu and from Select + X; their last row is the main
+  // menu.
   ui.tap(twill::kRight, twill::kSelect);
   ui.tap(twill::kMenu);
   CHECK(ui.app.inspector_open() && ui.app.inspector_title() != "Main menu" && ui.app.inspector_title() != "Clip");
+  const std::string track_panel = ui.app.inspector_title();
+  CHECK(ui.app.inspector_fields().back().label == "Main menu");
   ui.tap(twill::kMenu);
+  CHECK(!ui.app.inspector_open());
+  ui.tap(twill::kX, twill::kSelect);
+  CHECK(ui.app.inspector_title() == track_panel);
+  CHECK(ui.go_to_row("Main menu"));
+  ui.tap(twill::kA);
+  CHECK(ui.app.inspector_title() == "Main menu");
+  ui.tap(twill::kX, twill::kSelect);
+  CHECK(!ui.app.inspector_open());
+  // The mixer and the arrangement: the main menu, from Select + X as from Menu.
+  ui.tap(twill::kRight, twill::kSelect);
+  ui.tap(twill::kX, twill::kSelect);
+  CHECK(ui.app.inspector_title() == "Main menu");
+  ui.tap(twill::kX, twill::kSelect);
   CHECK(!ui.app.inspector_open());
 }
 
@@ -2810,7 +2827,8 @@ void test_ui_move_and_clear_track() {
   CHECK(ui.app.track() == 1);
   ui.tap(twill::kX);     // Snare's settings, on Engine
   ui.tap(twill::kUp);    // Name,
-  ui.tap(twill::kUp);    // then from the top round to the last rows: Clear track,
+  ui.tap(twill::kUp);    // then from the top round to the last rows: Main menu,
+  ui.tap(twill::kUp);    // Clear track,
   ui.tap(twill::kUp);    // then Position
   const uint32_t colour = ui.app.project().tracks[1].colour;
   ui.tap(twill::kRight);  // one place down
@@ -3406,6 +3424,58 @@ void test_ui_autosave_and_reload() {
   second.stop();
 }
 
+// A screenshot on request: the request file is taken, and the frame saved as a BMP the canvas's
+// size, the next one under a new number.
+void test_ui_screenshot_on_request() {
+  UiDriver ui;
+  ui.platform.write_file(twill::App::kScreenshotRequest, {});
+  for (int i = 0; i < 40; ++i) ui.step(0);  // over half a second
+  std::vector<uint8_t> bmp;
+  CHECK(ui.platform.read_file("screenshots/screen-1.bmp", bmp));
+  std::vector<uint8_t> left;
+  CHECK(!ui.platform.read_file(twill::App::kScreenshotRequest, left));
+  CHECK(bmp.size() == 54 + size_t(1024 * 3) * 768 && bmp[0] == 'B' && bmp[1] == 'M');
+  CHECK(bmp == twill::App::encode_bmp(ui.canvas));
+  ui.platform.write_file(twill::App::kScreenshotRequest, {});
+  for (int i = 0; i < 40; ++i) ui.step(0);
+  CHECK(ui.platform.read_file("screenshots/screen-2.bmp", bmp));
+}
+
+// Where Menu is for quitting (sndstation), it opens the quit menu over any view, cursor on Back:
+// Up/Down choose, A does it, B or Menu closes it; Select + X still opens the screen's settings.
+void test_ui_quit_menu() {
+  UiDriver ui;
+  ui.platform.menu_is_for_quitting = true;
+  ui.tap(twill::kMenu);
+  CHECK(ui.app.quit_menu_open() && !ui.app.inspector_open());
+  CHECK((ui.app.quit_menu_items() == std::vector<std::string>{"Back to Twill", "Sleep", "Quit Twill"}));
+  ui.tap(twill::kA);  // Back to Twill: closed
+  CHECK(!ui.app.quit_menu_open() && !ui.app.inspector_open());
+  ui.tap(twill::kMenu);
+  const size_t placed = ui.app.project().tracks[0].arrangement.size();
+  ui.tap(twill::kB);  // closes it, and its release deletes nothing
+  CHECK(!ui.app.quit_menu_open() && !ui.app.inspector_open());
+  CHECK(ui.app.project().tracks[0].arrangement.size() == placed);
+  ui.tap(twill::kMenu);
+  ui.tap(twill::kMenu);
+  CHECK(!ui.app.quit_menu_open() && !ui.app.inspector_open());
+  // The arrangement's settings (the main menu) are on Select + X alone.
+  ui.tap(twill::kX, twill::kSelect);
+  CHECK(ui.app.inspector_title() == "Main menu");
+  ui.tap(twill::kMenu);  // over a panel too
+  CHECK(ui.app.quit_menu_open());
+  ui.tap(twill::kDown);
+  ui.tap(twill::kA);  // Sleep: the song is saved first
+  CHECK(ui.platform.sleeps == 1 && !ui.app.quit_menu_open());
+  ui.tap(twill::kMenu);
+  ui.tap(twill::kUp);  // round to the last: Quit Twill
+  ui.platform.set_held(twill::kA);
+  ui.platform.advance_ms(16);
+  twill::InputState in;
+  ui.platform.poll_input(in);
+  CHECK(!ui.app.frame(in, ui.canvas));  // Quit Twill
+}
+
 #if TWILL_PLUGINS
 // --- Plugin tracks (TWILL_PLUGINS: sndstation builds) --------------------------------------------
 
@@ -3531,6 +3601,117 @@ void test_plugin_moves_with_its_track() {
   for (int i = 0; i < 4; ++i) e.render(buf.data(), 256);
   CHECK(fake.held == 0);  // let go of on its new track
 }
+
+// A plugin with a screen of its own: it draws one colour, keeps the buttons it was given, and asks
+// to close when told to.
+struct ScreenPlugin : FakePlugin {
+  bool open = false, want_quit = false;
+  int opened = 0, closed = 0;
+  uint32_t held = 0;
+  std::vector<uint32_t> seen;  // each change of the buttons it was given
+  bool has_screen() override { return true; }
+  bool open_screen(int max_w, int max_h, int& w, int& h) override {
+    w = std::min(max_w, 320);
+    h = std::min(max_h, 200);
+    open = true;
+    ++opened;
+    return true;
+  }
+  bool screen_frame(uint32_t b, uint32_t* px, int stride, bool& quit) override {
+    quit = want_quit;
+    if (b != held) seen.push_back(b);
+    held = b;
+    for (int y = 0; y < 200; ++y)
+      for (int x = 0; x < 320; ++x) px[size_t(y) * size_t(stride) + size_t(x)] = 0x123456;
+    return true;
+  }
+  void close_screen() override {
+    held = 0;
+    open = false;
+    ++closed;
+  }
+};
+
+struct ScreenPlatform : twill::NullPlatform {
+  struct Host : twill::PluginHost {
+    ScreenPlugin* last = nullptr;
+    std::vector<twill::PluginInfo> list() override { return {}; }
+    std::unique_ptr<twill::PluginInstance> load(const std::string&, const std::string&, int, std::string&) override {
+      auto p = std::make_unique<ScreenPlugin>();
+      last = p.get();
+      return p;
+    }
+  } host;
+  twill::PluginHost* plugins() override { return &host; }
+};
+
+// The plugin's screen covers the display with the buttons its: one held when it opened only once
+// let go of, and never Menu, which closes it (its buttons let go of first) without opening a panel.
+// It closes when the plugin asks, too.
+void test_ui_plugin_screen() {
+  ScreenPlatform platform;
+  twill::App app{platform};
+  twill::Canvas canvas;
+  canvas.resize(1024, 768);
+  platform.write_file(twill::App::kAutosaveName, twill::save_project(plugin_project()));
+  app.start();
+  auto step = [&](uint32_t held) {
+    platform.set_held(held);
+    platform.advance_ms(16);
+    twill::InputState in;
+    platform.poll_input(in);
+    app.frame(in, canvas);
+    canvas.take_dirty();
+  };
+  step(0);
+  ScreenPlugin* fake = platform.host.last;
+  CHECK(fake != nullptr);
+  if (!fake) return app.stop();
+  step(twill::kA);
+  CHECK(app.open_plugin_screen(0));
+  CHECK(app.plugin_screen_open() && fake->open);
+  step(twill::kA);  // still held from opening it: not the plugin's
+  CHECK(fake->held == 0);
+  step(0);
+  step(twill::kB);
+  CHECK(fake->held == twill::kB);
+  // Its frame, centred on black.
+  CHECK((canvas.pixels()[size_t(384) * 1024 + 512] & 0xffffff) == 0x123456);
+  CHECK((canvas.pixels()[size_t(10) * 1024 + 10] & 0xffffff) == 0);
+  step(twill::kB | twill::kMenu);
+  CHECK(!app.plugin_screen_open() && !fake->open && fake->closed == 1 && fake->held == 0);
+  for (uint32_t b : fake->seen) CHECK(!(b & twill::kMenu));
+  step(twill::kB);
+  step(0);
+  CHECK(!app.inspector_open());  // the Menu let go of after closing it opened nothing
+  CHECK(app.open_plugin_screen(0));
+  step(0);
+  fake->want_quit = true;
+  step(0);
+  CHECK(!app.plugin_screen_open() && fake->closed == 2);
+  fake->want_quit = false;
+  // Where Menu is for quitting, it opens the quit menu over the plugin's screen, Back to Twill first;
+  // the plugin's buttons are let go of while it shows.
+  platform.menu_is_for_quitting = true;
+  CHECK(app.open_plugin_screen(0));
+  step(0);
+  step(twill::kB);
+  CHECK(fake->held == twill::kB);
+  step(twill::kB | twill::kMenu);
+  CHECK(app.quit_menu_open() && app.plugin_screen_open() && fake->held == 0);
+  CHECK((app.quit_menu_items() == std::vector<std::string>{"Back to Twill", "Sleep", "Quit Twill"}));
+  step(0);
+  step(twill::kB);  // closed: back on the plugin's screen
+  step(0);
+  CHECK(!app.quit_menu_open() && app.plugin_screen_open() && fake->held == 0);
+  step(twill::kMenu);
+  step(0);
+  step(twill::kA);  // Back to Twill
+  step(0);
+  CHECK(!app.quit_menu_open() && !app.plugin_screen_open() && fake->closed == 3);
+  CHECK(!app.inspector_open());
+  app.stop();
+}
 #endif
 
 struct TestCase {
@@ -3647,11 +3828,14 @@ int main(int argc, char** argv) {
       {"ui_midi_record_and_clock", test_ui_midi_record_and_clock},
       {"ui_follow_midi_clock", test_ui_follow_midi_clock},
       {"ui_autosave_and_reload", test_ui_autosave_and_reload},
+      {"ui_screenshot_on_request", test_ui_screenshot_on_request},
+      {"ui_quit_menu", test_ui_quit_menu},
 #if TWILL_PLUGINS
       {"plugin_track_plays", test_plugin_track_plays},
       {"plugin_live_and_stop", test_plugin_live_and_stop},
       {"plugin_file_round_trip", test_plugin_file_round_trip},
       {"plugin_moves_with_its_track", test_plugin_moves_with_its_track},
+      {"ui_plugin_screen", test_ui_plugin_screen},
 #endif
   };
   int run = 0;

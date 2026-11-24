@@ -2,6 +2,8 @@
 #pragma once
 #include <SDL.h>
 
+#include <cstdio>
+
 #include <string>
 
 #include <memory>
@@ -50,6 +52,7 @@ class Sdl2Platform : public Platform {
   bool write_file(const char* path, const std::vector<uint8_t>& data) override;
   bool list_dir(const char* path, std::vector<DirEntry>& out) override;
   bool make_dir(const char* path) override;
+  bool remove_file(const char* path) override { return std::remove(resolve(path).c_str()) == 0; }
   std::string data_dir() const override { return data_dir_; }
   MidiPort* midi() override { return midi_.get(); }
   void keep_awake(bool on) override;

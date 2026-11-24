@@ -692,7 +692,22 @@ four hints at 640x480).
   X on a note could open the note panel by surprise when selected notes were off screen), the
   track's settings in the sound view. Tapping it again puts the panel away. **Select + X** opens the
   main menu from any view (a second press closes it). X on an empty bar in the arrangement opens it
-  too.
+  too. *Since 2026-11-23 Select + X does exactly what Menu does; see below.*
+- **Select + X is Menu** *(changed 2026-11-23)*: it opens the settings of what the screen shows,
+  the same panel Menu opens in each view, and a second press puts it away. Two ways to one thing are
+  easier to learn than a chord that opens something else; and on sndstation handhelds Menu (and
+  Select + Start, which the system reports as Menu) is kept for a quit and sleep menu, so Select +
+  X is where the screen's settings go there. The main menu is still one step away from any view:
+  Menu or Select + X in the arrangement and mixer, and the last row, **Main menu**, of the clip's
+  panel (roll) and the track's settings (sound view).
+- **On sndstation, Menu quits and sleeps** *(2026-11-23)*. sndstation keeps Menu (FN, or Select then
+  Start, which its SDK reports as Menu to every app) for leaving: in its launcher it opens a power
+  menu, and a plugin it hosts never gets it. Twill does the same there: Menu opens a small card over
+  whatever shows, **Back to Twill**, **Sleep** and **Quit Twill**, the cursor on Back to Twill so a
+  stray A is harmless (Up/Down choose, A does it, B or Menu closes it). Back to Twill closes the
+  menu, and over a plugin's own screen also leaves it for the Sound page, as the launcher's Close
+  does. Decent Sampler's standalone app has the same menu. Sleep saves the song and stops it first. The screen's
+  settings are on Select + X alone there, and Controls says so. Other platforms keep Menu as above.
 - **The main menu** (it was the "settings panel") is titled MAIN MENU, with the version and commit
   beside the title for testing, and runs in sections as a desktop app's menus do: **Song** (Name,
   New project, Load, Save, Render to WAV, Render stems), **Music** (Tempo, Key, Scale), **MIDI**
@@ -744,8 +759,7 @@ when built with uncommitted changes), build date, audio and screen. `cmake/versi
 | L / R held + d-pad | in the roll: the grid (left/right; the view zooms with it, and a message names the new grid) and scroll by page (up/down); in the arrangement: zoom |
 | L2 / R2, or Select + left/right | switch view: arrangement, piano roll, instrument, mixer |
 | Select + up/down | in the roll: between the notes and the lane strip; in the sound view: previous / next track |
-| Select + X | the main menu, from any view |
-| Menu | the settings of what the screen shows: main menu (arrangement, mixer), clip (roll), track (sound view) |
+| Menu, or Select + X | the settings of what the screen shows: main menu (arrangement, mixer), clip (roll), track (sound view); the clip's and track's end with a "Main menu" row |
 | Start | play / stop (L or R + Start: play from the cursor) |
 
 Most handhelds also have analog sticks; they could add shortcuts (scrolling) but nothing requires

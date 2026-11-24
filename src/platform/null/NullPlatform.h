@@ -16,6 +16,15 @@ class NullPlatform : public Platform {
   NullPlatform(int w = 1024, int h = 768, float scale = 2) : size_{w, h}, scale_(scale) {}
 
   void set_held(uint32_t buttons) { held_ = buttons; }
+  // As on sndstation: Menu opens the quit menu, and sleep() counts the sleeps.
+  bool menu_is_for_quitting = false;
+  int sleeps = 0;
+  bool menu_quits() const override { return menu_is_for_quitting; }
+  bool sleep(std::string& why) override {
+    if (!menu_is_for_quitting) return Platform::sleep(why);
+    ++sleeps;
+    return true;
+  }
   // Time stands still unless advanced, so key repeat in tests is deterministic.
   void advance_ms(uint64_t ms) { now_us_ += ms * 1000; }
   std::map<std::string, std::vector<uint8_t>> files;
@@ -46,6 +55,10 @@ class NullPlatform : public Platform {
     if (it == files.end()) return false;
     out = it->second;
     return true;
+  }
+  bool remove_file(const char* name) override {
+    std::lock_guard<std::mutex> hold(files_lock);
+    return files.erase(rel(name)) > 0;
   }
   bool write_file(const char* name, const std::vector<uint8_t>& data) override {
     std::lock_guard<std::mutex> hold(files_lock);

@@ -1,6 +1,7 @@
 #include "platform/sndstation/SndstationPlatform.h"
 
 #include <sndstation/midi.h>
+#include <sndstation/power.h>
 #include <sndstation/rt.h>
 
 #include <chrono>
@@ -217,6 +218,8 @@ bool SndstationPlatform::take_event(const SDL_Event& e) {
       return false;
   }
 }
+
+bool SndstationPlatform::sleep(std::string& why) { return sndstation::power::sleep(&why); }
 
 // Once a frame: the buttons, and the headphone socket (a plug moves the sound between the speaker
 // and the headphones, each at its own volume).

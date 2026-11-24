@@ -173,11 +173,6 @@ void App::open_main_menu() {
   menu_panel_ = true;
 }
 
-void App::toggle_main_menu() {
-  if (inspector_open() && inspector_title_ == kMainMenuTitle) close_inspector();
-  else open_main_menu();
-}
-
 void App::toggle_screen_menu() {
   if (inspector_open() && menu_panel_) {
     close_inspector();
@@ -573,8 +568,11 @@ void App::open_controls() {
   };
   std::vector<InspectorField> fields;
   for (const auto& r : kRows) {
-    const std::string value = r[1];
-    InspectorField field{r[0], [value] { return value; }, nullptr};
+    std::string label = r[0], value = r[1];
+    // Where Menu is for quitting and sleeping (sndstation), the settings are on Select + X alone.
+    if (p_.menu_quits() && label == "Sel + X, or Menu") label = "Sel + X";
+    if (p_.menu_quits() && label == "Menu + Start") label = "Menu", value = "quit, sleep";
+    InspectorField field{label, [value] { return value; }, nullptr};
     field.heading = value.empty();
     field.buttons = !field.heading;
     fields.push_back(std::move(field));
@@ -1274,8 +1272,10 @@ void App::handle_global() {
     quit_ = true;
     return;
   }
-  // Menu on its own: the settings of what the screen shows (toggle_screen_menu()).
-  if (in.pressed(kMenu)) menu_used_ = false;
+  // Menu on its own: the settings of what the screen shows (toggle_screen_menu()), but where Menu
+  // is for quitting (the quit menu, in frame()).
+  if (p_.menu_quits()) menu_used_ = true;
+  else if (in.pressed(kMenu)) menu_used_ = false;
   if (in.held(kMenu) && in.pressed(~uint32_t(kMenu))) menu_used_ = true;
   if (in.released(kMenu) && !menu_used_ && !name_edit_) {
     toggle_screen_menu();  // a second tap puts it away
@@ -1293,9 +1293,9 @@ void App::handle_global() {
     if (view_ == View::PianoRoll && (in.pressed(kUp) || in.pressed(kDown))) roll_->set_lane_focus(in.pressed(kDown));
     // In the sound view, Up / Down choose the track (elsewhere the arrangement is where to pick one).
     if (view_ == View::Instrument && (in.pressed(kUp) || in.pressed(kDown))) set_track(track_ + (in.pressed(kDown) ? 1 : -1));
-    // Select + X: the main menu, from any view. (Menu opens the screen's own settings; it's also
-    // awkward to reach on some handhelds, or kept by the system.)
-    if (in.pressed(kX) && !name_edit_) toggle_main_menu();
+    // Select + X: what Menu does, the settings of what the screen shows (Menu is awkward to reach
+    // on some handhelds, or kept by the system).
+    if (in.pressed(kX) && !name_edit_) toggle_screen_menu();
     // Copy and paste: Y copies, R pastes at the cursor.
     if (in.pressed(kY) || in.pressed(kR)) {
       if (view_ == View::PianoRoll) in.pressed(kY) ? roll_->copy() : roll_->paste();
@@ -1397,22 +1397,41 @@ bool App::frame(const InputState& state, Canvas& canvas) {
     invalidate(hint_bar_);
     if (view_ == View::Instrument) invalidate(content_);
   }
-  handle_global();
-  // While Select or Menu is held, buttons belong to the global chords above, not the view.
-  if (notice_open()) {
-    if (input_.pressed(kA) || input_.pressed(kB) || input_.pressed(kX)) {
-      notice_title_.clear();
-      notice_text_.clear();
-      input_.consume_held();
-      invalidate_all();
+  // Who has the buttons this frame: the quit menu (where Menu is for quitting), a plugin's screen,
+  // or the app. The rest of the frame goes on as ever.
+  bool app_has_buttons = false;
+  if (p_.menu_quits() && input_.pressed(kMenu)) {
+    if (quit_menu_) close_quit_menu();
+    else open_quit_menu();
+  } else if (quit_menu_) {
+    handle_quit_menu();
+  }
+#if TWILL_PLUGINS
+  else if (screen_.inst) {
+    run_plugin_screen(canvas);
+  }
+#endif
+  else {
+    app_has_buttons = true;
+  }
+  if (app_has_buttons) {
+    handle_global();
+    // While Select or Menu is held, buttons belong to the global chords above, not the view.
+    if (notice_open()) {
+      if (input_.pressed(kA) || input_.pressed(kB) || input_.pressed(kX)) {
+        notice_title_.clear();
+        notice_text_.clear();
+        input_.consume_held();
+        invalidate_all();
+      }
+    } else if (!input_.held(kSelect) && !input_.held(kMenu)) {
+      if (name_edit_) handle_name_edit();
+      else if (inspector_open()) handle_inspector();
+      else if (view_ == View::Arrangement) arrangement_->handle_input();
+      else if (view_ == View::PianoRoll) roll_->handle_input();
+      else if (view_ == View::Instrument) instrument_->handle_input();
+      else mixer_->handle_input();
     }
-  } else if (!input_.held(kSelect) && !input_.held(kMenu)) {
-    if (name_edit_) handle_name_edit();
-    else if (inspector_open()) handle_inspector();
-    else if (view_ == View::Arrangement) arrangement_->handle_input();
-    else if (view_ == View::PianoRoll) roll_->handle_input();
-    else if (view_ == View::Instrument) instrument_->handle_input();
-    else mixer_->handle_input();
   }
 
   if (history_.revision() != last_revision_seen_) {
@@ -1435,6 +1454,13 @@ bool App::frame(const InputState& state, Canvas& canvas) {
   tend_plugins();
 #endif
   autosave(false);
+#if TWILL_PLUGINS
+  if (screen_.inst) {  // drawn by run_plugin_screen, and the quit menu over it
+    if (quit_menu_) draw_quit_menu(canvas);
+    screenshot_if_asked(canvas);
+    return !quit_;
+  }
+#endif
 
   if (view_ == View::Arrangement) arrangement_->tick();
   else if (view_ == View::PianoRoll) roll_->tick();
@@ -1458,7 +1484,151 @@ bool App::frame(const InputState& state, Canvas& canvas) {
   }
 
   draw(canvas);
+  if (quit_menu_) draw_quit_menu(canvas);
+  screenshot_if_asked(canvas);
   return !quit_;
+}
+
+// --- The quit menu (Platform::menu_quits) -------------------------------------------------------
+
+std::vector<std::string> App::quit_menu_items() const {
+  std::vector<std::string> v;
+  for (const QuitItem& i : quit_items_) v.push_back(i.label);
+  return v;
+}
+
+void App::open_quit_menu() {
+  quit_items_.clear();
+#if TWILL_PLUGINS
+  if (screen_.inst) {
+    bool quit = false;  // its buttons let go of while the menu has them
+    screen_.inst->screen_frame(0, screen_.pixels.data(), screen_.w, quit);
+  }
+#endif
+  // The cursor starts on the first, the harmless one, so a stray A never quits: Back to Twill
+  // closes the menu, or over a plugin's screen leaves it for the Sound page, as the launcher's
+  // Close does.
+  quit_items_.push_back({"Back to Twill", QuitItem::Back});
+  quit_items_.push_back({"Sleep", QuitItem::Sleep});
+  quit_items_.push_back({"Quit Twill", QuitItem::Quit});
+  quit_sel_ = 0;
+  quit_menu_ = true;
+}
+
+void App::close_quit_menu() {
+  if (!quit_menu_) return;
+  quit_menu_ = false;
+  input_.consume_all();  // the button that closed it does nothing more when let go of
+  menu_used_ = true;
+#if TWILL_PLUGINS
+  if (screen_.inst) {
+    screen_.cleared = false;  // its frame again, whole
+    screen_.ignored = input_.raw();
+    return;
+  }
+#endif
+  invalidate_all();
+}
+
+void App::handle_quit_menu() {
+  const InputTracker& in = input_;
+  const int n = int(quit_items_.size());
+  if (in.pressed(kB)) return close_quit_menu();
+  if (in.pressed_or_repeat(kUp)) quit_sel_ = (quit_sel_ + n - 1) % n;
+  if (in.pressed_or_repeat(kDown)) quit_sel_ = (quit_sel_ + 1) % n;
+  if (!in.pressed(kA)) return;
+  const QuitItem::Action what = quit_items_[size_t(quit_sel_)].action;
+  close_quit_menu();
+  if (what == QuitItem::Back) {
+#if TWILL_PLUGINS
+    close_plugin_screen();
+#endif
+  } else if (what == QuitItem::Quit) {
+    quit_ = true;
+  } else {
+    // Saved first, in case the battery runs out while it sleeps; the song stops.
+    if (engine_->playing()) engine_->stop();
+    autosave(true);
+    std::string why;
+    if (!p_.sleep(why)) message(why.empty() ? std::string("It wouldn't sleep") : why);
+    invalidate_all();
+  }
+}
+
+void App::draw_quit_menu(Canvas& c) {
+  // A card in the middle of the display: the app's name, a rule, the items, the selected one an ink
+  // block, and the keys.
+  const Font& tf = Font::get(FontFace::CondensedBold, u(kPanelTitle));
+  const Font& f = Font::get(FontFace::CondensedSemiBold, u(kPanelText + 2));
+  const Font& kf = Font::get(FontFace::CondensedSemiBold, u(kPanelText - 1));
+  const int pad = int(u(16)), row_h = int(u(kPanelRowH + 4));
+  const int w = std::min(size_.w - int(u(32)), int(u(260)));
+  const int h = int(u(44)) + int(quit_items_.size()) * row_h + int(u(30));
+  const Rect r{(size_.w - w) / 2, (size_.h - h) / 2, w, h};
+  c.reset_clip();
+  c.fill(Rect{r.x + int(u(4)), r.y + int(u(4)), r.w, r.h}, Color::rgb(0).with_alpha(60));
+  c.fill(r, theme_.panel);
+  c.stroke_rect(r, std::max(1, int(u(1))), theme_.text);
+  c.text(tf, r.x + pad, r.y + int(u(26)), "TWILL STUDIO", theme_.text, u(kCapsSpacing));
+  c.fill(Rect{r.x + pad, r.y + int(u(34)), r.w - 2 * pad, std::max(1, int(u(1)))}, theme_.text);
+  int y = r.y + int(u(42));
+  for (size_t i = 0; i < quit_items_.size(); ++i) {
+    const bool sel = int(i) == quit_sel_;
+    if (sel) c.fill(Rect{r.x + int(u(8)), y + 1, r.w - int(u(16)), row_h - 2}, theme_.chip_active);
+    c.text(f, r.x + pad, f.baseline_in(y, row_h), quit_items_[i].label.c_str(), sel ? theme_.chip_active_text : theme_.text);
+    y += row_h;
+  }
+  c.text(kf, r.x + pad, r.bottom() - int(u(10)), "A: DO    B OR MENU: CLOSE", theme_.text_secondary, u(kCapsSpacing));
+}
+
+std::vector<uint8_t> App::encode_bmp(const Canvas& c) {
+  const int w = c.width(), h = c.height();
+  const uint32_t row = uint32_t(w * 3 + 3) & ~3u, size = 54 + row * uint32_t(h);
+  std::vector<uint8_t> out(size, 0);
+  auto put = [&out](size_t at, uint32_t v, int bytes) {
+    for (int i = 0; i < bytes; ++i) out[at + size_t(i)] = uint8_t(v >> (8 * i));
+  };
+  out[0] = 'B';
+  out[1] = 'M';
+  put(2, size, 4);
+  put(10, 54, 4);  // where the pixels start
+  put(14, 40, 4);  // BITMAPINFOHEADER
+  put(18, uint32_t(w), 4);
+  put(22, uint32_t(h), 4);  // bottom row first
+  put(26, 1, 2);
+  put(28, 24, 2);
+  put(34, row * uint32_t(h), 4);
+  for (int y = 0; y < h; ++y) {
+    const uint32_t* src = c.pixels() + size_t(h - 1 - y) * size_t(c.stride());
+    uint8_t* dst = &out[54 + size_t(y) * row];
+    for (int x = 0; x < w; ++x) {
+      dst[3 * x] = uint8_t(src[x]);
+      dst[3 * x + 1] = uint8_t(src[x] >> 8);
+      dst[3 * x + 2] = uint8_t(src[x] >> 16);
+    }
+  }
+  return out;
+}
+
+void App::screenshot_if_asked(const Canvas& c) {
+  const uint64_t now = p_.micros();
+  if (now - screenshot_checked_us_ < 500000) return;
+  screenshot_checked_us_ = now;
+  std::vector<uint8_t> request;
+  if (!p_.read_file(kScreenshotRequest, request)) return;
+  p_.remove_file(kScreenshotRequest);
+  p_.make_dir("screenshots");
+  std::vector<Platform::DirEntry> taken;
+  p_.list_dir("screenshots", taken);
+  std::string name;
+  for (int n = 1; name.empty(); ++n) {
+    const std::string candidate = "screen-" + std::to_string(n) + ".bmp";
+    bool used = false;
+    for (const Platform::DirEntry& e : taken) used = used || e.name == candidate;
+    if (!used) name = candidate;
+  }
+  if (p_.write_file(("screenshots/" + name).c_str(), encode_bmp(c))) p_.log("screenshot: screenshots/%s", name.c_str());
+  else p_.log("screenshot: couldn't write screenshots/%s", name.c_str());
 }
 
 // --- Drawing --------------------------------------------------------------------------------
@@ -1818,6 +1988,7 @@ PluginInstance* App::plugin_instance(const Track& t) {
   auto it = plugins_.find(t.plugin.slot);
   if (it != plugins_.end()) {
     if (it->second.id == t.plugin.id) return it->second.inst.get();
+    forget_plugin_screen(it->second.inst.get());
     retired_plugins_.push_back(std::move(it->second));  // the slot plays another plugin now
     retired_plugins_.back().idle = false;
     plugins_.erase(it);
@@ -1870,6 +2041,65 @@ void App::plugin_changed() {
   last_edit_us_ = p_.micros();
 }
 
+bool App::open_plugin_screen(int track) {
+  if (screen_.inst || track < 0 || track >= int(project_.tracks.size())) return false;
+  PluginInstance* inst = plugin_instance(project_.tracks[size_t(track)]);
+  if (!inst || !inst->has_screen()) return false;
+  int w = 0, h = 0;
+  if (!inst->open_screen(size_.w, size_.h, w, h) || w <= 0 || h <= 0 || w > size_.w || h > size_.h) {
+    if (w > 0 && h > 0) inst->close_screen();  // opened at a size that doesn't fit
+    message("Its screen wouldn't open");
+    return false;
+  }
+  screen_.inst = inst;
+  screen_.w = w;
+  screen_.h = h;
+  screen_.pixels.assign(size_t(w) * size_t(h), 0);
+  screen_.ignored = input_.raw();
+  screen_.cleared = false;
+  p_.log("plugin screen open: %dx%d", w, h);
+  return true;
+}
+
+void App::close_plugin_screen() {
+  if (!screen_.inst) return;
+  screen_.inst->close_screen();
+  screen_ = PluginScreen{};
+  plugin_changed();  // what was changed on it is saved with the song
+  input_.consume_all();  // the buttons it had do nothing here when let go of
+  menu_used_ = true;     // nor does the Menu that closed it
+  invalidate_all();
+}
+
+void App::forget_plugin_screen(const PluginInstance* inst) {
+  if (inst && screen_.inst == inst) close_plugin_screen();
+}
+
+void App::run_plugin_screen(Canvas& c) {
+  if (input_.pressed(kMenu)) {
+    close_plugin_screen();
+    return;
+  }
+  screen_.ignored &= input_.raw();  // a button held when it opened is its once let go of
+  const uint32_t held = input_.raw() & ~screen_.ignored & ~uint32_t(kMenu);
+  bool quit = false;
+  const bool drew = screen_.inst->screen_frame(held, screen_.pixels.data(), screen_.w, quit);
+  if (quit) {
+    close_plugin_screen();
+    return;
+  }
+  // Centred, on black where it draws less than the whole display.
+  const int x = (size_.w - screen_.w) / 2, y = (size_.h - screen_.h) / 2;
+  c.reset_clip();
+  if (!screen_.cleared) {
+    screen_.cleared = true;
+    c.fill(Rect{0, 0, size_.w, size_.h}, Color::rgb(0));
+    c.blit(screen_.pixels.data(), screen_.w, screen_.h, screen_.w, x, y);
+  } else if (drew) {
+    c.blit(screen_.pixels.data(), screen_.w, screen_.h, screen_.w, x, y);
+  }
+}
+
 void App::capture_plugin_states() {
   for (Track& t : project_.tracks) {
     if (t.plugin.id.empty()) continue;
@@ -1881,6 +2111,7 @@ void App::capture_plugin_states() {
 }
 
 void App::retire_plugins() {
+  close_plugin_screen();
   for (auto& kv : plugins_) {
     kv.second.idle = false;
     retired_plugins_.push_back(std::move(kv.second));
@@ -1897,9 +2128,12 @@ void App::tend_plugins() {
   auto engine_done = [&](const LoadedPlugin& lp) {
     return lp.idle && engine_->playing_revision() >= lp.idle_snapshot && callbacks >= lp.idle_callbacks + 2;
   };
+  // The SDK keeps one set of requests for every instance (a plugin's call on this thread, a new
+  // routing of its buttons), taken by the first idle(): the plugin whose screen is open goes first.
+  if (screen_.inst) screen_.inst->idle();
   for (auto it = plugins_.begin(); it != plugins_.end();) {
     LoadedPlugin& lp = it->second;
-    lp.inst->idle();
+    if (lp.inst.get() != screen_.inst) lp.inst->idle();
     bool played = false, named = false;
     for (const Track& t : project_.tracks)
       if (t.plugin.slot == it->first && t.plugin.id == lp.id) {
@@ -1917,6 +2151,7 @@ void App::tend_plugins() {
       lp.idle_callbacks = callbacks;
     }
     if (engine_done(lp) && !named) {
+      forget_plugin_screen(lp.inst.get());
       it = plugins_.erase(it);
       continue;
     }

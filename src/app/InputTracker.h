@@ -18,6 +18,13 @@ class InputTracker {
   // Pressed this frame, or auto-repeating while held (for the d-pad).
   bool pressed_or_repeat(uint32_t b) const { return ((pressed_ | repeat_) & b) != 0; }
   uint32_t held_mask() const { return held_; }
+  uint32_t raw() const { return raw_; }  // every button down, chords and all
+  // Every button down now did its job elsewhere (a plugin's screen had them): none is pressed this
+  // frame, and letting one go is no release. Select and Menu stay held, as chords have them.
+  void consume_all() {
+    chorded_ |= raw_ & ~kModifiers;
+    pressed_ = released_ = repeat_ = 0;
+  }
   // The buttons held now did their job (closing a panel, say): they aren't held for the views, and
   // letting them go isn't a release, until they're up again. (B closes a panel on its press; its
   // release would otherwise reach the arrangement and delete the clip under the cursor.)

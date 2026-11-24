@@ -79,6 +79,7 @@ class Platform {
   // Lists a folder (not "." or ".."), folders first, then by name. False if it can't be read.
   virtual bool list_dir(const char* path, std::vector<DirEntry>& out) = 0;
   virtual bool make_dir(const char* path) = 0;  // creates missing parent folders too
+  virtual bool remove_file(const char* path) { (void)path; return false; }
   virtual std::string data_dir() const = 0;     // absolute, ends with '/'
 
   // MIDI: every connected device, merged; null if the platform has no MIDI.
@@ -90,6 +91,16 @@ class Platform {
   // False when time is simulated (tests): the app then sends MIDI from its frame loop at once
   // rather than from a thread on the wall clock.
   virtual bool real_time() const { return true; }
+
+  // True where Menu is the system's way to quit and sleep (sndstation, whose SDK also reports Select
+  // then Start as Menu): Menu opens the app's quit menu (Sleep, Quit), and the screen's settings are
+  // on Select + X alone.
+  virtual bool menu_quits() const { return false; }
+  // The device sleeps, and this returns once it's awake. False, with why, where it can't.
+  virtual bool sleep(std::string& why) {
+    why = "Sleep isn't available here";
+    return false;
+  }
 
   // While true, music is playing (or being played on a MIDI keyboard): the device shouldn't dim,
   // mute or go to sleep for want of button presses. Called when it changes.

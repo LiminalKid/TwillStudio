@@ -27,7 +27,7 @@ Twill Studio is free software under the GPL-3.0; its source is at [github.com/Li
 | Select + Up / Down | In the sound view: previous / next track |
 | Select + B / A | Undo / redo |
 | Select + Y / R1 | Copy / paste |
-| Select + X, or Menu | Settings: every control, tempo, key, saving and loading songs, recording from MIDI, About |
+| Select + X, or Menu | The settings of what the screen shows: the main menu in the arrangement and mixer (every control, tempo, key, saving and loading songs, recording from MIDI, About), the clip in the piano roll, the track in the sound view. Their last row opens the main menu |
 | Menu + Start | Quit |
 
 The bar at the bottom of the screen shows what the buttons do as you hold them.

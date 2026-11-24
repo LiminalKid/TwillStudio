@@ -21,6 +21,9 @@ class SndstationPlatform : public Sdl2Platform {
   AudioInfo audio_info() const override { return audio_info_; }
   void audio_close() override;
   bool system_sets_audio_buffer() const override { return true; }
+  // Menu (FN, or Select then Start) is for quitting and sleeping, as in the launcher.
+  bool menu_quits() const override { return true; }
+  bool sleep(std::string& why) override;
   bool prefers_long_audio_buffer() const override { return false; }
 
   const char* controller_name() const override;

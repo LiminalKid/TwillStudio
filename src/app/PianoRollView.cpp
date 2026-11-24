@@ -521,7 +521,7 @@ void PianoRollView::open_clip_settings() {
                       app.history().change_clip(copy);
                       app.message("Snapped to the grid");
                     }});
-  // The way up to the main menu (Menu here opens this panel).
+  // The way up to the main menu (Menu and Select + X here open this panel).
   fields.push_back({"Main menu", [] { return std::string("press A"); }, nullptr, [&app] { app.open_main_menu(); }});
   app.open_inspector("Clip", std::move(fields));
 }

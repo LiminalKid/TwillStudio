@@ -30,6 +30,9 @@ class Canvas {
   void hline(int x0, int x1, int y, Color c) { fill(Rect{x0, y, x1 - x0, 1}, c); }
   void vline(int x, int y0, int y1, Color c) { fill(Rect{x, y0, 1, y1 - y0}, c); }
   void line(float x0, float y0, float x1, float y1, Color c);  // antialiased, 1 px wide
+  // Copies a `w` x `h` image of 32-bit RGB pixels (`stride` pixels a row; its top byte ignored)
+  // to (x, y), opaque, inside the clip.
+  void blit(const uint32_t* src, int w, int h, int stride, int x, int y);
 
   // Draws `text` with its baseline at y, with `spacing` extra pixels between letters (small
   // capitals read better spaced out). Returns the x after the last glyph.

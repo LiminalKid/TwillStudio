@@ -42,6 +42,27 @@ class PluginInstance {
   virtual void set_param(uint32_t id, double value) = 0;
   // UI thread, every frame: what the plugin asked to do on it.
   virtual void idle() {}
+
+  // Its own screen, where it draws one (a plugin made for the handheld): shown over the whole
+  // display while it's open, with the buttons its, but Menu, which the app keeps to come back.
+  // UI thread.
+  virtual bool has_screen() { return false; }
+  // Opened, drawing at most `max_w` x `max_h`: the size it draws at in `w` and `h`. False if it
+  // won't.
+  virtual bool open_screen(int max_w, int max_h, int& w, int& h) {
+    (void)max_w, (void)max_h, (void)w, (void)h;
+    return false;
+  }
+  // Every frame while open: the buttons held (Button bits; Menu is never among them), passed on as
+  // presses and releases. True when it drew a new frame into `pixels` (32-bit RGB, `stride` pixels
+  // a row, the size open_screen gave). `quit` is set when it asked to be closed.
+  virtual bool screen_frame(uint32_t held, uint32_t* pixels, int stride, bool& quit) {
+    (void)held, (void)pixels, (void)stride;
+    quit = true;
+    return false;
+  }
+  // Closed: every button it was given is let go of first.
+  virtual void close_screen() {}
   // UI thread: the engine has stopped playing it (no snapshot has it any more, and the audio thread
   // has let go). Notes it still holds are let go of before it plays again.
   virtual void released() {}

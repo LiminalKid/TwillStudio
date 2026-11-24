@@ -43,7 +43,8 @@ MTIME = 0  # every file dated the same, so two builds of the same commit give th
 
 
 def version():
-    # TWILL_DEB_VERSION for a test build between releases ("0.6.0+500fa1e" sorts above 0.6.0).
+    # TWILL_DEB_VERSION for a test build between releases ("0.7.0+git1.500fa1e" sorts above 0.7.0, and a later
+    # build between them needs a higher gitN, as apt compares the hash as text).
     if os.environ.get("TWILL_DEB_VERSION"):
         return os.environ["TWILL_DEB_VERSION"]
     with open(os.path.join(ROOT, "CMakeLists.txt")) as f:

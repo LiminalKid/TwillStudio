@@ -130,6 +130,14 @@ std::vector<InstrumentView::Row> InstrumentView::rows() {
       }
       return out;
     }
+    // A plugin made for the handheld draws a screen of its own: A shows it, Menu comes back.
+    if (inst->has_screen()) {
+      Row screen;
+      screen.label = "Its screen";
+      screen.value = [] { return std::string("press A, Menu returns"); };
+      screen.press = [&app, track] { app.open_plugin_screen(track); };
+      out.push_back(screen);
+    }
     // Its parameters, read once for the rows; each moves it at once (not an edit: its state is the
     // plugin's, saved with the song).
     auto ps = std::make_shared<std::vector<PluginInstance::Param>>(inst->params());
