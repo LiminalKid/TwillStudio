@@ -511,6 +511,16 @@ void Sdl2Platform::audio_close() {
   compressor_.restore();
 }
 
+#ifdef __linux__
+namespace {
+bool set_real_time(bool on) {
+  sched_param sp{};
+  sp.sched_priority = on ? 70 : 0;
+  return pthread_setschedparam(pthread_self(), on ? SCHED_FIFO : SCHED_OTHER, &sp) == 0;
+}
+}  // namespace
+#endif
+
 void Sdl2Platform::sdl_audio_callback(void* user, Uint8* stream, int len) {
   Sdl2Platform* self = static_cast<Sdl2Platform*>(user);
 #ifdef __linux__
@@ -519,13 +529,31 @@ void Sdl2Platform::sdl_audio_callback(void* user, Uint8* stream, int len) {
   // own request for it was ignored on KNULLI.) Below PipeWire's own threads, which run at 83.
   if (self->handheld_ && !self->audio_rt_tried_) {
     self->audio_rt_tried_ = true;
-    sched_param sp{};
-    sp.sched_priority = 70;
-    pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp);
+    self->audio_rt_ = set_real_time(true);
   }
+  const uint64_t start = self->micros();
 #endif
   int frames = len / int(2 * sizeof(float));
   self->audio_cb_(self->audio_user_, reinterpret_cast<float*>(stream), frames);
+#ifdef __linux__
+  // Not while it can't keep up, though: a real-time thread with more work than a core can do would
+  // leave nothing for the rest of the system (a handheld down to one slow core, asleep, may not see
+  // its power button). After two seconds of late blocks it's scheduled as any thread is, until two
+  // seconds of blocks have been in time.
+  const int rate = self->audio_info_.sample_rate;
+  if (self->handheld_ && rate > 0) {
+    const bool late = (self->micros() - start) * uint64_t(rate) > uint64_t(frames) * 1000000;
+    self->audio_late_run_ = late ? std::min(self->audio_late_run_ + frames, 3 * rate) : 0;
+    self->audio_ok_run_ = late ? 0 : std::min(self->audio_ok_run_ + frames, 3 * rate);
+    if (self->audio_rt_ && self->audio_late_run_ > 2 * rate) {
+      set_real_time(false);
+      self->audio_rt_ = false;
+    } else if (!self->audio_rt_ && self->audio_ok_run_ > 2 * rate) {
+      self->audio_rt_ = set_real_time(true);
+      self->audio_ok_run_ = 0;
+    }
+  }
+#endif
 }
 
 bool Sdl2Platform::read_file(const char* name, std::vector<uint8_t>& out) {
@@ -602,8 +630,9 @@ void Sdl2Platform::log(const char* fmt, ...) {
 
 // TWILL_KEEP_AWAKE, set by a handheld's launcher, names files (separated by ':') whose presence keeps
 // that system from dimming, muting or sleeping while nobody presses a button: KNULLI's battery
-// saver, for one, pauses while any /var/run/battery-saver/*.pause exists. They're there only while
-// music plays, so the device still saves its battery when Twill sits idle.
+// saver, for one, pauses while any /var/run/battery-saver/*.pause exists. Each holds Twill's process
+// id, which muOS checks is still running. They're there only while music plays, so the device still
+// saves its battery when Twill sits idle.
 void Sdl2Platform::keep_awake(bool on) {
   const char* files = SDL_getenv("TWILL_KEEP_AWAKE");
   if (!files || !*files || on == awake_held_) return;
@@ -616,14 +645,35 @@ void Sdl2Platform::keep_awake(bool on) {
     const std::string path = list.substr(start, end - start);
     if (!path.empty()) {
       if (on) {
-        if (FILE* f = std::fopen(path.c_str(), "w")) std::fclose(f);
-        else log("keep awake: can't create %s", path.c_str());
+        if (FILE* f = std::fopen(path.c_str(), "w")) {
+          std::fprintf(f, "%d\n", int(getpid()));
+          std::fclose(f);
+        } else {
+          log("keep awake: can't create %s", path.c_str());
+        }
       } else {
         std::remove(path.c_str());
       }
     }
     start = end + 1;
   }
+}
+
+// muOS's sleep on the Anbernic H700 handhelds turns off all the cores but one, slows that one to its
+// lowest speed and pauses its own emulators; any other program goes on running. TWILL_SLEEP_FILE
+// names a file that exists while it's asleep.
+void Sdl2Platform::wait_while_asleep() {
+  const char* file = SDL_getenv("TWILL_SLEEP_FILE");
+  if (!file || !*file || access(file, F_OK) != 0) return;
+  if (audio_dev_) SDL_PauseAudioDevice(audio_dev_, 1);
+  log("asleep");
+  while (access(file, F_OK) == 0) {
+    SDL_Delay(100);
+    SDL_PumpEvents();
+    if (SDL_HasEvent(SDL_QUIT)) break;  // shutting down: the app saves on its way out
+  }
+  if (audio_dev_) SDL_PauseAudioDevice(audio_dev_, 0);
+  log("awake");
 }
 
 bool Sdl2Platform::can_quit() const {

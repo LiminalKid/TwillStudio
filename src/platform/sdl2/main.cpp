@@ -150,6 +150,7 @@ int main(int, char**) {
 
   Loop loop(platform, app, canvas, screenshot);
   for (;;) {
+    platform.wait_while_asleep();
     const uint64_t t0 = platform.micros();
     if (!loop.step()) break;
     // Vsync normally paces the loop; without it (or when idle), cap at about 60 frames a second.

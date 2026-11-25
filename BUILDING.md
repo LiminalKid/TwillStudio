@@ -24,6 +24,10 @@ WAV renders to `renders/`, and the factory drum kit (built into the app from `as
 For PortMaster, `tools/make-portmaster-zip.sh` packages that build as `build/portmaster/twill.zip`
 (drop it in PortMaster's autoinstall folder).
 
+For muOS, `tools/make-muos-app.sh` packages it as `build/muos/TwillStudio-muOS.muxapp`: copy it into
+`ARCHIVE` on the SD card and choose it in Archive Manager, and Twill Studio appears under
+Applications. Songs go in `TwillStudio/` at the top of the card.
+
 For NextUI, `tools/make-nextui-pak.sh` packages the same build as a Tools pak,
 `build/nextui/TwillStudio.pak.zip`: unzip it into `Tools/tg5040/Twill Studio.pak/` on the SD card,
 or install it from the Pak Store, which reads `pak.json` at the top of this repository. The pak's

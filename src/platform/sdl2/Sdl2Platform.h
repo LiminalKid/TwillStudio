@@ -59,6 +59,9 @@ class Sdl2Platform : public Platform {
   bool prefers_long_audio_buffer() const override;
   bool can_quit() const override;
   bool select_start_quits() const override;
+  // Where the system sleeps without stopping programs (TWILL_SLEEP_FILE, muOS): the sound and the
+  // app stop until it wakes, or asks the app to quit. Called between frames.
+  void wait_while_asleep();
   // On a handheld, from the memory free when the app starts (design §6, "Multisamples"); no limit
   // on a computer.
   size_t sample_budget() const override { return sample_budget_; }
@@ -94,7 +97,9 @@ class Sdl2Platform : public Platform {
 
   bool awake_held_ = false;  // keep_awake's files are in place
 #ifdef __linux__
-  bool audio_rt_tried_ = false;  // audio thread only
+  // Audio thread only: real-time scheduling, and the frames in a row that were late or in time.
+  bool audio_rt_tried_ = false, audio_rt_ = false;
+  int audio_late_run_ = 0, audio_ok_run_ = 0;
 #endif
   SDL_Window* window_ = nullptr;
   SDL_Renderer* renderer_ = nullptr;

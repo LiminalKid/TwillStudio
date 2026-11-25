@@ -902,6 +902,16 @@ Project
   either package updates the other and songs stay. With no gptokeyb2, the launcher sets
   `TWILL_SELECT_START_QUITS` and Twill watches for that chord itself. The launcher asks for full CPU
   speed while Twill runs (the `performance` governor, put back on exit), as the NextUI one does.
+  *Since 2026-11-25* muOS has one too: `tools/make-muos-app.sh` writes `TwillStudio-muOS.muxapp`
+  (`packaging/muos/`), a zip of one application folder that muOS's Archive Manager unpacks. Its
+  launcher follows muOS's application runner (`SETUP_APP` sets SDL's screen rotation and buttons),
+  keeps songs in `TwillStudio/` at the top of the first card, outside the application's folder, or
+  goes on using PortMaster's `ports/twill/` if there are songs there. While a song plays, muOS's
+  `idle_game_inhibit` and `idle_sleep_inhibit` files (with Twill's process id in them) hold off its
+  dimming, muting and sleeping when nobody presses a button, but not the power button. Its sleep on
+  the H700 handhelds leaves other programs running on one slow core, so Twill stops its sound while
+  muOS's `quiet_wake` file says it's asleep (`TWILL_SLEEP_FILE`). As a safety net anywhere, the
+  real-time audio thread is scheduled normally while it can't keep up. muOS puts its own CPU setting back after any application.
   On a GameController pad a stick click stands in for Menu (not every handheld has one).
 - **Third-party code** is vendored under `third_party/` with its licences and source commit: `plaits/dsp`,
   the `stmlib` subset, Clouds' reverb, `dr_wav`, and the font (OFL).
