@@ -572,6 +572,7 @@ void App::open_controls() {
     // Where Menu is for quitting and sleeping (sndstation), the settings are on Select + X alone.
     if (p_.menu_quits() && label == "Sel + X, or Menu") label = "Sel + X";
     if (p_.menu_quits() && label == "Menu + Start") label = "Menu", value = "quit, sleep";
+    else if (p_.select_start_quits() && label == "Menu + Start") label = "Sel + Start";
     InspectorField field{label, [value] { return value; }, nullptr};
     field.heading = value.empty();
     field.buttons = !field.heading;
@@ -669,6 +670,11 @@ bool App::has_unsaved_changes() {
 bool App::confirm_discard(const char* what) {
   if (!has_unsaved_changes()) return true;
   return confirm_twice(what, std::string("Unsaved changes: press A again to ") + what);
+}
+
+void App::ask_quit() {
+  // Nothing is lost by quitting (the song is autosaved), but a stray A shouldn't stop the music.
+  if (confirm_twice("quit", "Press A again to quit")) quit_ = true;
 }
 
 bool App::confirm_twice(const char* what, const std::string& prompt) {
@@ -1269,6 +1275,11 @@ void App::handle_inspector() {
 void App::handle_global() {
   const InputTracker& in = input_;
   if (in.held(kMenu) && in.pressed(kStart)) {
+    quit_ = true;
+    return;
+  }
+  // Select + Start, in whichever order, where the launcher leaves it to the app.
+  if (p_.select_start_quits() && in.held(kSelect) && in.held(kStart) && in.pressed(kSelect | kStart)) {
     quit_ = true;
     return;
   }

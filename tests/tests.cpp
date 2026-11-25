@@ -2600,9 +2600,9 @@ void test_ui_menu_opens_project() {
   CHECK(ui.app.inspector_open());
   ui.tap(twill::kMenu);
   CHECK(!ui.app.inspector_open());
-  // About, the last row: version and build.
+  // About: version and build.
   ui.tap(twill::kMenu);
-  ui.tap(twill::kUp);  // wraps to the last row
+  CHECK(ui.go_to_row("About"));
   ui.tap(twill::kA);
   CHECK_MSG(ui.app.inspector_title() == "About Twill Studio", "panel \"%s\"", ui.app.inspector_title().c_str());
   ui.tap(twill::kMenu);  // from the About panel too
@@ -2749,7 +2749,7 @@ void test_ui_settings_order() {
   for (const twill::InspectorField& f : ui.app.inspector_fields()) got += (got.empty() ? "" : ", ") + f.label;
   const std::string want = "Song, Name, New project, Load, Save, Render to WAV, Render stems, Music, Tempo, Key, "
                            "Scale, MIDI, Record from MIDI, MIDI clock, MIDI devices, Settings, Theme, New song "
-                           "names, Output boost, Audio buffer, Help, Controls, About";
+                           "names, Output boost, Audio buffer, Help, Controls, About, Quit Twill";
   CHECK_MSG(got == want, "%s", got.c_str());
   CHECK(ui.app.inspector_title() == "Main menu");
   CHECK(ui.app.inspector_fields()[size_t(ui.app.inspector_selection())].label == "Name");  // past the heading
@@ -3476,6 +3476,37 @@ void test_ui_quit_menu() {
   CHECK(!ui.app.frame(in, ui.canvas));  // Quit Twill
 }
 
+// The main menu's Quit Twill quits on a second press; Select + Start quits only where nothing
+// outside the app watches for it, in whichever order they're pressed.
+void test_ui_quitting() {
+  auto frame = [](UiDriver& ui, uint32_t held) {
+    ui.platform.set_held(held);
+    ui.platform.advance_ms(16);
+    twill::InputState in;
+    ui.platform.poll_input(in);
+    return ui.app.frame(in, ui.canvas);
+  };
+  {
+    UiDriver ui;
+    ui.tap(twill::kMenu);
+    CHECK(ui.go_to_row("Quit Twill"));
+    CHECK(frame(ui, twill::kA));  // asks
+    CHECK(frame(ui, 0));
+    CHECK(!frame(ui, twill::kA));
+  }
+  {
+    UiDriver ui;
+    CHECK(frame(ui, twill::kSelect));
+    CHECK(frame(ui, twill::kSelect | twill::kStart));  // PortMaster's helper's, not the app's
+  }
+  for (uint32_t first : {twill::kSelect, twill::kStart}) {
+    UiDriver ui;
+    ui.platform.quits_on_select_start = true;
+    CHECK(frame(ui, first));
+    CHECK(!frame(ui, twill::kSelect | twill::kStart));
+  }
+}
+
 #if TWILL_PLUGINS
 // --- Plugin tracks (TWILL_PLUGINS: sndstation builds) --------------------------------------------
 
@@ -3830,6 +3861,7 @@ int main(int argc, char** argv) {
       {"ui_autosave_and_reload", test_ui_autosave_and_reload},
       {"ui_screenshot_on_request", test_ui_screenshot_on_request},
       {"ui_quit_menu", test_ui_quit_menu},
+      {"ui_quitting", test_ui_quitting},
 #if TWILL_PLUGINS
       {"plugin_track_plays", test_plugin_track_plays},
       {"plugin_live_and_stop", test_plugin_live_and_stop},

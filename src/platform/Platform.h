@@ -96,6 +96,11 @@ class Platform {
   // then Start as Menu): Menu opens the app's quit menu (Sleep, Quit), and the screen's settings are
   // on Select + X alone.
   virtual bool menu_quits() const { return false; }
+  // False where closing the app means nothing (the browser): the main menu then has no Quit.
+  virtual bool can_quit() const { return true; }
+  // True where Select + Start quits because nothing outside the app watches for it: PortMaster's
+  // packages have a helper that closes the app on it, a package of Twill's own (KNULLI) doesn't.
+  virtual bool select_start_quits() const { return false; }
   // The device sleeps, and this returns once it's awake. False, with why, where it can't.
   virtual bool sleep(std::string& why) {
     why = "Sleep isn't available here";

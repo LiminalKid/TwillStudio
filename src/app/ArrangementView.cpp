@@ -241,6 +241,8 @@ void ArrangementView::open_main_menu() {
   heading("Help");
   fields.push_back({"Controls", [] { return std::string("press A"); }, nullptr, [&app] { app.open_controls(); }});
   fields.push_back({"About", [] { return std::string("press A"); }, nullptr, [&app] { app.open_about(); }});
+  if (app.platform().can_quit())
+    fields.push_back({"Quit Twill", [] { return std::string("press A"); }, nullptr, [&app] { app.ask_quit(); }});
   app.open_inspector(App::kMainMenuTitle, std::move(fields), App::build_id());
 }
 

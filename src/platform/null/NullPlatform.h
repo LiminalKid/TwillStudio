@@ -18,6 +18,8 @@ class NullPlatform : public Platform {
   void set_held(uint32_t buttons) { held_ = buttons; }
   // As on sndstation: Menu opens the quit menu, and sleep() counts the sleeps.
   bool menu_is_for_quitting = false;
+  bool quits_on_select_start = false;
+  bool select_start_quits() const override { return quits_on_select_start; }
   int sleeps = 0;
   bool menu_quits() const override { return menu_is_for_quitting; }
   bool sleep(std::string& why) override {

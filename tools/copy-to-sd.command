@@ -29,7 +29,7 @@ mkdir -p "$PORTS/twill"
 for f in log.txt es_input.cfg; do
   [ -f "$PORTS/twill/$f" ] && cp -X "$PORTS/twill/$f" "$HERE/last-run-$f" && echo "Saved last-run-$f"
 done
-cp -X "$SRC_BIN" "$PORTS/twill/twill"
+cp -X "$SRC_BIN" "$PORTS/twill/twill.aarch64"
 cp -X "$SRC_SH" "$PORTS/Twill Studio.sh"
 # macOS leaves ._ files on exFAT, which would show up as extra entries in Ports.
 dot_clean -m "$PORTS" 2>/dev/null || true

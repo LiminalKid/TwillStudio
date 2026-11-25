@@ -57,6 +57,8 @@ class Sdl2Platform : public Platform {
   MidiPort* midi() override { return midi_.get(); }
   void keep_awake(bool on) override;
   bool prefers_long_audio_buffer() const override;
+  bool can_quit() const override;
+  bool select_start_quits() const override;
   // On a handheld, from the memory free when the app starts (design §6, "Multisamples"); no limit
   // on a computer.
   size_t sample_budget() const override { return sample_budget_; }

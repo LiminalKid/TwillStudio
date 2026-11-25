@@ -626,6 +626,17 @@ void Sdl2Platform::keep_awake(bool on) {
   }
 }
 
+bool Sdl2Platform::can_quit() const {
+#ifdef __EMSCRIPTEN__
+  return false;
+#else
+  return true;
+#endif
+}
+
+// TWILL_SELECT_START_QUITS is set by a launcher that has no helper watching for the chord.
+bool Sdl2Platform::select_start_quits() const { return env_flag("TWILL_SELECT_START_QUITS"); }
+
 // PipeWire's socket, where its clients find it: in $XDG_RUNTIME_DIR, or the system-wide places
 // handheld systems run it from.
 bool Sdl2Platform::prefers_long_audio_buffer() const {

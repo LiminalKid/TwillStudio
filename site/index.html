@@ -28,7 +28,7 @@
 
 <div class="strip">
   <span class="chip">NEW</span>
-  <span>Version @VERSION@: the paper look, a logo and splash, and more from X and Y.</span>
+  <span>Version @VERSION@: a download for KNULLI that needs nothing else installed.</span>
   <a href="https://github.com/LiminalKid/TwillStudio/releases/tag/v@VERSION@">What's new →</a>
 </div>
 
@@ -63,12 +63,12 @@
     <p class="eyebrow">FREE · OPEN SOURCE · VERSION @VERSION@</p>
     <h1>A piano-roll groovebox for handhelds.</h1>
     <p class="lede">Twenty-four synth engines, a sampler, chorus, delay and reverb, written note by
-      note with a d-pad. For PortMaster handhelds, and right here in your browser.</p>
+      note with a d-pad. For KNULLI, PortMaster and TrimUI handhelds, and right here in your browser.</p>
     <div class="ctas">
       <a class="button primary" href="play/"><kbd>X</kbd>Play in your browser</a>
-      <a class="button" href="https://github.com/LiminalKid/TwillStudio/releases/latest/download/twill.zip"><kbd>↓</kbd>Download for PortMaster</a>
+      <a class="button" href="#get"><kbd>↓</kbd>Download for your handheld</a>
     </div>
-    <p class="fine">PortMaster package, about 2 MB · 64-bit handhelds, 640×480 and up ·
+    <p class="fine">About 2 MB · 64-bit handhelds, 640×480 and up ·
       <a href="https://github.com/LiminalKid/TwillStudio">Source on GitHub</a> ·
       <a href="https://liminalkid.itch.io/twill-studio">Also on itch.io</a></p>
   </div>
@@ -211,15 +211,15 @@
   <div class="band-head">
     <p class="eyebrow"><span class="num">07</span> GET IT</p>
     <h2>On a handheld.</h2>
-    <p class="lede">Twill Studio installs through PortMaster, which runs on most Linux handheld
-      systems.</p>
+    <p class="lede">One download per system. Find the one your handheld runs.</p>
   </div>
-  <ol class="steps">
-    <li><span class="num">01</span><b>Download</b> <a href="https://github.com/LiminalKid/TwillStudio/releases/latest/download/twill.zip">twill.zip</a>, the PortMaster package.</li>
-    <li><span class="num">02</span><b>Copy it</b> into PortMaster's <i>autoinstall</i> folder on the handheld's card.</li>
-    <li><span class="num">03</span><b>Open PortMaster.</b> It installs the zip when it starts.</li>
-    <li><span class="num">04</span><b>Start Twill Studio</b> from Ports. Menu + Start quits.</li>
-  </ol>
+  <dl class="spec">
+    <div><dt>KNULLI</dt><dd><a href="https://github.com/LiminalKid/TwillStudio/releases/latest/download/TwillStudio-KNULLI.zip">TwillStudio-KNULLI.zip</a>: unzip it into <code>roms/ports</code> on the card's SHARE partition, update the gamelists and start it from Ports. Nothing else to install.</dd></div>
+    <div><dt>NEXTUI</dt><dd>Install Twill Studio from the Pak Store, or unzip <a href="https://github.com/LiminalKid/TwillStudio/releases/latest/download/TwillStudio.pak.zip">TwillStudio.pak.zip</a> into <code>Tools/tg5040/Twill Studio.pak/</code></dd></div>
+    <div><dt>TRIMUI STOCK</dt><dd><a href="https://github.com/LiminalKid/TwillStudio/releases/latest/download/TwillStudio-TrimUI.zip">TwillStudio-TrimUI.zip</a>: unzip it at the top of the card and start it from Apps</dd></div>
+    <div><dt>PORTMASTER</dt><dd>ROCKNIX, muOS, dArkOS, AmberELEC and others: find Twill Studio in PortMaster, or put the newest <a href="https://github.com/LiminalKid/TwillStudio/releases/latest/download/twill.zip">twill.zip</a> in its <i>autoinstall</i> folder and open PortMaster</dd></div>
+  </dl>
+  <p class="fine">Quit from the end of the main menu, or with Menu + Start. Songs stay when you update.</p>
   <dl class="spec">
     <div><dt>NEEDS</dt><dd>A 64-bit (AArch64) handheld with a screen of 640×480 or more</dd></div>
     <div><dt>TESTED ON</dt><dd>TrimUI Brick Pro and Anbernic RG28XX (KNULLI), Retroid Pocket 5 (ROCKNIX)</dd></div>
@@ -250,7 +250,6 @@
     <div>
       <h3><span class="dot next"></span>NEXT</h3>
       <ul>
-        <li>A listing in PortMaster's catalogue (in testing now)</li>
         <li>In the browser: songs, samples and renders in and out</li>
         <li>More handhelds, as people try it</li>
       </ul>
@@ -279,7 +278,7 @@
     </details>
     <details>
       <summary>What does it run on?</summary>
-      <p>64-bit Linux handhelds through PortMaster, with a screen of 640×480 or larger; current
+      <p>64-bit Linux handhelds (KNULLI, NextUI, the stock TrimUI system, and others through PortMaster), with a screen of 640×480 or larger; current
         web browsers on a computer; and macOS or Linux if you build it yourself.</p>
     </details>
     <details>

@@ -599,8 +599,7 @@ size back.
 - *Portrait panels* (a portrait panel in a landscape case, like the RG28XX's): the app draws
   landscape and turns the picture on its way out, the way the kernel says the panel is mounted
   (`fbcon=rotate:` on the boot command line, else the DRM panel's `panel_orientation`, the same
-  sources PortMaster reads), else 270°. `TWILL_ROTATE=0/90/270` overrides it; the RG28XX launcher
-  sets 270, the direction checked on the device, until the kernel's answer has been seen in its log.
+  sources PortMaster reads), else 270°. `TWILL_ROTATE=0/90/270` overrides it.
 
 - **gfx/** is a small software rasterizer of our own: filled and rounded rectangles, lines, alpha
   blending, clipping, bitmap blits. It needs no GPU, so it ports anywhere a framebuffer can be shown.
@@ -780,7 +779,8 @@ and record into the clip, quantized or not.
 - **Global chords:** Select + left/right switches view, Select + B undoes, Select + A redoes,
   L or R + Start plays from the cursor (it was Select + Start until 0.2.0; that's PortMaster's and
   most handheld front ends' "close the app" shortcut, so the app leaves it free). **Menu + Start
-  quits** (on a few devices PortMaster closes ports with that same chord, which is just as good).
+  quits** (on a few devices PortMaster closes ports with that same chord, which is just as good). *Since 2026-11-24* the main menu ends with
+  **Quit Twill** (pressed twice; not in the browser).
   **Menu on its own opens the project panel** (tempo, key, scale, files, MIDI clock) from any view; the hint bar says so when
   there is room. (X on an empty bar in the arrangement still opens it too.) *Since 2026-11-21 Menu
   opens the screen's own settings and Select + X the main menu; see above.*
@@ -896,6 +896,12 @@ Project
   licences from `third_party/` and writes a zip in the installed layout. Checked at PortMaster's
   test sizes with headless renders: 640x480, 720x720 (the top bar drops the track name, the master
   strip uses short EQ labels) and 1280x720 are fine; 480x320 works but is cramped, hence `!lowres`.
+  *Since 2026-11-24* KNULLI has a package of its own, for people who'd rather not set PortMaster up:
+  `tools/make-knulli-zip.sh` writes `TwillStudio-KNULLI.zip` (`packaging/knulli/`'s launcher and the
+  `twill/` folder), unzipped into `roms/ports`. It has PortMaster's folder and program names, so
+  either package updates the other and songs stay. With no gptokeyb2, the launcher sets
+  `TWILL_SELECT_START_QUITS` and Twill watches for that chord itself. The launcher asks for full CPU
+  speed while Twill runs (the `performance` governor, put back on exit), as the NextUI one does.
   On a GameController pad a stick click stands in for Menu (not every handheld has one).
 - **Third-party code** is vendored under `third_party/` with its licences and source commit: `plaits/dsp`,
   the `stmlib` subset, Clouds' reverb, `dr_wav`, and the font (OFL).

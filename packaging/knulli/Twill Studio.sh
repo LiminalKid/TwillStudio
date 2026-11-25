@@ -1,25 +1,42 @@
 #!/bin/bash
-# KNULLI Ports launcher. Goes in /userdata/roms/ports/ next to the twill/ folder.
-dir="$(dirname "$0")/twill"
-cd "$dir" || exit 1
+# Twill Studio's launcher for KNULLI's Ports, with nothing else needed (no PortMaster). Goes in
+# /userdata/roms/ports/ next to the twill/ folder, which holds the program and everything the app
+# saves: the same folder and file names as PortMaster's package, so either one updates the other.
+cd "$(dirname "$0")/twill" || exit 1
+exec > log.txt 2>&1
+echo "Twill Studio for KNULLI, $(date 2>/dev/null); $(cat /usr/share/knulli/knulli.version /usr/share/batocera/batocera.version 2>/dev/null | head -n1)"
 
-# Portrait panels (Anbernic RG28XX): the app turns the picture the way the kernel says the panel
-# is mounted. This line fixes it at 270, known right on the RG28XX; if the picture comes out upside
-# down on another device, change 270 to 90.
-export TWILL_ROTATE=270
+# No helper watches for Select + Start here, as PortMaster's does, so Twill does.
+export TWILL_SELECT_START_QUITS=1
 
-# A copy of the front end's controller config, for setting up a new device from the log.
-cp /userdata/system/configs/emulationstation/es_input.cfg ./es_input.cfg 2>/dev/null ||
-  cp /usr/share/emulationstation/es_input.cfg ./es_input.cfg 2>/dev/null
+# KNULLI's battery saver mutes the sound after minutes without a button press; Twill holds it off
+# with this file while a song plays.
+PAUSE=/var/run/battery-saver/twill.pause
+[ -d "${PAUSE%/*}" ] && export TWILL_KEEP_AWAKE="$PAUSE"
 
-# Songs and the autosave from before the app was renamed (Fluorescent) carry the old extension.
-for f in *.fluo projects/*.fluo; do
-  [ -e "$f" ] && [ ! -e "${f%.fluo}.twill" ] && mv "$f" "${f%.fluo}.twill"
-done
+# Full CPU speed while it runs, so the sound keeps up; put back however it ends.
+GOV="$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null)"
+set_governor() {
+  local g
+  for g in /sys/devices/system/cpu/cpu[0-9]*/cpufreq/scaling_governor; do
+    [ -w "$g" ] && echo "$1" > "$g"
+  done 2>/dev/null
+}
+restore() {
+  [ -n "$GOV" ] && set_governor "$GOV"
+  rm -f "$PAUSE" /tmp/twill.aarch64
+}
+trap restore EXIT
+trap 'exit 1' INT TERM HUP QUIT
+[ -n "$GOV" ] && set_governor performance
+echo "CPU governor: $(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null) (was $GOV)"
 
-# An exFAT card can't mark a file executable; run a copy from memory instead.
-app=./twill
+# Copied over a network share, the program may have lost its executable bit, and some cards can't
+# keep one: then it runs from a copy in memory.
+app=./twill.aarch64
+chmod +x "$app" 2>/dev/null
 if [ ! -x "$app" ]; then
-  cp "$app" /tmp/twill && chmod 755 /tmp/twill && app=/tmp/twill
+  cp "$app" /tmp/twill.aarch64 && chmod 755 /tmp/twill.aarch64 && app=/tmp/twill.aarch64
 fi
-"$app" > log.txt 2>&1
+"$app"
+echo "exited: $?"

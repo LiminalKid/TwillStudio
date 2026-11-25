@@ -13,9 +13,9 @@ BIN="$ROOT/build/knulli/twill"
 
 sftp -q -b - "$DEVICE" <<EOF
 -mkdir /userdata/roms/ports/twill
-put "$BIN" /userdata/roms/ports/twill/twill
+put "$BIN" /userdata/roms/ports/twill/twill.aarch64
 put "$ROOT/packaging/knulli/Twill Studio.sh" "/userdata/roms/ports/Twill Studio.sh"
-chmod 755 /userdata/roms/ports/twill/twill
+chmod 755 /userdata/roms/ports/twill/twill.aarch64
 chmod 755 "/userdata/roms/ports/Twill Studio.sh"
 EOF
 echo "Deployed to $DEVICE:/userdata/roms/ports/"

@@ -163,6 +163,7 @@ class App {
   void select_inspector_row(int row);  // scrolls it into view
   // True on the second press of the same thing within four seconds; the first shows `prompt`.
   bool confirm_twice(const char* what, const std::string& prompt);
+  void ask_quit();  // the main menu's Quit Twill: on a second press
   void message(const std::string& text);  // shown briefly in the hint bar
   // Adds the project file actions (save, load, new, render) to a settings panel's fields.
   // The settings menu's song, export and MIDI rows.
