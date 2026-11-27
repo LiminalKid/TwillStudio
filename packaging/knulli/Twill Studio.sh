@@ -9,6 +9,10 @@ echo "Twill Studio for KNULLI, $(date 2>/dev/null); $(cat /usr/share/knulli/knul
 # No helper watches for Select + Start here, as PortMaster's does, so Twill does.
 export TWILL_SELECT_START_QUITS=1
 
+# Recording samples: a USB input (a synth, a mic, an interface) records through PipeWire. The
+# Brick Pro's own mic doesn't yet under KNULLI's beta (PipeWire can't start it), so it records silence.
+export TWILL_CAPTURE=1
+
 # KNULLI's battery saver mutes the sound after minutes without a button press; Twill holds it off
 # with this file while a song plays.
 PAUSE=/var/run/battery-saver/twill.pause

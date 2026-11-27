@@ -39,5 +39,8 @@ for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do echo performa
 echo 1 > /tmp/stay_awake 2>/dev/null
 echo 1 > /tmp/stay_alive 2>/dev/null
 
+# Recording samples from a USB input (a synth, a mic, an interface): Twill reads the card itself.
+export TWILL_CAPTURE=1
+
 "$PAK_DIR/twill.aarch64"
 echo "exited: $?"

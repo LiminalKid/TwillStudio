@@ -1,6 +1,7 @@
 #include "app/ArrangementView.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 
 #include "app/Paper.h"
@@ -339,31 +340,12 @@ void ArrangementView::handle_input() {
     }
   }
   if (in.released(kB)) {
-    if (!b_used_ && pi >= 0) {
-      arr.erase(arr.begin() + pi);
-      h.set_arrangement(track, arr);
-      app_.message("Clip removed");
-    }
+    if (!b_used_ && pi >= 0) remove(track, pi);
     h.end_group();
   }
 
   // Y: duplicate after the clip (the copy plays the same clip). With A held, see above.
-  if (in.pressed(kY) && pi >= 0 && !in.held(kA)) {
-    Placement copy = arr[size_t(pi)];
-    copy.start += copy.length;
-    bool clear = true;
-    for (const Placement& o : arr)
-      if (copy.start < o.start + o.length && o.start < copy.start + copy.length) clear = false;
-    if (clear) {
-      arr.push_back(copy);
-      h.set_arrangement(track, arr);
-      cursor_bar_ = copy.start / kBar;
-      moved = true;
-      app_.message("Duplicated (linked)");
-    } else {
-      app_.message("No room after this clip");
-    }
-  }
+  if (in.pressed(kY) && pi >= 0 && !in.held(kA)) moved = duplicate(track, pi);
 
   // X: open the clip in the roll; the track's settings (on its header); the project's.
   if (in.pressed(kX)) {
@@ -405,16 +387,42 @@ void ArrangementView::handle_input() {
     if (in.pressed_or_repeat(kDown)) app_.set_track(track + 1), moved = true;
   }
   if (moved || in.pressed(~0u)) {
-    // The roll follows the clip under the arrangement cursor.
-    const int t = app_.track();
-    const int cur = cursor_bar_ >= 0 ? placement_at(t, cursor_bar_) : -1;
-    if (cur >= 0) {
-      const Placement& pl = p.tracks[size_t(t)].arrangement[size_t(cur)];
-      if (!(app_.open_placement() && *app_.open_placement() == pl)) app_.open(t, pl);
-    }
+    follow_cursor();
     clamp_scroll(layout());
     app_.invalidate(app_.content_rect());
   }
+}
+
+void ArrangementView::follow_cursor() {
+  // The roll follows the clip under the arrangement cursor.
+  const int t = app_.track();
+  const int cur = cursor_bar_ >= 0 ? placement_at(t, cursor_bar_) : -1;
+  if (cur < 0) return;
+  const Placement& pl = app_.project().tracks[size_t(t)].arrangement[size_t(cur)];
+  if (!(app_.open_placement() && *app_.open_placement() == pl)) app_.open(t, pl);
+}
+
+bool ArrangementView::duplicate(int track, int pi) {
+  std::vector<Placement> arr = app_.project().tracks[size_t(track)].arrangement;
+  Placement copy = arr[size_t(pi)];
+  copy.start += copy.length;
+  for (const Placement& o : arr)
+    if (copy.start < o.start + o.length && o.start < copy.start + copy.length) {
+      app_.message("No room after this clip");
+      return false;
+    }
+  arr.push_back(copy);
+  app_.history().set_arrangement(track, arr);
+  cursor_bar_ = int(copy.start / kBar);
+  app_.message("Duplicated (linked)");
+  return true;
+}
+
+void ArrangementView::remove(int track, int pi) {
+  std::vector<Placement> arr = app_.project().tracks[size_t(track)].arrangement;
+  arr.erase(arr.begin() + pi);
+  app_.history().set_arrangement(track, arr);
+  app_.message("Clip removed");
 }
 
 void ArrangementView::tick() {
@@ -587,6 +595,308 @@ void ArrangementView::draw(Canvas& c) {
     if (x >= l.grid.x && x < l.grid.right()) {
       c.fill(Rect{x, l.ruler.y + int(app_.u(2)), line, l.ruler.h + l.grid.h - int(app_.u(2))}, th.playhead_line);
       draw_marker(c, x, l.ruler.y + int(app_.u(15)), int(app_.u(5)), th.playhead_line);
+    }
+  }
+}
+
+// The pointer.
+
+int ArrangementView::track_at(const Layout& l, int y) const {
+  if (y < l.grid.y || y >= l.grid.bottom()) return -1;
+  const int t = top_track_ + (y - l.grid.y) / l.row_h;
+  return t < int(app_.project().tracks.size()) ? t : -1;
+}
+
+int ArrangementView::bar_at(const Layout& l, int x) const {
+  if (x < l.grid.x) return -1;
+  return scroll_bar_ + (x - l.grid.x) / l.bar_w;
+}
+
+Rect ArrangementView::bar_rect(int track, int bar) const {
+  const Layout l = layout();
+  const int row = track - top_track_;
+  if (row < 0 || bar < scroll_bar_) return Rect{};
+  return Rect{bar_x(l, bar), l.grid.y + row * l.row_h, l.bar_w, l.row_h}.intersect(l.grid);
+}
+
+Rect ArrangementView::header_rect(int track) const {
+  const Layout l = layout();
+  const int row = track - top_track_;
+  if (row < 0) return Rect{};
+  return Rect{l.headers.x, l.grid.y + row * l.row_h, l.headers.w, l.row_h}.intersect(l.headers);
+}
+
+void ArrangementView::scroll_by(const Layout& l, float tracks, float bars) {
+  scroll_tracks_ += tracks;
+  scroll_bars_ += bars;
+  const int dt = int(scroll_tracks_), db = int(scroll_bars_);
+  scroll_tracks_ -= float(dt);
+  scroll_bars_ -= float(db);
+  if (!dt && !db) return;
+  const int visible = std::max(1, l.grid.h / l.row_h);
+  const int ntracks = int(app_.project().tracks.size());
+  const int top = std::max(0, std::min(std::max(0, ntracks - visible), top_track_ + dt));
+  const int sb = std::max(0, std::min(9999, scroll_bar_ + db));
+  if (top == top_track_ && sb == scroll_bar_) return;
+  top_track_ = top;
+  scroll_bar_ = sb;
+  app_.invalidate(app_.content_rect());
+}
+
+void ArrangementView::open_clip_menu(int track, Tick start) {
+  App& app = app_;
+  // The placement starting at `start` on the track, now (the panel outlives edits): its index, or -1.
+  auto find = [&app, track](Tick at) {
+    const auto& arr = app.project().tracks[size_t(track)].arrangement;
+    for (size_t i = 0; i < arr.size(); ++i)
+      if (arr[i].start == at) return int(i);
+    return -1;
+  };
+  const int pi = find(start);
+  if (pi < 0) return;
+  std::vector<InspectorField> fields;
+  fields.push_back({"Open in the roll", [] { return std::string("press A"); }, nullptr, [&app, track, start, find] {
+                      const int i = find(start);
+                      app.close_inspector();
+                      if (i < 0) return;
+                      app.open(track, app.project().tracks[size_t(track)].arrangement[size_t(i)]);
+                      app.show(App::View::PianoRoll);
+                    }});
+  fields.push_back({"Length",
+                    [&app, track, start, find] {
+                      const int i = find(start);
+                      if (i < 0) return std::string("-");
+                      const Tick len = app.project().tracks[size_t(track)].arrangement[size_t(i)].length;
+                      char b[24];
+                      std::snprintf(b, sizeof b, "%g bar%s", double(len) / kBar, len == kBar ? "" : "s");
+                      return std::string(b);
+                    },
+                    [&app, track, start, find](int step, bool) {
+                      const int i = find(start);
+                      if (i < 0) return;
+                      std::vector<Placement> arr = app.project().tracks[size_t(track)].arrangement;
+                      Placement& pl = arr[size_t(i)];
+                      Tick len = std::max(kBar, pl.length + step * kBar);
+                      for (const Placement& o : arr)
+                        if (o.start > pl.start) len = std::min(len, o.start - pl.start);
+                      pl.length = len;
+                      app.history().set_arrangement(track, arr);
+                    }});
+  fields.push_back({"Duplicate (linked)", [] { return std::string("press A"); }, nullptr, [this, &app, track, start, find] {
+                      const int i = find(start);
+                      app.close_inspector();
+                      if (i >= 0 && duplicate(track, i)) follow_cursor();
+                    }});
+  fields.push_back({"Copy", [] { return std::string("press A"); }, nullptr, [this, &app, track, start] {
+                      app.close_inspector();
+                      app.set_track(track);
+                      cursor_bar_ = int(start / kBar);
+                      copy();
+                    }});
+  fields.push_back({"Delete", [] { return std::string("press A"); }, nullptr, [this, &app, track, start, find] {
+                      const int i = find(start);
+                      app.close_inspector();
+                      if (i >= 0) remove(track, i);
+                    }});
+  const Clip* clip = app.project().find_clip(app.project().tracks[size_t(track)].arrangement[size_t(pi)].clip_id);
+  app.open_inspector(clip && !clip->name.empty() ? clip->name : std::string("Clip"), std::move(fields));
+}
+
+void ArrangementView::open_bar_menu(int track, int bar) {
+  App& app = app_;
+  std::vector<InspectorField> fields;
+  fields.push_back({"New clip", [] { return std::string("press A"); }, nullptr, [this, &app, track, bar] {
+                      app.close_inspector();
+                      if (placement_at(track, bar) >= 0) return;
+                      app.history().add_clip(track, kBar, bar * kBar);
+                      app.message("New clip");
+                      follow_cursor();
+                    }});
+  if (app.clip_clipboard().id != 0)
+    fields.push_back({"Paste clip", [] { return std::string("press A"); }, nullptr, [this, &app] {
+                        app.close_inspector();
+                        paste();
+                        follow_cursor();
+                      }});
+  fields.push_back({"Main menu", [] { return std::string("press A"); }, nullptr, [&app] { app.open_main_menu(); }});
+  char title[24];
+  std::snprintf(title, sizeof title, "Bar %d", bar + 1);
+  app.open_inspector(title, std::move(fields));
+}
+
+void ArrangementView::pointer(const Gesture& g) {
+  const Layout l = layout();
+  const Rect content = app_.content_rect();
+  EditHistory& h = app_.history();
+  auto end_group = [&] {
+    if (pointer_group_) h.end_group();
+    pointer_group_ = false;
+  };
+  auto begin_group = [&] {
+    if (!pointer_group_) h.begin_group();
+    pointer_group_ = true;
+  };
+  // Whether a point is on the right end of a placement (to change its length): a finger reaches
+  // further, but never more than a third of the way along it.
+  auto at_end = [&](const Placement& pl, int x, bool touch) {
+    const int x1 = bar_x(l, double(pl.start + pl.length) / kBar), x0 = bar_x(l, double(pl.start) / kBar);
+    const int reach = std::min(int(app_.u(touch ? 14 : 6)), (x1 - x0) / 3);
+    return x >= x1 - reach;
+  };
+  auto grab = [&](int track, const Placement& pl, bool end) {
+    grabbed_ = true;
+    grabbed_end_ = end;
+    drag_track_ = track;
+    drag_start_ = orig_start_ = pl.start;
+    orig_length_ = pl.length;
+  };
+
+  switch (g.kind) {
+    case Gesture::Press: {
+      drag_ = Drag::None;
+      grabbed_ = pressed_empty_ = false;
+      if (!content.contains(g.x, g.y)) return;
+      if (l.ruler.contains(g.x, g.y)) {  // the cursor to that bar; playback too, if playing
+        if (g.button != 1) return;
+        cursor_bar_ = bar_at(l, g.x);
+        if (app_.engine().playing()) app_.play_from(cursor_song_position());
+        follow_cursor();
+        app_.invalidate(content);
+        return;
+      }
+      const int t = track_at(l, g.y);
+      if (t < 0) return;
+      app_.set_track(t);
+      if (l.headers.contains(g.x, g.y)) {
+        cursor_bar_ = -1;
+        if (g.button == 2 || g.taps == 2) open_track_settings(t);
+        app_.invalidate(content);
+        return;
+      }
+      const int bar = bar_at(l, g.x);
+      cursor_bar_ = bar;
+      const int pi = placement_at(t, bar);
+      if (pi >= 0) {
+        const Placement pl = app_.project().tracks[size_t(t)].arrangement[size_t(pi)];
+        follow_cursor();
+        app_.invalidate(content);
+        if (g.button == 2) return open_clip_menu(t, pl.start);
+        if (g.taps == 2) {
+          app_.show(App::View::PianoRoll);
+          return;
+        }
+        if (g.button == 1) grab(t, pl, at_end(pl, g.x, g.touch()));
+        return;
+      }
+      app_.invalidate(content);
+      if (g.button == 2) return open_bar_menu(t, bar);
+      if (g.button != 1) return;
+      // An empty bar: a clip, at once, from a mouse (a drag from here makes it longer); a finger
+      // waits for its tap.
+      if (g.touch()) {
+        pressed_empty_ = true;
+        return;
+      }
+      begin_group();
+      h.add_clip(t, kBar, bar * kBar);
+      app_.message("New clip");
+      follow_cursor();
+      const int ni = placement_at(t, bar);
+      if (ni >= 0) grab(t, app_.project().tracks[size_t(t)].arrangement[size_t(ni)], true);
+      return;
+    }
+    case Gesture::Tap: {
+      if (pressed_empty_) {
+        const int t = track_at(l, g.y), bar = bar_at(l, g.x);
+        if (t >= 0 && bar >= 0 && placement_at(t, bar) < 0) {
+          h.add_clip(t, kBar, bar * kBar);
+          app_.message("New clip");
+          follow_cursor();
+          app_.invalidate(content);
+        }
+      }
+      pressed_empty_ = grabbed_ = false;
+      end_group();
+      return;
+    }
+    case Gesture::LongPress: {
+      // A finger's right-click: the menu of what's under it.
+      pressed_empty_ = grabbed_ = false;
+      if (!l.grid.contains(g.x, g.y) && !l.headers.contains(g.x, g.y)) return;
+      const int t = track_at(l, g.y);
+      if (t < 0) return;
+      if (l.headers.contains(g.x, g.y)) return open_track_settings(t);
+      const int bar = bar_at(l, g.x), pi = placement_at(t, bar);
+      if (pi >= 0) return open_clip_menu(t, app_.project().tracks[size_t(t)].arrangement[size_t(pi)].start);
+      return open_bar_menu(t, bar);
+    }
+    case Gesture::DragStart:
+      pressed_empty_ = false;
+      if (!content.contains(g.start_x, g.start_y)) return;
+      if (grabbed_) {
+        drag_ = grabbed_end_ ? Drag::Resize : Drag::Move;
+        begin_group();
+      } else if (g.touch() || l.headers.contains(g.start_x, g.start_y)) {
+        drag_ = Drag::Scroll;
+      }
+      return;
+    case Gesture::Drag: {
+      if (drag_ == Drag::Scroll) return scroll_by(l, -float(g.dy) / l.row_h, -float(g.dx) / l.bar_w);
+      if (drag_ != Drag::Move && drag_ != Drag::Resize) return;
+      if (drag_track_ < 0 || drag_track_ >= int(app_.project().tracks.size())) return;
+      // Whole bars from where it was taken hold of.
+      const int bars = int(std::floor(float(g.x - g.start_x) / l.bar_w + 0.5f));
+      std::vector<Placement> arr = app_.project().tracks[size_t(drag_track_)].arrangement;
+      auto it = std::find_if(arr.begin(), arr.end(), [&](const Placement& p) { return p.start == drag_start_; });
+      if (it == arr.end()) return;
+      if (drag_ == Drag::Resize) {
+        Tick len = std::max(kBar, orig_length_ + bars * kBar);
+        for (const Placement& o : arr)
+          if (o.start > it->start) len = std::min(len, o.start - it->start);
+        if (len == it->length) return;
+        it->length = len;
+      } else {
+        const Tick start = std::max<Tick>(0, orig_start_ + bars * kBar);
+        if (start == it->start) return;
+        for (const Placement& o : arr)
+          if (&o != &*it && start < o.start + o.length && o.start < start + it->length) return;  // no room
+        cursor_bar_ += int((start - it->start) / kBar);
+        it->start = drag_start_ = start;
+      }
+      h.set_arrangement(drag_track_, arr);
+      follow_cursor();
+      app_.invalidate(content);
+      return;
+    }
+    case Gesture::DragEnd:
+    case Gesture::Cancel:
+      drag_ = Drag::None;
+      grabbed_ = pressed_empty_ = false;
+      end_group();
+      app_.invalidate(content);
+      return;
+    case Gesture::Wheel:
+      if (!content.contains(g.x, g.y)) return;
+      // Away from the user: up the tracks (Shift, or a sideways wheel: back along the bars).
+      if (g.shift) scroll_by(l, 0, -g.wheel_y * 2);
+      else scroll_by(l, -g.wheel_y, g.wheel_x * 2);
+      return;
+    case Gesture::Pan:
+      if (content.contains(g.x, g.y)) scroll_by(l, -float(g.dy) / l.row_h, -float(g.dx) / l.bar_w);
+      return;
+    case Gesture::Pinch: {
+      if (!content.contains(g.x, g.y) || g.scale <= 0) return;
+      // Spread: the bars wider (fewer to a cell); pinched: narrower.
+      pinch_ += std::log(g.scale);
+      const float step = std::log(1.5f);
+      int by = 0;
+      while (pinch_ >= step) pinch_ -= step, ++by;
+      while (pinch_ <= -step) pinch_ += step, --by;
+      const int was = bars_per_cell_;
+      for (; by > 0; --by) bars_per_cell_ = std::max(1, bars_per_cell_ / 2);
+      for (; by < 0; ++by) bars_per_cell_ = std::min(4, bars_per_cell_ * 2);
+      if (bars_per_cell_ != was) app_.invalidate(content);
+      return;
     }
   }
 }

@@ -25,6 +25,9 @@ cd "$GAMEDIR"
 
 export SDL_GAMECONTROLLERCONFIG="$sdl_controllerconfig"
 
+# Recording samples from a USB input (a synth, a mic, an interface): Twill reads the card itself.
+export TWILL_CAPTURE=1
+
 # KNULLI's battery saver mutes the sound after minutes without a button press; Twill holds it off
 # with this file while a song plays.
 PAUSE=/var/run/battery-saver/twill.pause

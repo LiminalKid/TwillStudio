@@ -4,8 +4,12 @@
 // Audio page, every pad the SDK knows (by position: A is the right-hand face button), and the MIDI
 // ports chosen in its MIDI page.
 #pragma once
+#include <sndstation/audiocard.h>
+#include <sndstation/audioin.h>
 #include <sndstation/audioout.h>
 #include <sndstation/pad.h>
+
+#include <atomic>
 
 #include "platform/sdl2/Sdl2Platform.h"
 
@@ -27,6 +31,15 @@ class SndstationPlatform : public Sdl2Platform {
   bool prefers_long_audio_buffer() const override { return false; }
 
   const char* controller_name() const override;
+
+  // Recording through the SDK's input (InputMeter: the card's own hw device, in its own format, on
+  // alsa-lib), not SDL's: SDL asked plughw for converted samples, and on the Brick Pro that
+  // overran and lost bits of a USB synth's sound. Inputs are the cards that record, by name.
+  bool capture_available() override;
+  std::vector<std::string> capture_devices() override;
+  bool capture_open(const std::string& device, CaptureInfo& info, std::string& error) override;
+  void capture_close() override;
+  int capture_info_channels() const { return capture_channels(); }
 #if TWILL_PLUGINS
   // CLAP instruments, through the SDK's host (SndstationPlugins.cpp).
   PluginHost* plugins() override;
@@ -49,6 +62,10 @@ class SndstationPlatform : public Sdl2Platform {
   void* cb_user_ = nullptr;
   bool audio_open_ = false;
   sndstation::pad::State pad_;
+  std::vector<sndstation::audiocard::Card> capture_cards();  // those that record, real ones
+  static std::string input_name(const sndstation::audiocard::Card& card);
+  sndstation::InputMeter in_;
+  std::atomic<bool> in_ready_{false};  // its blocks go to the ring once the ring knows its shape
 #if TWILL_PLUGINS
   std::unique_ptr<PluginHost> plugins_;
 #endif

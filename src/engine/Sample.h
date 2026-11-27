@@ -53,6 +53,8 @@ std::vector<int> transient_slices(const SampleData& s, float start, float end, i
 
 // Encodes interleaved stereo float at 48 kHz as a 16-bit WAV file.
 std::vector<uint8_t> encode_wav16(const float* stereo, int frames, int sample_rate = 48000);
+// The same for any number of channels (a recorded take: mono, at its input's own rate).
+std::vector<uint8_t> encode_wav16_channels(const float* data, int frames, int sample_rate, int channels);
 // The same as 32-bit float, which keeps peaks over full scale (stems, with no limiter before them).
 std::vector<uint8_t> encode_wav_float(const float* stereo, int frames, int sample_rate = 48000);
 

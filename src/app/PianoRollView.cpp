@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdio>
 
 #include "app/PianoKeys.h"
@@ -884,7 +885,7 @@ void PianoRollView::draw(Canvas& c) {
   }
 
   // Selection rectangle while Y is held.
-  if (app_.input().held(kY) && y_used_) {
+  if ((app_.input().held(kY) && y_used_) || area_) {
     const Tick t0 = std::min(y_anchor_tick_, cursor_), t1 = std::max(y_anchor_tick_, cursor_) + s;
     const int r0 = std::min(row_of(y_anchor_pitch_), row_of(cursor_pitch_)) - top_row_;
     const int r1 = std::max(row_of(y_anchor_pitch_), row_of(cursor_pitch_)) - top_row_;
@@ -1042,6 +1043,455 @@ void PianoRollView::draw_lane(Canvas& c, const Layout& l, const Clip& clip) {
   if (lane_focus_) {
     const int x = tick_x(l, cursor_);
     draw_brackets(c, Rect{x + 1, r.y + int(app_.u(5)), l.cell_w - 1, r.h - int(app_.u(10))}, th.text, app_.u(1));
+  }
+}
+
+// --- The pointer -------------------------------------------------------------------------------
+
+int PianoRollView::row_at(const Layout& l, int y) const {
+  if (y < l.grid.y || y >= l.grid.bottom()) return -1;
+  const int r = top_row_ + (y - l.grid.y) / l.row_h;
+  return r < int(rows_.size()) ? r : -1;
+}
+
+Tick PianoRollView::tick_at(const Layout& l, int x) const {
+  return scroll_ + Tick(int64_t(x - l.grid.x) * snap() / l.cell_w);
+}
+
+Rect PianoRollView::cell_rect(Tick t, int pitch) const {
+  const Layout l = layout();
+  const int r = row_of(pitch) - top_row_;
+  if (r < 0) return Rect{};
+  return Rect{tick_x(l, t), l.grid.y + r * l.row_h, l.cell_w, l.row_h}.intersect(l.grid);
+}
+
+const Note* PianoRollView::note_at(const Layout& l, int x, int y, bool touch, bool& at_end) const {
+  at_end = false;
+  const Clip* clip = app_.open_clip();
+  const int r = row_at(l, y);
+  if (!clip || r < 0 || x < l.grid.x || x >= l.grid.right()) return nullptr;
+  const int pitch = rows_[size_t(r)];
+  // The right end takes a few pixels either side (a fingertip's worth for a finger), but never
+  // more than a third of the note, so a short one can still be moved.
+  const int reach = int(app_.u(touch ? 10 : 4));
+  const Note* best = nullptr;
+  for (const Note& n : clip->notes) {
+    if (n.pitch != pitch) continue;
+    const int x0 = tick_x(l, n.start), x1 = tick_x(l, n.start + n.length);
+    const int end_w = std::min(reach, std::max(1, (x1 - x0) / 3));
+    if (x < x0 || x >= x1 + end_w) continue;
+    if (!best || n.start > best->start) {
+      best = &n;
+      at_end = x >= x1 - end_w;
+    }
+  }
+  return best;
+}
+
+void PianoRollView::scroll_by(const Layout& l, float rows, float cells) {
+  const Clip* clip = app_.open_clip();
+  scroll_rows_ += rows;
+  scroll_cells_ += cells;
+  const int dr = int(scroll_rows_), dc = int(scroll_cells_);
+  scroll_rows_ -= float(dr);
+  scroll_cells_ -= float(dc);
+  if (!dr && !dc) return;
+  const int visible_rows = std::max(1, l.grid.h / l.row_h);
+  top_row_ = std::max(0, std::min(top_row_ + dr, int(rows_.size()) - visible_rows));
+  const Tick s = snap();
+  const Tick last = clip ? std::max<Tick>(0, (clip->length - 1) / s * s) : 0;
+  scroll_ = std::max<Tick>(0, std::min(last, scroll_ + Tick(dc) * s));
+  app_.invalidate(app_.content_rect());
+}
+
+void PianoRollView::select_area(Tick t0, Tick t1, int pitch0, int pitch1, bool add) {
+  const Clip* clip = app_.open_clip();
+  if (!clip) return;
+  if (!add) selection_.clear();
+  for (const Note& n : clip->notes)
+    if (n.pitch >= pitch0 && n.pitch <= pitch1 && n.start < t1 && n.start + n.length > t0 && !contains(selection_, n.id))
+      selection_.push_back(n.id);
+}
+
+void PianoRollView::pointer_lane(const Layout& l, int x, int y, bool remove) {
+  Clip* clip = app_.open_clip();
+  if (!clip || l.lane.empty()) return;
+  const Tick s = snap();
+  x = std::max(l.lane.x, std::min(l.lane.right() - 1, x));
+  const Tick t = std::max<Tick>(0, tick_at(l, x) / s * s);
+  if (t >= clip->length) return;
+  cursor_ = t;
+  float lo, hi;
+  lane_range(lo, hi);
+  // As drawn: the plot inside the strip, low values at the bottom.
+  const Rect plot{l.lane.x, l.lane.y + int(app_.u(6)), l.lane.w, l.lane.h - int(app_.u(10))};
+  const float frac = std::max(0.0f, std::min(1.0f, float(plot.bottom() - y) / float(std::max(1, plot.h))));
+  const float v = lo + frac * (hi - lo);
+  EditHistory& h = app_.history();
+  if (lane_ == 0) {
+    for (const Note& n : std::vector<Note>(clip->notes))
+      if (n.start >= t && n.start < t + s) {
+        Note copy = n;
+        copy.velocity = remove ? 100 : uint8_t(std::max(1, std::min(127, int(v + 0.5f))));
+        h.change_note(clip->id, copy);
+      }
+  } else {
+    const ParamId id = ParamId(lane_);
+    Clip copy = *clip;
+    Lane* lane = copy.lane(id);
+    if (remove) {
+      if (!lane) return;
+      lane->remove_point(t);
+      if (lane->points.empty()) copy.lanes.erase(copy.lanes.begin() + (lane - copy.lanes.data()));
+    } else {
+      if (!lane) {
+        if (copy.lanes.size() >= size_t(kMaxLanesPerClip)) {
+          app_.message("Up to 8 lanes per clip");
+          return;
+        }
+        copy.lanes.push_back(Lane{id, {}});
+        lane = &copy.lanes.back();
+      }
+      lane->set_point(t, v);
+    }
+    h.change_clip(copy);
+  }
+  app_.invalidate(app_.content_rect());
+}
+
+void PianoRollView::pointer_tap(const Layout& l, const Gesture& g) {
+  // A finger's tap on an empty cell adds a note (a mouse adds it on the press).
+  if (!pressed_empty_) return;
+  pressed_empty_ = false;
+  Clip* clip = app_.open_clip();
+  const int r = row_at(l, g.y);
+  if (!clip || r < 0) return;
+  const Tick s = snap();
+  const Tick t = std::max<Tick>(0, tick_at(l, g.x) / s * s);
+  if (t >= clip->length) return;
+  cursor_ = t;
+  cursor_pitch_ = rows_[size_t(r)];
+  Note n;
+  n.start = t;
+  n.length = std::max<Tick>(1, std::min(last_length_, clip->length - t));
+  n.pitch = uint8_t(cursor_pitch_);
+  const uint32_t id = app_.history().add_note(clip->id, n);
+  selection_ = {id};
+  tap_added_ = id;
+  audition(cursor_pitch_);
+  app_.invalidate(app_.content_rect());
+}
+
+void PianoRollView::let_go() {
+  if (key_held_ >= 0 && key_track_ >= 0 && key_track_ < int(app_.project().tracks.size()))
+    app_.engine().live_note(key_track_, uint8_t(key_held_), 0);
+  key_held_ = key_track_ = -1;
+}
+
+void PianoRollView::pointer(const Gesture& g) {
+  const Layout l = layout();
+  const Rect content = app_.content_rect();
+  EditHistory& h = app_.history();
+  auto end_group = [&] {
+    if (pointer_group_) h.end_group();
+    pointer_group_ = false;
+  };
+  auto begin_group = [&] {
+    if (!pointer_group_) h.begin_group();
+    pointer_group_ = true;
+  };
+  Clip* clip = app_.open_clip();
+
+  switch (g.kind) {
+    case Gesture::Press: {
+      pressed_empty_ = pressed_lane_ = false;
+      drag_note_ = 0;
+      if (!content.contains(g.x, g.y)) return;
+      if (!clip) {  // nothing to edit yet: a one-bar clip, as A makes
+        if (g.button != 1) return;
+        const int track = app_.track();
+        Tick at = 0;
+        for (const Placement& pl : app_.project().tracks[size_t(track)].arrangement) at = std::max(at, pl.start + pl.length);
+        h.add_clip(track, kBar, (at + kBar - 1) / kBar * kBar);
+        app_.message("New clip");
+        return;
+      }
+      const Tick s = snap();
+      if (!l.lane.empty() && (l.lane.contains(g.x, g.y) || l.lane_label.contains(g.x, g.y))) {
+        lane_focus_ = true;
+        if (!l.lane.contains(g.x, g.y)) {
+          app_.invalidate(content);
+          return;
+        }
+        pressed_lane_ = true;
+        begin_group();
+        pointer_lane(l, g.x, g.y, g.button == 2);
+        return;
+      }
+      if (lane_focus_) {
+        lane_focus_ = false;
+        app_.invalidate(content);
+      }
+      if (l.keys.contains(g.x, g.y)) {  // a key: its note, while held, as a MIDI keyboard's (playing or not)
+        const int r = row_at(l, g.y);
+        if (r >= 0) {
+          let_go();
+          cursor_pitch_ = rows_[size_t(r)];
+          key_held_ = cursor_pitch_;
+          key_track_ = app_.track();
+          app_.engine().live_note(key_track_, uint8_t(key_held_), 100);
+          app_.invalidate(content);
+        }
+        return;
+      }
+      if (l.ruler.contains(g.x, g.y)) {  // the ruler: the cursor to that step, and playback, if playing
+        const Tick t = std::max<Tick>(0, tick_at(l, g.x) / s * s);
+        if (t < clip->length) {
+          cursor_ = t;
+          if (app_.engine().playing()) app_.play_from(cursor_song_position());
+        }
+        app_.invalidate(content);
+        return;
+      }
+      if (!l.grid.contains(g.x, g.y)) return;
+      const int r = row_at(l, g.y);
+      if (r < 0) return;
+      const Tick t = std::max<Tick>(0, tick_at(l, g.x) / s * s);
+      bool at_end = false;
+      const Note* n = note_at(l, g.x, g.y, g.touch(), at_end);
+      cursor_pitch_ = rows_[size_t(r)];
+      if (t < clip->length) cursor_ = t;
+      if (n) {
+        const uint32_t id = n->id;
+        // A right-click, or the second of a double click: deleted (with the selection, if it's in it).
+        if (g.button == 2 || (g.taps == 2 && id != tap_added_)) {
+          const bool in_sel = contains(selection_, id);
+          std::vector<uint32_t> ids = in_sel ? selection_ : std::vector<uint32_t>{id};
+          h.begin_group();
+          for (uint32_t i : ids)
+            if (clip->find(i)) h.remove_note(clip->id, i);
+          h.end_group();
+          for (uint32_t i : ids) selection_.erase(std::remove(selection_.begin(), selection_.end(), i), selection_.end());
+          if (ids.size() > 1) app_.message("Deleted " + std::to_string(ids.size()) + " notes");
+          tap_added_ = 0;
+          app_.invalidate(content);
+          return;
+        }
+        if (g.shift) {  // in the selection, or out of it again
+          if (contains(selection_, id)) selection_.erase(std::find(selection_.begin(), selection_.end(), id));
+          else selection_.push_back(id);
+        } else if (!contains(selection_, id)) {
+          selection_ = {id};
+        }
+        last_length_ = n->length;
+        drag_note_ = id;
+        drag_add_ = at_end;  // held for DragStart: its end, to change its length
+        audition(n->pitch);
+        tap_added_ = 0;
+        app_.invalidate(content);
+        return;
+      }
+      if (g.button == 2) {  // a right-click on an empty cell: nothing selected (a right-drag: an area)
+        selection_.clear();
+        app_.invalidate(content);
+        return;
+      }
+      tap_added_ = 0;
+      // An empty cell: a note, at once, from a mouse; a finger waits for its tap (it may be
+      // scrolling). Shift: no note, the start of an area.
+      if (g.touch() || g.shift || t >= clip->length) {
+        pressed_empty_ = g.touch() && !g.shift;
+        app_.invalidate(content);
+        return;
+      }
+      begin_group();
+      Note nn;
+      nn.start = t;
+      nn.length = std::max<Tick>(1, std::min(last_length_, clip->length - t));
+      nn.pitch = uint8_t(cursor_pitch_);
+      const uint32_t id = h.add_note(clip->id, nn);
+      selection_ = {id};
+      tap_added_ = drag_note_ = id;
+      drag_add_ = true;  // a drag from here draws its length
+      audition(cursor_pitch_);
+      app_.invalidate(content);
+      return;
+    }
+    case Gesture::Tap:
+      let_go();
+      if (clip) pointer_tap(l, g);
+      end_group();
+      pressed_lane_ = false;
+      return;
+    case Gesture::LongPress:
+      pressed_empty_ = false;  // a long press on an empty cell: an area, not a note
+      return;
+    case Gesture::DragStart: {
+      drag_ = Drag::None;
+      pressed_empty_ = false;
+      if (key_held_ >= 0) {  // from key to key
+        drag_ = Drag::Keys;
+        return;
+      }
+      if (!clip || !content.contains(g.start_x, g.start_y)) return;
+      if (pressed_lane_) {
+        drag_ = Drag::Lane;
+        return;
+      }
+      if (!l.grid.contains(g.start_x, g.start_y)) return;
+      if (drag_note_ && clip->find(drag_note_)) {
+        // The note it took hold of, with the rest of the selection if it's in it.
+        drag_notes_.clear();
+        const std::vector<uint32_t> ids = contains(selection_, drag_note_) ? selection_ : std::vector<uint32_t>{drag_note_};
+        for (uint32_t id : ids)
+          if (const Note* n = clip->find(id)) drag_notes_.push_back(*n);
+        drag_ = drag_add_ ? Drag::Resize : Drag::Move;
+        drag_dt_ = 0;
+        drag_rows_ = 0;
+        begin_group();
+        return;
+      }
+      // Over empty cells: an area, from Shift or the right button (a plain press drew a note), or
+      // a finger's long press; a finger otherwise scrolls.
+      if (g.touch() && !g.long_press) {
+        drag_ = Drag::Scroll;
+        return;
+      }
+      drag_ = Drag::Area;
+      drag_add_ = false;
+      area_ = true;
+      y_anchor_tick_ = std::max<Tick>(0, tick_at(l, g.start_x) / snap() * snap());
+      const int r = row_at(l, g.start_y);
+      y_anchor_pitch_ = r >= 0 ? rows_[size_t(r)] : cursor_pitch_;
+      return;
+    }
+    case Gesture::Drag: {
+      if (!clip) return;
+      const Tick s = snap();
+      switch (drag_) {
+        case Drag::None:
+          return;
+        case Drag::Keys: {
+          const int r = row_at(l, std::max(l.grid.y, std::min(l.grid.bottom() - 1, g.y)));
+          if (r < 0 || rows_[size_t(r)] == key_held_ || key_held_ < 0) return;
+          app_.engine().live_note(key_track_, uint8_t(key_held_), 0);
+          key_held_ = cursor_pitch_ = rows_[size_t(r)];
+          app_.engine().live_note(key_track_, uint8_t(key_held_), 100);
+          app_.invalidate(content);
+          return;
+        }
+        case Drag::Lane:
+          pointer_lane(l, g.x, g.y, false);
+          return;
+        case Drag::Scroll:
+          scroll_by(l, -float(g.dy) / l.row_h, -float(g.dx) / l.cell_w);
+          return;
+        case Drag::Area: {
+          const int x = std::max(l.grid.x, std::min(l.grid.right() - 1, g.x));
+          const int y = std::max(l.grid.y, std::min(l.grid.bottom() - 1, g.y));
+          const Tick last = std::max<Tick>(0, (clip->length - 1) / s * s);
+          cursor_ = std::max<Tick>(0, std::min(last, tick_at(l, x) / s * s));
+          const int r = row_at(l, y);
+          if (r >= 0) cursor_pitch_ = rows_[size_t(r)];
+          app_.invalidate(content);
+          return;
+        }
+        case Drag::Move:
+        case Drag::Resize: {
+          // Whole grid steps and rows from where it was taken hold of (notes off the grid stay off
+          // it by as much).
+          const int cells = int(std::floor(float(g.x - g.start_x) / l.cell_w + 0.5f));
+          const int rows = -int(std::floor(float(g.y - g.start_y) / l.row_h + 0.5f));
+          const Tick dt = Tick(cells) * s;
+          if (drag_ == Drag::Resize) {
+            if (dt == drag_dt_) return;
+            drag_dt_ = dt;
+            for (const Note& orig : drag_notes_) {
+              if (!clip->find(orig.id)) continue;
+              Note n = *clip->find(orig.id);
+              n.length = std::max(std::min(orig.length, s), std::min(orig.length + dt, clip->length - orig.start));
+              if (orig.id == drag_note_) last_length_ = n.length;
+              h.change_note(clip->id, n);
+              clip = app_.open_clip();
+            }
+          } else {
+            if (dt == drag_dt_ && rows == drag_rows_) return;
+            bool time_ok = true;
+            for (const Note& orig : drag_notes_)
+              if (orig.start + dt < 0 || orig.start + orig.length + dt > clip->length) time_ok = false;
+            const Tick use_dt = time_ok ? dt : drag_dt_;
+            const bool pitch_changed = rows != drag_rows_;
+            for (const Note& orig : drag_notes_) {
+              if (!clip->find(orig.id)) continue;
+              Note n = *clip->find(orig.id);
+              n.start = orig.start + use_dt;
+              n.pitch = uint8_t(shifted_pitch(orig.pitch, rows, false));
+              h.change_note(clip->id, n);
+              clip = app_.open_clip();
+            }
+            drag_dt_ = use_dt;
+            drag_rows_ = rows;
+            if (const Note* held = clip->find(drag_note_)) {
+              cursor_ = held->start / s * s;
+              cursor_pitch_ = held->pitch;
+              if (pitch_changed) audition(held->pitch);
+            }
+          }
+          selection_.clear();
+          for (const Note& orig : drag_notes_) selection_.push_back(orig.id);
+          rebuild_rows();
+          app_.invalidate(content);
+          return;
+        }
+      }
+      return;
+    }
+    case Gesture::DragEnd:
+    case Gesture::Cancel: {
+      if (drag_ == Drag::Area && clip && g.kind == Gesture::DragEnd) {
+        const Tick s = snap();
+        const Tick t0 = std::min(y_anchor_tick_, cursor_), t1 = std::max(y_anchor_tick_, cursor_) + s;
+        const int p0 = std::min(y_anchor_pitch_, cursor_pitch_), p1 = std::max(y_anchor_pitch_, cursor_pitch_);
+        select_area(t0, t1, p0, p1, drag_add_);
+        app_.message(std::to_string(selection_.size()) + " selected");
+      }
+      area_ = false;
+      drag_ = Drag::None;
+      drag_note_ = 0;
+      pressed_lane_ = false;
+      let_go();
+      end_group();
+      app_.invalidate(content);
+      return;
+    }
+    case Gesture::Wheel:
+      if (!content.contains(g.x, g.y)) return;
+      // Away from the user: up the rows (Shift, or a sideways wheel: back in time).
+      if (g.shift) scroll_by(l, 0, -g.wheel_y * 2);
+      else scroll_by(l, -g.wheel_y * 3, g.wheel_x * 2);
+      return;
+    case Gesture::Pan:
+      if (content.contains(g.x, g.y)) scroll_by(l, -float(g.dy) / l.row_h, -float(g.dx) / l.cell_w);
+      return;
+    case Gesture::Pinch: {
+      if (!content.contains(g.x, g.y) || g.scale <= 0) return;
+      // Spread: a finer grid (the same cell width, so everything grows); pinched: coarser.
+      pinch_ += std::log(g.scale);
+      const float step = std::log(1.35f);
+      int by = 0;
+      while (pinch_ >= step) pinch_ -= step, ++by;
+      while (pinch_ <= -step) pinch_ += step, --by;
+      if (!by) return;
+      const int was = snap_index_;
+      snap_index_ = std::max(0, std::min(kNumSnaps - 1, snap_index_ + by));
+      if (snap_index_ != was) {
+        app_.message(std::string("Grid: ") + kSnaps[snap_index_].name);
+        cursor_ = cursor_ / snap() * snap();
+        keep_cursor_visible(layout());
+        app_.invalidate(content);
+      }
+      return;
+    }
   }
 }
 

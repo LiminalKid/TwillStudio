@@ -34,9 +34,25 @@ enum Button : uint32_t {
 constexpr int kNumButtons = 15;
 const char* button_name(Button b);
 
+// A mouse, a finger or a pen, where there is one (the desktop and the browser; not the handhelds):
+// what it did since the last frame, in display pixels. The app turns these into taps, drags and
+// so on (app/Pointer.h); the buttons stay the main way to work.
+struct PointerEvent {
+  enum Type : uint8_t { Down, Move, Up, Wheel, Cancel };
+  enum Source : uint8_t { Mouse, Touch, Pen };
+  Type type = Move;
+  Source source = Mouse;
+  int id = 0;      // a finger's own number while it's down; 0 for the mouse
+  int button = 1;  // the mouse's: 1 left, 2 right, 3 middle; 1 for a finger or pen
+  int x = 0, y = 0;
+  float wheel_x = 0, wheel_y = 0;  // Wheel: notches, positive right and up (away from the user)
+  bool shift = false;  // a keyboard's Shift held
+};
+
 struct InputState {
   uint32_t held = 0;          // Button bits currently down
   bool quit_requested = false;  // window closed, OS asked us to quit
+  std::vector<PointerEvent> pointer;  // in the order they happened
 };
 
 // Called on the audio thread with interleaved stereo float frames to fill.
@@ -57,6 +73,40 @@ class Platform {
   virtual bool audio_open(int preferred_rate, int preferred_block, AudioCallback cb, void* user) = 0;
   virtual AudioInfo audio_info() const = 0;
   virtual void audio_close() = 0;
+
+  // Recording (design §6, "Recording samples"): the system's inputs (a built-in mic, USB mics and
+  // interfaces), by name; none where the platform can't record (the browser). capture_open opens
+  // one (empty: the system's default) and starts it; what it hears gathers until capture_read takes
+  // it, as interleaved float at the input's own rate and channel count. Only one at a time.
+  // capture_available: whether there's anything to record from, the default at least (a handheld
+  // may list no inputs of its own, since the ones its sound system holds are left out, and still
+  // record through the default).
+  virtual bool capture_available() { return false; }
+  virtual std::vector<std::string> capture_devices() { return {}; }
+  struct CaptureInfo {
+    int sample_rate = 0;
+    int channels = 0;
+  };
+  virtual bool capture_open(const std::string& device, CaptureInfo& info, std::string& error) {
+    (void)device;
+    (void)info;
+    error = "Recording isn't available here";
+    return false;
+  }
+  // Moves what has come in since the last call to the end of `out`; returns how many frames.
+  virtual size_t capture_read(std::vector<float>& out) {
+    (void)out;
+    return 0;
+  }
+  virtual void capture_close() {}
+  // Monitoring: the open input played out with the song as it comes in (one channel, or the mix
+  // of all at -1, or the first two in stereo at -2, with `gain`, linear), straight from the input's thread to the output's for the
+  // shortest delay. Off when the input closes.
+  virtual void capture_monitor(bool on, int channel, float gain) {
+    (void)on;
+    (void)channel;
+    (void)gain;
+  }
 
   // Display: the full-resolution pixel size, and the scale the UI should be laid out at.
   virtual Size display_size() const = 0;

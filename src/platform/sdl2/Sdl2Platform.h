@@ -6,6 +6,7 @@
 
 #include <string>
 
+#include <atomic>
 #include <memory>
 
 #include "platform/Platform.h"
@@ -32,6 +33,12 @@ class Sdl2Platform : public Platform {
   bool audio_open(int preferred_rate, int preferred_block, AudioCallback cb, void* user) override;
   AudioInfo audio_info() const override { return audio_info_; }
   void audio_close() override;
+  bool capture_available() override;
+  std::vector<std::string> capture_devices() override;
+  bool capture_open(const std::string& device, CaptureInfo& info, std::string& error) override;
+  size_t capture_read(std::vector<float>& out) override;
+  void capture_close() override;
+  void capture_monitor(bool on, int channel, float gain) override;
 
   Size display_size() const override { return size_; }
   float ui_scale() const override { return ui_scale_; }
@@ -80,6 +87,18 @@ class Sdl2Platform : public Platform {
   virtual void open_input();
   virtual bool take_event(const SDL_Event&) { return false; }
   virtual uint32_t read_buttons() { return keys_ | read_pad(); }
+  // Monitoring: adds what the input has brought in to an output block (stereo), from the thread
+  // that makes the output. SDL's own output calls it; a platform with an output of its own must too.
+  void mix_monitor(float* out, int frames);
+  // Recording, for a platform with an input of its own (SndstationPlatform): the ring and the
+  // monitor set up for an input at `rate` with `channels` (before it starts), what it brings
+  // (from its thread: interleaved float, `n` values), and its end. capture_read and
+  // capture_monitor then work as for SDL's input.
+  void capture_begin(int rate, int channels);
+  void take_capture(const float* in, size_t n);
+  void capture_end();
+  bool capture_allowed() const;
+  int capture_channels() const { return capture_info_.channels; }
 
   const char* name_ = "SDL2";
   std::string data_dir_;  // ends with a slash
@@ -88,11 +107,17 @@ class Sdl2Platform : public Platform {
 
  private:
   static void sdl_audio_callback(void* user, Uint8* stream, int len);
+  static void sdl_capture_callback(void* user, Uint8* stream, int len);
+  std::string alsa_plughw_for(const std::string& listed) const;
+  SDL_AudioDeviceID open_capture_device(const std::string& device, const SDL_AudioSpec& want, SDL_AudioSpec& have,
+                                        int allow, std::string* used) const;
   void open_controller(int device_index);
   void follow_page_size();
   void update_size();
   bool pad_map_from_frontend(const char* joystick_name);
   uint32_t read_pad() const;
+  // A mouse or a finger's event into pointer_, in display pixels (not on handhelds).
+  void take_pointer(const SDL_Event& e);
   std::string resolve(const char* path) const { return path[0] == '/' ? path : data_dir_ + path; }
 
   bool awake_held_ = false;  // keep_awake's files are in place
@@ -114,6 +139,38 @@ class Sdl2Platform : public Platform {
   AudioCallback audio_cb_ = nullptr;
   void* audio_user_ = nullptr;
 
+  // Recording: the input's audio thread writes into the ring, the app's thread reads from it
+  // (one writer, one reader); what doesn't fit is dropped.
+  SDL_AudioDeviceID capture_dev_ = 0;
+  CaptureInfo capture_info_;
+  std::vector<float> capture_ring_;
+  std::atomic<size_t> capture_write_{0}, capture_read_{0};
+  std::string capture_name_;  // the input open now ("" for the default)
+  std::atomic<bool> capture_live_{false};
+  std::unique_ptr<class AlsaCapture> alsa_in_;  // handhelds: an input read from the card itself  // an input is open (SDL's or a subclass's)
+  std::atomic<int> monitor_in_rate_{48000};  // the input's rate, for monitoring at the output's
+  bool capture_s16_ = false;          // the input comes as 16-bit (handhelds), converted here
+  std::vector<float> capture_conv_;   // the input's thread's: a 16-bit block as float
+  // Monitoring: the input thread writes the chosen channel, gain applied, into this ring; the
+  // output thread mixes it in. The settings are the app's, read by the input thread.
+  std::vector<float> monitor_ring_;
+  std::atomic<size_t> monitor_write_{0}, monitor_read_{0};
+  std::atomic<bool> monitor_on_{false};
+  std::atomic<int> monitor_channel_{0};
+  std::atomic<float> monitor_gain_{1.0f};
+  // The output thread's own: whether it has enough in hand yet, where it reads between samples,
+  // and how full the ring has been of late.
+  bool monitor_primed_ = false;
+  double monitor_pos_ = 0, monitor_fill_ = 0;
+  // What happened to it, for the log: the largest burst the input has brought at once (frames),
+  // the times the output ran dry (a gap) or fell far behind (a skip).
+  std::atomic<int> monitor_burst_{0}, monitor_dry_{0}, monitor_skips_{0};
+  int monitor_logged_[3] = {0, 0, 0};
+  uint64_t monitor_logged_us_ = 0;
+  [[maybe_unused]] bool capture_rt_tried_ = false;  // the input's thread asked for real-time scheduling (Linux handhelds)
+  // Handhelds: the inputs SDL lists, and of those, the ones that opened when tried.
+  std::vector<std::string> capture_listed_, capture_usable_;
+
   SDL_Joystick* joystick_ = nullptr;
   SDL_GameController* controller_ = nullptr;
   PadMap pad_map_;
@@ -121,6 +178,10 @@ class Sdl2Platform : public Platform {
   int raw_presses_logged_ = 0;  // the first few raw button numbers go to the log
   uint32_t keys_ = 0;
   bool quit_ = false;
+  std::vector<PointerEvent> pointer_;  // since the last poll
+#ifndef TWILL_HANDHELD
+  uint32_t last_touch_ms_ = 0;         // a browser follows a tap with a mouse click of its own
+#endif
   std::unique_ptr<MidiPort> midi_;
 };
 

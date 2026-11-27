@@ -4,6 +4,7 @@
 #include <sndstation/power.h>
 #include <sndstation/rt.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <map>
@@ -185,13 +186,14 @@ void SndstationPlatform::audio_close() {
 void SndstationPlatform::render(void* self, float* out, int frames) {
   auto* p = static_cast<SndstationPlatform*>(self);
   p->cb_(p->cb_user_, out, frames);
+  p->mix_monitor(out, frames);  // a sample being recorded, heard as it comes in
 }
 
-// UI thread, the device paused. The engine can't follow another rate yet; say so.
+// UI thread, the device paused. The app's output callback sees the new rate and converts to it.
 void SndstationPlatform::rate_moved(void* user, int rate) {
   auto* self = static_cast<SndstationPlatform*>(user);
   self->audio_info_.sample_rate = rate;
-  self->log("warning: the device moved to %d Hz; pitch will be off until resampling exists", rate);
+  self->log("audio: the device moved to %d Hz; the engine's output is converted to it", rate);
 }
 
 const char* SndstationPlatform::controller_name() const {
@@ -240,6 +242,69 @@ uint32_t SndstationPlatform::read_buttons() {
   for (const auto& m : map)
     if (pad_.down(m.pad)) b |= m.button;
   return b;
+}
+
+// Recording.
+std::vector<sndstation::audiocard::Card> SndstationPlatform::capture_cards() {
+  std::vector<sndstation::audiocard::Card> out;
+  if (!capture_allowed()) return out;
+  for (const auto& c : sndstation::audiocard::list())
+    if (c.capture && !c.virt && !c.display) out.push_back(c);
+  // USB first: the default is a USB input when one is plugged in, as a built-in mic is rarely wanted
+  // over one.
+  std::stable_sort(out.begin(), out.end(), [](const auto& a, const auto& b) { return a.usb && !b.usb; });
+  return out;
+}
+
+// "Hügelton Instruments Felucca at usb-5101400.usb-1, full speed": the part before " at ".
+std::string SndstationPlatform::input_name(const sndstation::audiocard::Card& card) {
+  std::string n = card.name.empty() ? card.id : card.name;
+  const size_t at = n.find(" at ");
+  if (at != std::string::npos) n.resize(at);
+  return n;
+}
+
+bool SndstationPlatform::capture_available() { return !capture_cards().empty(); }
+
+std::vector<std::string> SndstationPlatform::capture_devices() {
+  std::vector<std::string> out;
+  for (const auto& c : capture_cards()) out.push_back(input_name(c));
+  return out;
+}
+
+bool SndstationPlatform::capture_open(const std::string& device, CaptureInfo& info, std::string& error) {
+  capture_close();
+  const std::vector<sndstation::audiocard::Card> cards = capture_cards();
+  // The one named, or for the default the first (a USB input, if there is one).
+  const sndstation::audiocard::Card* card = nullptr;
+  for (const auto& c : cards)
+    if (!card && (device.empty() || input_name(c) == device)) card = &c;
+  if (!card) {
+    error = cards.empty() ? "Nothing to record from" : "Can't find " + device;
+    return false;
+  }
+  in_ready_ = false;
+  in_.setOnBlock([this](const float* data, int frames, int channels, int, uint64_t) {
+    if (in_ready_.load(std::memory_order_acquire) && channels == capture_info_channels())
+      take_capture(data, size_t(frames) * size_t(channels));
+  });
+  if (!in_.open(*card)) {
+    error = "Can't open " + input_name(*card) + ": " + in_.error();
+    log("capture: %s", error.c_str());
+    return false;
+  }
+  capture_begin(in_.rate(), in_.channels());
+  in_ready_.store(true, std::memory_order_release);
+  info = CaptureInfo{in_.rate(), std::max(1, in_.channels())};
+  log("capture: \"%s\" (the SDK's input on card %s), %s, %d Hz, %d channels", input_name(*card).c_str(),
+      in_.card().c_str(), in_.format().c_str(), in_.rate(), in_.channels());
+  return true;
+}
+
+void SndstationPlatform::capture_close() {
+  in_ready_ = false;
+  if (in_.isOpen()) in_.close();
+  capture_end();
 }
 
 }  // namespace twill

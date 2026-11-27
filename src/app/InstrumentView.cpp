@@ -11,6 +11,7 @@
 
 #include "app/FactorySounds.h"
 #include "engine/PlaitsVoice.h"
+#include "engine/Sample.h"
 
 namespace twill {
 
@@ -296,6 +297,13 @@ std::vector<InstrumentView::Row> InstrumentView::rows() {
       };
       sample.reset = [change] { change([](Track& tr) { tr.sampler.sample.clear(); }); };
       out.push_back(sample);
+      if (app.platform().capture_available()) {
+        Row rec;
+        rec.label = "Record";
+        rec.value = [] { return std::string("press A"); };
+        rec.press = [this] { open_recorder(-1); };
+        out.push_back(rec);
+      }
       for (ParamId id : {kParamRootNote, kParamFineTune, kParamSampleStart, kParamSampleEnd, kParamLoopMode})
         out.push_back(param_row(id));
       if (t.sampler.loop != LoopMode::Off) {
@@ -348,6 +356,13 @@ std::vector<InstrumentView::Row> InstrumentView::rows() {
       };
       ss.reset = [change, k] { change([k](Track& tr) { tr.sampler.kit[k].sample.clear(); }); };
       out.push_back(ss);
+      if (app.platform().capture_available()) {
+        Row rec;
+        rec.label = "Record into slot";
+        rec.value = [] { return std::string("press A"); };
+        rec.press = [this, k] { open_recorder(k); };
+        out.push_back(rec);
+      }
       struct SlotField {
         const char* label;
         float KitSlot::*member;
@@ -596,25 +611,56 @@ bool InstrumentView::list_browser_dir(const std::string& dir, const std::string&
   return true;
 }
 
+void InstrumentView::close_browser() {
+  browser_open_ = false;
+  app_.engine().preview(nullptr);
+  app_.invalidate_all();
+}
+
+void InstrumentView::browser_go(const std::string& dir, const std::string& select) {
+  if (!list_browser_dir(dir, select)) app_.message("Can't open that folder");
+}
+
+void InstrumentView::browser_up() {
+  std::string parent = dir_.substr(0, dir_.size() - 1);
+  std::string name = parent.substr(parent.find_last_of('/') + 1);
+  parent = parent.substr(0, parent.find_last_of('/') + 1);
+  browser_go(parent.empty() ? "/" : parent, name);
+}
+
+void InstrumentView::browser_choose(int entry, bool preview) {
+  if (entry < 0 || entry >= int(entries_.size())) return;
+  const Platform::DirEntry e = entries_[size_t(entry)];  // a copy: going to a folder replaces the list
+  if (e.is_dir) {
+    if (!preview) e.name == ".." ? browser_up() : browser_go(dir_ + e.name + "/", "");
+    return;
+  }
+  std::string full = dir_ + e.name;
+  // Store paths inside the data folder relative to it, so projects move with the folder.
+  const std::string data = app_.platform().data_dir();
+  std::string path = full.compare(0, data.size(), data) == 0 ? full.substr(data.size()) : full;
+  std::string err;
+  if (browse_ == Browse::Presets) {
+    if (!preview) {
+      on_pick_(path);  // loads, and says if it can't
+      close_browser();
+    }
+  } else if (preview) {
+    preview_ = app_.load_sample(path, &err);
+    app_.engine().preview(preview_.get());
+    if (!preview_) app_.message(err);
+  } else if (!app_.load_sample(path, &err)) {
+    app_.message(err);
+  } else {
+    on_pick_(path);
+    close_browser();
+  }
+}
+
 void InstrumentView::browser_input() {
   const InputTracker& in = app_.input();
-  Platform& p = app_.platform();
-  auto close = [&] {
-    browser_open_ = false;
-    app_.engine().preview(nullptr);
-    app_.invalidate_all();
-  };
-  auto go = [&](const std::string& dir, const std::string& select) {
-    if (!list_browser_dir(dir, select)) app_.message("Can't open that folder");
-  };
-  auto up = [&] {  // to the parent, with the folder we came from selected
-    std::string parent = dir_.substr(0, dir_.size() - 1);
-    std::string name = parent.substr(parent.find_last_of('/') + 1);
-    parent = parent.substr(0, parent.find_last_of('/') + 1);
-    go(parent.empty() ? "/" : parent, name);
-  };
   const int n = int(entries_.size());
-  if (in.pressed(kX)) return close();
+  if (in.pressed(kX)) return close_browser();
   // Up/Down a file at a time (wrapping round), ten with R held (stopping at the ends); Left and
   // Right go to the top and the bottom.
   if (n > 0 && in.held(kR)) {
@@ -627,39 +673,12 @@ void InstrumentView::browser_input() {
   if (n > 0 && in.pressed(kLeft)) bsel_ = 0;
   if (n > 0 && in.pressed(kRight)) bsel_ = n - 1;
   if (in.pressed(kB)) {
-    if (dir_ == "/") return close();
-    up();
+    if (dir_ == "/") return close_browser();
+    browser_up();
   } else if (n > 0 && (in.pressed(kA) || in.pressed(kY))) {
-    const Platform::DirEntry e = entries_[size_t(bsel_)];  // a copy: going to a folder replaces the list
-    if (e.is_dir) {
-      if (in.pressed(kA)) e.name == ".." ? up() : go(dir_ + e.name + "/", "");
-    } else {
-      std::string full = dir_ + e.name;
-      // Store paths inside the data folder relative to it, so projects move with the folder.
-      const std::string data = p.data_dir();
-      std::string path = full.compare(0, data.size(), data) == 0 ? full.substr(data.size()) : full;
-      if (browse_ == Browse::Presets) {
-        if (in.pressed(kA)) {
-          on_pick_(path);  // loads, and says if it can't
-          close();
-          return;
-        }
-      } else if (in.pressed(kY)) {
-        std::string err;
-        preview_ = app_.load_sample(path, &err);
-        app_.engine().preview(preview_.get());
-        if (!preview_) app_.message(err);
-      } else {
-        std::string err;
-        if (!app_.load_sample(path, &err)) {
-          app_.message(err);
-        } else {
-          on_pick_(path);
-          close();
-          return;
-        }
-      }
-    }
+    const bool was_open = browser_open_;
+    browser_choose(bsel_, !in.pressed(kA));
+    if (was_open && !browser_open_) return;
   }
   app_.invalidate(app_.content_rect());
 }
@@ -668,6 +687,7 @@ void InstrumentView::browser_input() {
 
 void InstrumentView::handle_input() {
   if (browser_open_) return browser_input();
+  if (recorder_open_) return recorder_input();
 #if TWILL_PLUGINS
   if (plugins_open_) return plugins_input();
 #endif
@@ -702,6 +722,15 @@ std::vector<Hint> InstrumentView::hints() const {
 #if TWILL_PLUGINS
   if (plugins_open_) return {{"Up/Down", "move"}, {"R+Up/Down", "by 10"}, {"A", "pick"}, {"B", "cancel"}};
 #endif
+  if (recorder_open_ && recorder_) {
+    if (rec_warning_) return {{"A", "record anyway"}, {"B", "stop the song"}};
+    switch (recorder_->state()) {
+      case Recorder::State::Listening: return {{"A", "record now"}, {"B", "cancel"}};
+      case Recorder::State::Recording: return {{"A", "stop"}, {"B", "cancel"}};
+      case Recorder::State::Review: return {{"A", "keep"}, {"Y", "play"}, {"B", "again"}, {"X", "discard"}};
+      default: return {{"A", "record"}, {"Up/Down", "choose"}, {"Left/Right", "change"}, {"B", "close"}};
+    }
+  }
   if (browser_open_)
     return {{"A", "open/pick"}, {"Y", "listen"}, {"B", "up a folder"}, {"X", "cancel"}, {"Left/Right", "top/end"},
             {"R+Up/Down", "by 10"}};
@@ -710,6 +739,39 @@ std::vector<Hint> InstrumentView::hints() const {
 }
 
 void InstrumentView::tick() {
+  if (recorder_open_ && recorder_) {
+    // The track it records into is gone or another is shown: put away.
+    if (app_.track() != rec_track_ || rec_track_ >= int(app_.project().tracks.size())) {
+      close_recorder();
+      return;
+    }
+    const size_t had = recorder_->take_frames();
+    recorder_->tick();
+    // The take's peaks (the louder channel), 10 ms at a time, as it grows.
+    const Recorder& t = *recorder_;
+    const size_t frames = t.take_frames();
+    const size_t bin = size_t(std::max(1, recorder_->rate() / 100));
+    if (frames < had) rec_bins_.clear();
+    if (rec_bins_.size() * bin > frames) rec_bins_.clear();
+    for (size_t i = rec_bins_.empty() ? 0 : (rec_bins_.size() - 1) * bin; i < frames; i += bin) {
+      float p = 0;
+      for (size_t j = i; j < std::min(frames, i + bin); ++j) p = std::max(p, t.frame_peak(j));
+      const size_t at = i / bin;
+      if (at < rec_bins_.size()) rec_bins_[at] = p;
+      else rec_bins_.push_back(p);
+    }
+    const Recorder::State st = recorder_->state();
+    app_.set_sampling(st == Recorder::State::Recording);
+    if (st != rec_drawn_) {
+      rec_drawn_ = st;
+      if (st == Recorder::State::Review) sel_ = 0, top_ = 0;
+      if (st == Recorder::State::Listening || st == Recorder::State::Recording) sel_ = 5;  // Record now / Stop
+      app_.invalidate(app_.content_rect());
+    } else if (st != Recorder::State::Review) {
+      app_.invalidate(picture_rect());  // the meter and the waveform
+    }
+    return;
+  }
   // A multisample's zone map lights the zones sounding: redrawn when they change.
   const Track& t = app_.project().tracks[size_t(app_.track())];
   std::vector<int> now;
@@ -733,7 +795,7 @@ void InstrumentView::draw(Canvas& c) {
   if (plugins_open_) return draw_plugins(c, content);
 #endif
   const Track& t = app_.project().tracks[size_t(app_.track())];
-  std::vector<Row> list = rows();
+  std::vector<Row> list = current_rows();
   const Font& f = Font::get(FontFace::CondensedSemiBold, app_.u(kText));
   const Font& fb = Font::get(FontFace::CondensedBold, app_.u(kText + 2));
   const float sp = app_.u(kCapsSpacing);
@@ -750,14 +812,16 @@ void InstrumentView::draw(Canvas& c) {
   const Color col = app_.track_colour(app_.track());
   for (int i = top_; i < int(list.size()) && i < top_ + visible; ++i, y += row_h) {
     const Row& row = list[size_t(i)];
-    const bool sel = i == sel_;
+    const bool sel = i == sel_ && !row.dim;
     Rect rr{list_r.x + int(app_.u(4)), y, list_r.w - int(app_.u(8)), row_h};
     if (sel) c.fill(Rect{rr.x, rr.y + 1, rr.w, rr.h - 2}, th.chip_active);
     const int base = f.baseline_in(y, row_h - (row.fraction ? int(app_.u(3)) : 0));
     const std::string label = caps(row.label);
-    const float label_end = c.text(f, rr.x + app_.u(8), base, label.c_str(), sel ? th.chip_active_text : th.text_secondary, sp);
+    const Color label_col = sel ? th.chip_active_text : row.dim ? th.divider : th.text_secondary;
+    const float label_end = c.text(f, rr.x + app_.u(8), base, label.c_str(), label_col, sp);
     std::string v = fit_text(fb, row.value ? row.value() : "", rr.right() - app_.u(8) - (label_end + app_.u(10)));
-    c.text(fb, rr.right() - app_.u(8) - fb.measure(v.c_str()), base, v.c_str(), sel ? th.chip_active_text : th.text);
+    c.text(fb, rr.right() - app_.u(8) - fb.measure(v.c_str()), base, v.c_str(),
+           sel ? th.chip_active_text : row.dim ? th.text_secondary : th.text);
     if (row.fraction) {
       const float fr = std::max(0.0f, std::min(1.0f, row.fraction()));
       const int bw = int(app_.u(64));
@@ -773,6 +837,7 @@ void InstrumentView::draw(Canvas& c) {
   const int rule = std::max(1, int(app_.u(1)));
   Rect pic{list_r.right() + rule, content.y, content.right() - list_r.right() - rule, content.h};
   c.fill(pic, th.background);
+  if (recorder_open_) return draw_recorder(c, pic);
 #if TWILL_PLUGINS
   if (t.instrument == InstrumentType::Plugin) return draw_plugin(c, pic, t);
 #endif
@@ -1390,5 +1455,943 @@ void InstrumentView::draw_plugin(Canvas& c, const Rect& r, const Track& t) {
   c.text(sm, x, r.y + int(app_.u(116)), status.c_str(), th.text_secondary);
 }
 #endif
+
+// --- The pointer ------------------------------------------------------------------------------
+// Where things are, as draw() lays them out.
+
+Rect InstrumentView::list_rect() const {
+  const Rect content = app_.content_rect();
+  return Rect{content.x, content.y, content.w * 52 / 100, content.h};
+}
+
+Rect InstrumentView::picture_rect() const {
+  const Rect content = app_.content_rect(), l = list_rect();
+  const int rule = std::max(1, int(app_.u(1)));
+  return Rect{l.right() + rule, content.y, content.right() - l.right() - rule, content.h};
+}
+
+Rect InstrumentView::bar_in(const Rect& rr) const {
+  const int bw = int(app_.u(64));
+  return Rect{rr.right() - int(app_.u(8)) - bw, rr.y + rr.h - int(app_.u(5)), bw, std::max(2, int(app_.u(2)))};
+}
+
+int InstrumentView::row_at(int count, int x, int y) const {
+  const Rect l = list_rect();
+  const int row_h = int(app_.u(kRowH)), y0 = l.y + int(app_.u(4));
+  if (!l.contains(x, y) || y < y0) return -1;
+  const int i = top_ + (y - y0) / row_h;
+  return i < count ? i : -1;
+}
+
+Rect InstrumentView::row_rect(int i) {
+  const Rect l = list_rect();
+  const int row_h = int(app_.u(kRowH)), visible = std::max(1, (l.h - int(app_.u(8))) / row_h);
+  if (i < top_ || i >= top_ + visible || i >= int(current_rows().size())) return Rect{};
+  return Rect{l.x + int(app_.u(4)), l.y + int(app_.u(4)) + (i - top_) * row_h, l.w - int(app_.u(8)), row_h};
+}
+
+Rect InstrumentView::value_bar_rect(int i) {
+  const Rect rr = row_rect(i);
+  return rr.empty() ? rr : bar_in(rr);
+}
+
+int InstrumentView::find_row(const char* label) {
+  const std::vector<Row> list = current_rows();
+  for (size_t i = 0; i < list.size(); ++i)
+    if (list[i].label == label) return int(i);
+  return -1;
+}
+
+Rect InstrumentView::entry_rect(int i) const {
+  const Rect r = app_.content_rect();
+  const int row_h = int(app_.u(kRowH)), top_y = r.y + int(app_.u(28));
+  int top = btop_;
+#if TWILL_PLUGINS
+  if (plugins_open_) top = ptop_;
+#endif
+  if (i < top) return Rect{};
+  return Rect{r.x + int(app_.u(6)), top_y + (i - top) * row_h, r.w - int(app_.u(12)), row_h}.intersect(r);
+}
+
+int InstrumentView::entry_at(int x, int y) const {
+  const Rect r = app_.content_rect();
+  const int row_h = int(app_.u(kRowH)), top_y = r.y + int(app_.u(28));
+  if (!r.contains(x, y) || y < top_y) return -1;
+  int top = btop_, n = int(entries_.size());
+#if TWILL_PLUGINS
+  if (plugins_open_) top = ptop_, n = int(plugin_list_.size());
+#endif
+  const int i = top + (y - top_y) / row_h;
+  return i < n ? i : -1;
+}
+
+Rect InstrumentView::kit_pad_rect(int i) const {
+  const Rect r = picture_rect();
+  const int pad = int(app_.u(10)), gap = int(app_.u(6));
+  const int cols = 4, rows = 4;
+  const int cw = (r.w - 2 * pad - (cols - 1) * gap) / cols, ch = (r.h - 2 * pad - (rows - 1) * gap) / rows;
+  return Rect{r.x + pad + (i % cols) * (cw + gap), r.y + pad + (i / cols) * (ch + gap), cw, ch};
+}
+
+void InstrumentView::step_selection(int dir) {
+  // The way the panels go: a step through the list, stopping at the ends.
+  const int n = int(current_rows().size());
+  const int to = std::max(0, std::min(n - 1, sel_ + dir));
+  if (to == sel_) return;
+  sel_ = to;
+  app_.invalidate(app_.content_rect());
+}
+
+void InstrumentView::set_from_bar(const Row& row, const Rect& bar, int x) {
+  if (row.param == kParamNone) return;
+  const ParamInfo* info = param_info(row.param);
+  const float f = std::max(0.0f, std::min(1.0f, float(x - bar.x) / float(std::max(1, bar.w))));
+  float v = info->min + f * (info->max - info->min);
+  if (info->integer) v = std::round(v);
+  app_.history().set_track_param(app_.track(), row.param, v);
+  app_.invalidate(app_.content_rect());
+}
+
+void InstrumentView::pointer(const Gesture& g) {
+  if (browser_open_) return pointer_browser(g);
+#if TWILL_PLUGINS
+  if (plugins_open_) return pointer_browser(g);
+#endif
+  pointer_list(g);
+}
+
+void InstrumentView::pointer_list(const Gesture& g) {
+  const Rect content = app_.content_rect(), lr = list_rect();
+  EditHistory& h = app_.history();
+  std::vector<Row> list = current_rows();
+  const int n = int(list.size());
+  // On a setting's bar (a little round it, the row's height): set there.
+  auto on_bar = [&](int i, int x) {
+    if (i < 0 || i >= n || list[size_t(i)].param == kParamNone || !list[size_t(i)].fraction) return false;
+    const Rect bar = bar_in(row_rect(i));
+    const int reach = int(app_.u(g.touch() ? 8 : 4));
+    return !bar.empty() && x >= bar.x - reach && x < bar.right() + reach;
+  };
+  auto end_group = [&] {
+    if (pointer_group_) h.end_group();
+    pointer_group_ = false;
+  };
+  auto begin_group = [&] {
+    if (!pointer_group_) h.begin_group();
+    pointer_group_ = true;
+  };
+
+  switch (g.kind) {
+    case Gesture::Press: {
+      press_was_selected_ = press_acted_ = false;
+      slide_ = Slide::Off;
+      if (!content.contains(g.x, g.y)) return;
+      // The recorder's picture: one big button (A; in Keep?, Y: play). While the speakers card is
+      // up, a press records anyway (a right-click: stops the song first, as B).
+      if (recorder_open_ && recorder_) {
+        if (rec_warning_) {
+          rec_warning_ = false;
+          if (g.button == 2 && app_.engine().playing()) app_.start_or_stop();
+          recorder_go();
+          app_.invalidate(content);
+          return;
+        }
+        if (picture_rect().contains(g.x, g.y)) {
+          if (g.button != 1) return;
+          if (recorder_->state() == Recorder::State::Review) recorder_play();
+          else recorder_go();
+          app_.invalidate(content);
+          return;
+        }
+      }
+      // The picture: the sound (Y); a kit's pad: that pad.
+      if (picture_rect().contains(g.x, g.y)) {
+        if (g.button != 1) return;
+        const Track& t = app_.project().tracks[size_t(app_.track())];
+        if (t.instrument == InstrumentType::Sampler && t.sampler.mode == SamplerMode::Kit) {
+          int pad = -1;
+          for (int i = 0; i < kKitSlots; ++i)
+            if (kit_pad_rect(i).contains(g.x, g.y)) pad = i;
+          if (pad < 0) return;
+          kit_slot_ = pad;
+          app_.invalidate(content);
+        }
+        app_.audition(app_.track(), audition_note());
+        return;
+      }
+      const int i = row_at(n, g.x, g.y);
+      if (i < 0) return;
+      // The second of a double click whose first did the row's job (opened the browser, say).
+      if (g.taps == 2 && tap_acted_) {
+        tap_acted_ = false;
+        press_acted_ = true;
+        return;
+      }
+      tap_acted_ = false;
+      const Row& row = list[size_t(i)];
+      const bool was_selected = i == sel_;
+      if (!was_selected) {
+        sel_ = i;
+        app_.invalidate(content);
+      }
+      // A right-click, or a double click on a setting: its default (B).
+      if ((g.button == 2 || (g.taps == 2 && !row.press)) && row.reset) {
+        row.reset();
+        press_acted_ = true;
+        app_.invalidate(content);
+        return;
+      }
+      if (g.button != 1) return;
+      if (on_bar(i, g.x)) {  // set there, and a drag goes on setting it
+        begin_group();
+        slide_ = Slide::Value;
+        slide_row_ = i;
+        set_from_bar(row, bar_in(row_rect(i)), g.x);
+        press_acted_ = true;
+        return;
+      }
+      const bool act = row.press && (g.taps == 2 || (was_selected && !row.adjust && !g.touch()));
+      if (act) {  // its job (A), at once; a finger waits for its tap, as it may be scrolling
+        row.press();
+        tap_acted_ = press_acted_ = true;
+        app_.invalidate_all();
+        return;
+      }
+      press_was_selected_ = was_selected;
+      return;
+    }
+    case Gesture::Tap: {
+      // Let go of on a row that was selected when pressed: its job (a finger's), or a step of its
+      // value (Shift: the other way). A press on a bar is over.
+      slide_ = Slide::Off;
+      end_group();
+      if (!press_was_selected_ || press_acted_) return;
+      press_was_selected_ = false;
+      const int i = row_at(n, g.x, g.y);
+      if (i != sel_ || i < 0) return;
+      const Row& row = list[size_t(i)];
+      if (row.press) {
+        row.press();
+        tap_acted_ = true;
+        app_.invalidate_all();
+      } else if (row.adjust) {
+        row.adjust(g.shift ? -1 : 1, false);
+        app_.invalidate(content);
+      }
+      return;
+    }
+    case Gesture::DragStart:
+      if (slide_ == Slide::Value) return;
+      slide_ = lr.contains(g.start_x, g.start_y) ? Slide::None : Slide::Off;
+      slide_row_ = row_at(n, g.start_x, g.start_y);
+      slide_acc_ = 0;
+      return;
+    case Gesture::Drag:
+    case Gesture::Pan: {
+      if (g.kind == Gesture::Drag && slide_ == Slide::None) {
+        // Settled by its first move: across a row that changes, its value; up and down, the list.
+        const bool across = std::abs(g.x - g.start_x) > std::abs(g.y - g.start_y);
+        if (across && slide_row_ >= 0 && slide_row_ < n && list[size_t(slide_row_)].adjust) {
+          slide_ = Slide::Adjust;
+          sel_ = slide_row_;
+          begin_group();
+          app_.invalidate(content);
+        } else {
+          slide_ = Slide::Scroll;
+        }
+      }
+      if (g.kind == Gesture::Pan) {
+        if (!lr.contains(g.x, g.y)) return;
+      } else if (slide_ == Slide::Off) {
+        return;
+      }
+      if (g.kind == Gesture::Drag && slide_ == Slide::Value) {
+        if (slide_row_ >= 0 && slide_row_ < n) set_from_bar(list[size_t(slide_row_)], bar_in(row_rect(slide_row_)), g.x);
+        return;
+      }
+      if (g.kind == Gesture::Drag && slide_ == Slide::Adjust) {
+        const float step = app_.u(12);
+        slide_acc_ += float(g.dx);
+        while (std::abs(slide_acc_) >= step) {
+          const int dir = slide_acc_ > 0 ? 1 : -1;
+          slide_acc_ -= float(dir) * step;
+          // The list may have changed with the last step (another engine): the row it started on.
+          std::vector<Row> now = current_rows();
+          if (sel_ >= int(now.size()) || !now[size_t(sel_)].adjust) return;
+          now[size_t(sel_)].adjust(dir, false);
+          app_.invalidate(content);
+        }
+        return;
+      }
+      // Through the list, the way the finger goes: dragged down, the rows above.
+      slide_acc_ += float(g.dy);
+      const float row_h = app_.u(kRowH);
+      while (std::abs(slide_acc_) >= row_h) {
+        const int dir = slide_acc_ > 0 ? -1 : 1;
+        slide_acc_ += float(dir) * row_h;
+        step_selection(dir);
+      }
+      return;
+    }
+    case Gesture::DragEnd:
+    case Gesture::Cancel:
+      slide_ = Slide::Off;
+      end_group();
+      return;
+    case Gesture::Wheel: {
+      if (!lr.contains(g.x, g.y)) return;
+      wheel_acc_ += g.wheel_y;
+      const int steps = int(wheel_acc_);
+      wheel_acc_ -= float(steps);
+      if (!steps) return;
+      // Over a setting's bar: changes it (Shift: bigger steps); elsewhere through the list.
+      const int i = row_at(n, g.x, g.y);
+      if (on_bar(i, g.x) && list[size_t(i)].adjust) {
+        sel_ = i;
+        for (int k = 0; k < std::abs(steps); ++k) list[size_t(i)].adjust(steps > 0 ? 1 : -1, g.shift);
+        app_.invalidate(content);
+        return;
+      }
+      for (int k = 0; k < std::abs(steps); ++k) step_selection(steps > 0 ? -1 : 1);
+      return;
+    }
+    case Gesture::LongPress:
+    case Gesture::Pinch:
+      return;
+  }
+}
+
+void InstrumentView::pointer_browser(const Gesture& g) {
+  const Rect content = app_.content_rect();
+  // The file browser's list, or the plugin list.
+  bool plugins = false;
+  int* selp = &bsel_;
+  int n = int(entries_.size());
+#if TWILL_PLUGINS
+  if (plugins_open_) plugins = true, selp = &psel_, n = int(plugin_list_.size());
+#endif
+  int& sel = *selp;
+  auto close = [&] {
+#if TWILL_PLUGINS
+    if (plugins) {
+      plugins_open_ = false;
+      app_.invalidate_all();
+      return;
+    }
+#endif
+    close_browser();
+  };
+  auto activate = [&](int i) {
+#if TWILL_PLUGINS
+    if (plugins) {
+      app_.choose_plugin(app_.track(), plugin_list_[size_t(i)]);
+      plugins_open_ = false;
+      sel_ = 0;
+      app_.invalidate_all();
+      return;
+    }
+#endif
+    browser_choose(i, false);
+    app_.invalidate_all();
+  };
+  auto move = [&](int dir) {
+    if (n <= 0) return;
+    sel = std::max(0, std::min(n - 1, sel + dir));
+    app_.invalidate(content);
+  };
+
+  switch (g.kind) {
+    case Gesture::Press: {
+      press_was_selected_ = press_acted_ = false;
+      if (!content.contains(g.x, g.y)) return;
+      if (g.button == 2) return close();  // as X: put away
+      if (g.button != 1) return;
+      if (!plugins && g.y < content.y + int(app_.u(24))) {  // the folder's name: up a folder
+        if (dir_ != "/") browser_up();
+        app_.invalidate(content);
+        return;
+      }
+      const int i = entry_at(g.x, g.y);
+      if (i < 0) return;
+      if (g.taps == 2 && tap_acted_) {  // its first click opened a folder: not for what's there now
+        tap_acted_ = false;
+        press_acted_ = true;
+        return;
+      }
+      tap_acted_ = false;
+      if (i != sel) {  // selected; an audio file is heard too (Y)
+        sel = i;
+        if (!plugins && browse_ == Browse::Samples && !entries_[size_t(i)].is_dir) browser_choose(i, true);
+        app_.invalidate(content);
+        return;
+      }
+      if (!g.touch() || g.taps == 2) {
+        activate(i);
+        tap_acted_ = press_acted_ = true;
+        return;
+      }
+      press_was_selected_ = true;
+      return;
+    }
+    case Gesture::Tap:
+      if (!press_was_selected_ || press_acted_) return;
+      press_was_selected_ = false;
+      if (entry_at(g.x, g.y) == sel && sel >= 0 && sel < n) {
+        activate(sel);
+        tap_acted_ = true;
+      }
+      return;
+    case Gesture::LongPress:  // a finger's right-click
+      return close();
+    case Gesture::DragStart:
+      slide_ = content.contains(g.start_x, g.start_y) ? Slide::Scroll : Slide::Off;
+      slide_acc_ = 0;
+      return;
+    case Gesture::Drag:
+    case Gesture::Pan: {
+      if (g.kind == Gesture::Drag && slide_ != Slide::Scroll) return;
+      if (g.kind == Gesture::Pan && !content.contains(g.x, g.y)) return;
+      slide_acc_ += float(g.dy);
+      const float row_h = app_.u(kRowH);
+      while (std::abs(slide_acc_) >= row_h) {
+        const int dir = slide_acc_ > 0 ? -1 : 1;
+        slide_acc_ += float(dir) * row_h;
+        move(dir);
+      }
+      return;
+    }
+    case Gesture::DragEnd:
+    case Gesture::Cancel:
+      slide_ = Slide::Off;
+      return;
+    case Gesture::Wheel: {
+      if (!content.contains(g.x, g.y)) return;
+      wheel_acc_ += g.wheel_y;
+      const int steps = int(wheel_acc_);
+      wheel_acc_ -= float(steps);
+      for (int k = 0; k < std::abs(steps); ++k) move(steps > 0 ? -1 : 1);
+      return;
+    }
+    case Gesture::Pinch:
+      return;
+  }
+}
+
+// --- The sample recorder ----------------------------------------------------------------------
+
+namespace {
+
+// The level meter: segments from -48 to 0 dB, the loud end in warning colours, the peak marked.
+void draw_level_meter(Canvas& c, const App& app, Rect m, float level_db, float peak_db, Color col, bool threshold) {
+  const Theme& th = app.theme();
+  const Font& small = Font::get(FontFace::CondensedSemiBold, app.u(kSmall));
+  const int segs = 32, gap = std::max(1, int(app.u(1.5f)));
+  const int sw = std::max(1, (m.w - (segs - 1) * gap) / segs);
+  for (int i = 0; i < segs; ++i) {
+    const float db = -48 + 48.0f * float(i + 1) / segs;
+    const Color on_col = db > -6 ? th.cursor : db > -12 ? th.warning : col;
+    c.fill(Rect{m.x + i * (sw + gap), m.y, sw, m.h}, db <= level_db ? on_col : th.grid_step);
+  }
+  auto x_of = [&](float db) { return m.x + int((std::max(-48.0f, std::min(0.0f, db)) + 48) / 48 * float(m.w - sw)); };
+  if (peak_db > -48) c.fill(Rect{x_of(peak_db), m.y - int(app.u(2)), std::max(2, int(app.u(2))), m.h + int(app.u(4))}, th.text);
+  if (threshold)
+    c.fill(Rect{x_of(Recorder::kThresholdDb), m.y - int(app.u(5)), std::max(2, int(app.u(1.5f))), m.h + int(app.u(10))},
+           th.cursor);
+  for (int db : {-48, -24, -12, -6, 0}) {
+    const int x = m.x + int((db + 48) / 48.0f * float(m.w - 1));
+    const std::string t = std::to_string(db);
+    const float w = small.measure(t.c_str());
+    const float tx = db == 0 ? x - w : db == -48 ? x : x - w / 2;
+    c.text(small, tx, m.bottom() + int(app.u(13)), t.c_str(), th.text_secondary);
+  }
+}
+
+}  // namespace
+
+std::string InstrumentView::chosen_input() const {
+  const std::string want = app_.setting("rec.input");
+  if (want.empty()) return want;
+  for (const std::string& d : app_.platform().capture_devices())
+    if (d == want) return d;
+  return std::string();  // not there now (unplugged): the system's default
+}
+
+bool InstrumentView::input_is_mic() const {
+  std::string n = chosen_input();
+  if (n.empty()) {
+    const std::vector<std::string> d = app_.platform().capture_devices();
+    n = d.empty() ? std::string("mic") : d.front();
+  }
+  for (char& ch : n) ch = char(std::tolower(static_cast<unsigned char>(ch)));
+  return n.find("mic") != std::string::npos;
+}
+
+std::string InstrumentView::take_name() const {
+  std::string base;
+  for (char ch : app_.project().tracks[size_t(rec_track_)].name)
+    base += (std::isalnum(static_cast<unsigned char>(ch)) || ch == '-' || ch == '_' || ch == ' ') ? ch : '_';
+  if (base.empty()) base = "Take";
+  std::vector<Platform::DirEntry> have;
+  app_.platform().list_dir("samples/Recorded", have);
+  for (int n = 1;; ++n) {
+    const std::string name = base + " rec " + std::to_string(n);
+    bool taken = false;
+    for (const auto& e : have) taken = taken || e.name == name + ".wav";
+    if (!taken) return name;
+  }
+}
+
+bool InstrumentView::reopen_input() {
+  std::string err;
+  const std::string want = chosen_input();
+  if (!recorder_->open(want, err)) {
+    // An input that can't be opened (on a handheld, one its sound system holds; or a default with
+    // nothing to record from, as sndstation's built-in codec on the Brick Pro) mustn't keep the
+    // recorder shut: the default, then each input listed, and the one that opens remembered.
+    std::vector<std::string> others{std::string()};
+    for (const std::string& d : app_.platform().capture_devices()) others.push_back(d);
+    std::string opened;
+    bool ok = false;
+    std::string err2;
+    for (const std::string& o : others) {
+      if (o == want) continue;
+      if (recorder_->open(o, err2)) {
+        ok = true;
+        opened = o;
+        break;
+      }
+    }
+    if (!ok) {
+      app_.message(err);
+      close_recorder();
+      return false;
+    }
+    app_.set_setting("rec.input", opened);
+    app_.message("Can't open " + (want.empty() ? std::string("the default input") : want) + ", so " +
+                 (opened.empty() ? std::string("the default") : opened) + ": " + err);
+  }
+  if (recorder_->channel >= recorder_->input_channels()) recorder_->channel = 0;
+  if (recorder_->input_channels() == 1) recorder_->channel = 0;
+  rec_bins_.clear();
+  return true;
+}
+
+void InstrumentView::open_recorder(int slot) {
+  if (!recorder_) recorder_ = std::make_unique<Recorder>(app_.platform());
+  rec_track_ = app_.track();
+  rec_slot_ = slot;
+  const std::string gain = app_.setting("rec.gain"), ch = app_.setting("rec.channel");
+  recorder_->gain_db = gain.empty() ? 0 : std::max(Recorder::kMinGainDb, std::min(Recorder::kMaxGainDb, float(std::atof(gain.c_str()))));
+  recorder_->channel = ch.empty() ? 0 : std::max(Recorder::kStereo, std::atoi(ch.c_str()));
+  recorder_->normalize = app_.setting("rec.normalize") != "off";
+  recorder_->monitor = app_.setting("rec.monitor") == "on";  // off at first: a mic would howl through speakers
+  saved_sel_ = sel_;
+  saved_top_ = top_;
+  recorder_open_ = true;
+  // The inputs first, while none is open: a handheld tries each (and leaves out those that won't
+  // open), and the default may be one of them, which, open, would look busy.
+  app_.platform().capture_devices();
+  if (!reopen_input()) return;
+  sel_ = top_ = 0;
+  rec_warning_ = false;
+  rec_drawn_ = recorder_->state();
+  app_.invalidate_all();
+}
+
+void InstrumentView::close_recorder() {
+  if (!recorder_open_) return;
+  if (recorder_) recorder_->close();
+  app_.engine().preview(nullptr);
+  rec_preview_.reset();
+  app_.set_sampling(false);
+  recorder_open_ = rec_warning_ = false;
+  rec_bins_.clear();
+  sel_ = saved_sel_;
+  top_ = saved_top_;
+  app_.invalidate_all();
+}
+
+void InstrumentView::leave() { close_recorder(); }
+
+std::vector<InstrumentView::Row> InstrumentView::recorder_rows() {
+  App& app = app_;
+  Recorder& r = *recorder_;
+  std::vector<Row> out;
+  auto action = [](const char* label, const char* key, std::function<void()> f) {
+    Row row;
+    row.label = label;
+    row.value = [key] { return std::string(key); };
+    row.press = std::move(f);
+    return row;
+  };
+  const Recorder::State st = r.state();
+  if (st == Recorder::State::Review) {
+    Row norm;
+    norm.label = "Normalize";
+    norm.value = [&r] { return std::string(r.normalize ? "On" : "Off"); };
+    norm.adjust = [&r, &app](int, bool) {
+      r.normalize = !r.normalize;
+      app.set_setting("rec.normalize", r.normalize ? "on" : "off");
+    };
+    out.push_back(norm);
+    char b[64];
+    const float rate = float(std::max(1, r.rate()));
+    Row name;
+    name.label = "Name";
+    const std::string n = take_name();
+    name.value = [n] { return n; };
+    name.dim = true;
+    out.push_back(name);
+    Row len;
+    len.label = "Length";
+    std::snprintf(b, sizeof b, "%.2f s", float(r.keep_end() - r.keep_start()) / rate);
+    const std::string ls = b;
+    len.value = [ls] { return ls; };
+    len.dim = true;
+    out.push_back(len);
+    Row cut;
+    cut.label = "Trimmed";
+    std::snprintf(b, sizeof b, "%.2f s before, %.2f s after", float(r.keep_start()) / rate,
+                  float(r.take_frames() - r.keep_end()) / rate);
+    const std::string cs = b;
+    cut.value = [cs] { return cs; };
+    cut.dim = true;
+    out.push_back(cut);
+    out.push_back(action("Keep", "press A", [this] { recorder_keep(); }));
+    out.push_back(action("Play", "press Y", [this] { recorder_play(); }));
+    out.push_back(action("Record again", "press B", [&r] { r.cancel(); }));
+    out.push_back(action("Discard", "press X", [this] { close_recorder(); }));
+    return out;
+  }
+  const bool busy = st != Recorder::State::Ready;
+  const std::vector<std::string> inputs = app.platform().capture_devices();
+  Row input;
+  input.label = "Input";
+  input.value = [this] {
+    const std::string n = chosen_input();
+    return n.empty() ? std::string("Default") : n;
+  };
+  if (!busy && !inputs.empty())
+    input.adjust = [this, &app, inputs](int step, bool) {
+      // The default, then each input by name.
+      std::vector<std::string> options{""};
+      options.insert(options.end(), inputs.begin(), inputs.end());
+      const auto it = std::find(options.begin(), options.end(), chosen_input());
+      const int at = it == options.end() ? 0 : int(it - options.begin()), n = int(options.size());
+      // The next one that opens: one that won't is passed over (and said so).
+      std::string skipped, err;
+      for (int k = 1; k < n; ++k) {
+        const std::string& o = options[size_t(((at + step * k) % n + n) % n)];
+        if (recorder_->open(o, err)) {
+          app.set_setting("rec.input", o);
+          break;
+        }
+        if (skipped.empty()) skipped = "Can't open " + o + ": " + err;
+      }
+      reopen_input();
+      if (!skipped.empty()) app.message(skipped);
+    };
+  input.dim = busy;
+  out.push_back(input);
+  Row ch;
+  ch.label = "Channel";
+  ch.value = [&r] {
+    const int n = r.input_channels();
+    if (n <= 1) return std::string("Mono");
+    if (r.channel == Recorder::kStereo) return std::string(n == 2 ? "Stereo" : "Stereo (inputs 1 and 2)");
+    if (r.channel < 0) return std::string("Mono mix");
+    if (n == 2) return std::string(r.channel == 0 ? "Left" : "Right");
+    return "Input " + std::to_string(r.channel + 1);
+  };
+  if (!busy && r.input_channels() > 1)
+    ch.adjust = [&r, &app](int step, bool) {
+      // Each channel, then the mono mix, then stereo.
+      const int n = r.input_channels() + 2;
+      int at = r.channel == Recorder::kStereo ? n - 1 : r.channel < 0 ? n - 2 : r.channel;
+      at = (at + step + n) % n;
+      r.channel = at == n - 1 ? Recorder::kStereo : at == n - 2 ? -1 : at;
+      app.set_setting("rec.channel", std::to_string(r.channel));
+    };
+  ch.dim = busy;
+  out.push_back(ch);
+  Row gain;
+  gain.label = "Gain";
+  gain.value = [&r] {
+    char b[16];
+    std::snprintf(b, sizeof b, "%+.0f dB", double(r.gain_db));
+    return std::string(b);
+  };
+  gain.fraction = [&r] { return (r.gain_db - Recorder::kMinGainDb) / (Recorder::kMaxGainDb - Recorder::kMinGainDb); };
+  if (!busy) {
+    gain.adjust = [&r, &app](int step, bool coarse) {
+      r.gain_db = std::max(Recorder::kMinGainDb, std::min(Recorder::kMaxGainDb, r.gain_db + float(step * (coarse ? 6 : 1))));
+      app.set_setting("rec.gain", std::to_string(int(std::lround(r.gain_db))));
+    };
+    gain.reset = [&r, &app] {
+      r.gain_db = 0;
+      app.set_setting("rec.gain", "0");
+    };
+  }
+  gain.dim = busy;
+  out.push_back(gain);
+  Row mon;  // can be changed while recording too
+  mon.label = "Monitor";
+  mon.value = [&r] { return std::string(r.monitor ? "On" : "Off"); };
+  mon.adjust = [&r, &app](int, bool) {
+    r.monitor = !r.monitor;
+    app.set_setting("rec.monitor", r.monitor ? "on" : "off");
+  };
+  out.push_back(mon);
+  Row start;
+  start.label = "Start";
+  start.value = [&app] { return std::string(app.setting("rec.start") == "press" ? "On A" : "When sound starts"); };
+  if (!busy)
+    start.adjust = [&app](int, bool) { app.set_setting("rec.start", app.setting("rec.start") == "press" ? "sound" : "press"); };
+  start.dim = busy;
+  out.push_back(start);
+  if (busy) {
+    out.push_back(action(st == Recorder::State::Recording ? "Stop" : "Record now", "press A", [this] { recorder_go(); }));
+    out.push_back(action("Cancel", "press B", [&r] { r.cancel(); }));
+  } else {
+    out.push_back(action("Record", "press A", [this] { recorder_go(); }));
+    out.push_back(action("Close", "press B", [this] { close_recorder(); }));
+  }
+  return out;
+}
+
+void InstrumentView::recorder_go() {
+  Recorder& r = *recorder_;
+  switch (r.state()) {
+    case Recorder::State::Ready:
+      // Through the speakers the mic hears the song: said once.
+      if (app_.engine().playing() && !rec_warned_ && input_is_mic()) {
+        rec_warning_ = rec_warned_ = true;
+        app_.invalidate(app_.content_rect());
+        return;
+      }
+      rec_bins_.clear();
+      app_.engine().preview(nullptr);
+      r.start(app_.setting("rec.start") != "press");
+      break;
+    case Recorder::State::Listening: r.start(false); break;
+    case Recorder::State::Recording: r.stop(); break;
+    default: break;
+  }
+  app_.invalidate(app_.content_rect());
+}
+
+void InstrumentView::recorder_play() {
+  const std::vector<uint8_t> wav = recorder_->wav();
+  std::string err;
+  rec_preview_ = decode_sample(wav.data(), wav.size(), "take", err);
+  app_.engine().preview(rec_preview_.get());
+}
+
+void InstrumentView::recorder_keep() {
+  const std::vector<uint8_t> wav = recorder_->wav();
+  if (wav.size() <= 44) {
+    app_.message("Nothing to keep");
+    return;
+  }
+  Platform& p = app_.platform();
+  const std::string name = take_name(), path = "samples/Recorded/" + name + ".wav";
+  p.make_dir("samples/Recorded");
+  if (!p.write_file(path.c_str(), wav)) {
+    app_.message("Couldn't save " + name);
+    return;
+  }
+  // Into the track, as if picked in the browser: one undo step, which brings back the old sample.
+  const int track = rec_track_, slot = rec_slot_;
+  Track copy = app_.project().tracks[size_t(track)];
+  if (slot < 0) copy.sampler.sample = path;
+  else copy.sampler.kit[slot].sample = path;
+  app_.history().change_track(track, copy);
+  close_recorder();
+  app_.message("Kept " + name);
+}
+
+void InstrumentView::recorder_input() {
+  const InputTracker& in = app_.input();
+  Recorder& r = *recorder_;
+  const Rect content = app_.content_rect();
+  if (rec_warning_) {
+    if (in.pressed(kA) || in.pressed(kB)) {
+      rec_warning_ = false;
+      if (in.pressed(kB) && app_.engine().playing()) app_.start_or_stop();
+      recorder_go();
+    }
+    return;
+  }
+  switch (r.state()) {
+    case Recorder::State::Listening:
+    case Recorder::State::Recording:
+      if (in.pressed(kA)) recorder_go();
+      else if (in.pressed(kB)) r.cancel(), app_.invalidate(content);
+      return;
+    case Recorder::State::Ready:
+    case Recorder::State::Review: {
+      std::vector<Row> list = recorder_rows();
+      const int n = int(list.size());
+      auto usable = [&](int i) { return !list[size_t(i)].dim; };
+      if (in.pressed_or_repeat(kUp | kDown)) {
+        const int dir = in.pressed_or_repeat(kUp) ? -1 : 1;
+        for (int k = 0; k < n; ++k) {
+          sel_ = (sel_ + dir + n) % n;
+          if (usable(sel_)) break;
+        }
+        app_.invalidate(content);
+      }
+      sel_ = std::max(0, std::min(sel_, n - 1));
+      const Row& row = list[size_t(sel_)];
+      const int step = in.pressed_or_repeat(kRight) ? 1 : in.pressed_or_repeat(kLeft) ? -1 : 0;
+      if (step && row.adjust && !row.dim) {
+        row.adjust(step, in.held(kR));
+        app_.invalidate(content);
+        return;  // the input may have been opened again
+      }
+      if (r.state() == Recorder::State::Ready) {
+        if (in.pressed(kA)) row.press && !row.dim ? row.press() : recorder_go();
+        else if (in.pressed(kB) || in.pressed(kX)) close_recorder();
+        else if (in.pressed(kY)) app_.audition(app_.track(), audition_note());
+      } else {
+        if (in.pressed(kA)) row.press && !row.dim ? row.press() : recorder_keep();
+        else if (in.pressed(kY)) recorder_play();
+        else if (in.pressed(kB)) r.cancel(), app_.invalidate(content);
+        else if (in.pressed(kX)) close_recorder();
+      }
+      if (in.pressed(~0u)) app_.invalidate(content);
+      return;
+    }
+    case Recorder::State::Closed: close_recorder(); return;
+  }
+}
+
+void InstrumentView::draw_recorder(Canvas& c, const Rect& pic) {
+  const Theme& th = app_.theme();
+  Recorder& r = *recorder_;
+  const Recorder::State st = r.state();
+  const Track& t = app_.project().tracks[size_t(rec_track_)];
+  const Color col = app_.track_colour(rec_track_), ink = th.track_ink(int(t.colour));
+  const Font& big = Font::get(FontFace::CondensedBold, app_.u(26));
+  const Font& sm = Font::get(FontFace::Regular, app_.u(kText));
+
+  // Heading and the line under it.
+  std::string heading, sub;
+  Color heading_col = ink;
+  bool dot = false;
+  char b[64];
+  switch (st) {
+    case Recorder::State::Listening:
+      heading = "LISTENING";
+      sub = "Recording starts at the first sound";
+      heading_col = th.cursor;
+      break;
+    case Recorder::State::Recording: {
+      const float secs = r.seconds();
+      std::snprintf(b, sizeof b, "%d:%04.1f", int(secs) / 60, double(std::fmod(secs, 60.0f)));
+      heading = b;
+      sub = "Recording, up to 30 s";
+      heading_col = th.text;
+      dot = true;
+      break;
+    }
+    case Recorder::State::Review:
+      heading = "KEEP?";
+      sub = r.normalize ? "Trimmed and normalized" : "Trimmed";
+      break;
+    default:
+      heading = "READY";
+      sub = rec_slot_ < 0 ? "Into " + t.name + ", saved in samples/Recorded"
+                          : "Into " + t.name + ", slot " + std::to_string(rec_slot_ + 1) + ", saved in samples/Recorded";
+      break;
+  }
+  float x = pic.x + app_.u(16);
+  if (dot) {
+    const int d = int(app_.u(14)), cy = pic.y + int(app_.u(32));
+    for (int yy = -d / 2; yy <= d / 2; ++yy) {
+      const int half = int(std::sqrt(float(d * d / 4 - yy * yy)));
+      c.fill(Rect{int(x) + d / 2 - half, cy + yy, 2 * half + 1, 1}, th.cursor);
+    }
+    x += float(d) + app_.u(8);
+  }
+  c.text(big, x, pic.y + int(app_.u(42)), heading.c_str(), heading_col);
+  c.text(sm, pic.x + app_.u(16), pic.y + int(app_.u(64)),
+         fit_text(sm, sub, float(pic.w) - app_.u(32)).c_str(), th.text_secondary);
+
+  // The meter (not in Keep?: nothing comes in that matters), then the waveform.
+  const Rect meter{pic.x + int(app_.u(16)), pic.y + int(app_.u(84)), pic.w - int(app_.u(32)), int(app_.u(14))};
+  Rect wave{pic.x + int(app_.u(16)), pic.y + int(app_.u(128)), pic.w - int(app_.u(32)),
+            pic.bottom() - pic.y - int(app_.u(144))};
+  if (st == Recorder::State::Review) wave = Rect{wave.x, meter.y, wave.w, wave.bottom() - meter.y};
+  else draw_level_meter(c, app_, meter, r.level_db(), r.peak_db(), col, st == Recorder::State::Listening);
+  c.fill(wave, th.row_white);
+  c.stroke_rect(wave, std::max(1, int(app_.u(1))), th.divider);
+  const int mid = wave.y + wave.h / 2;
+  c.hline(wave.x, wave.right(), mid, th.grid_beat);
+  const int nb = int(rec_bins_.size());
+  if (nb == 0 || st == Recorder::State::Ready || st == Recorder::State::Listening) {
+    const char* m = st == Recorder::State::Listening ? "Make a sound"
+                    : app_.setting("rec.start") == "press" ? "Press A to record"
+                                                            : "Press A, then make a sound";
+    c.text(sm, wave.x + (wave.w - sm.measure(m)) / 2, mid - int(app_.u(8)), m, th.text_secondary);
+  } else {
+    // Recording: at least five seconds across, so the line moves; Keep?: the whole take.
+    const int span = st == Recorder::State::Recording ? std::max(nb, 500) : nb;
+    const float bin_rate = float(std::max(1, r.rate() / 100));
+    const float cut0 = st == Recorder::State::Review ? float(r.keep_start()) / bin_rate : -1;
+    const float cut1 = st == Recorder::State::Review ? float(r.keep_end()) / bin_rate : -1;
+    const int cols = wave.w - 2;
+    for (int xx = 0; xx < cols; ++xx) {
+      const int b0 = int(int64_t(xx) * span / cols), b1 = std::max(b0 + 1, int(int64_t(xx + 1) * span / cols));
+      if (b0 >= nb) break;
+      float p = 0;
+      for (int k = b0; k < std::min(b1, nb); ++k) p = std::max(p, rec_bins_[size_t(k)]);
+      const int h = std::max(1, int(std::min(1.0f, p) * float(wave.h / 2 - int(app_.u(6)))));
+      const bool cut = cut0 >= 0 && (float(b1) <= cut0 || float(b0) >= cut1);
+      c.fill(Rect{wave.x + 1 + xx, mid - h, 1, 2 * h}, cut ? th.grid_bar : ink);
+    }
+    if (st == Recorder::State::Recording) {
+      const int lx = wave.x + 1 + int(int64_t(nb) * cols / span);
+      c.fill(Rect{std::min(lx, wave.right() - 2), wave.y + 1, std::max(2, int(app_.u(1.5f))), wave.h - 2}, th.cursor);
+    }
+    if (cut0 >= 0) {
+      const Font& small = Font::get(FontFace::CondensedBold, app_.u(kSmall));
+      const float sp = app_.u(kCapsSpacing);
+      const int x0 = wave.x + 1 + int(cut0 * float(cols) / float(span)), x1 = wave.x + 1 + int(cut1 * float(cols) / float(span));
+      c.fill(Rect{wave.x + 1, wave.y + 1, x0 - wave.x - 1, wave.h - 2}, th.text.with_alpha(14));
+      c.fill(Rect{x1, wave.y + 1, wave.right() - 1 - x1, wave.h - 2}, th.text.with_alpha(14));
+      for (int lx : {x0, x1}) {
+        c.fill(Rect{lx, wave.y, std::max(1, int(app_.u(1.5f))), wave.h}, th.text);
+        draw_marker(c, lx, wave.y + int(app_.u(6)), int(app_.u(5)), th.text);
+      }
+      c.text(small, x0 + app_.u(5), wave.bottom() - int(app_.u(6)), "START", th.text, sp);
+      c.text(small, x1 - small.measure("END", sp) - app_.u(5), wave.bottom() - int(app_.u(6)), "END", th.text, sp);
+    }
+  }
+
+  // The speakers card, over everything.
+  if (rec_warning_) {
+    const Rect content = app_.content_rect();
+    const Font& tf = Font::get(FontFace::CondensedBold, app_.u(18));
+    const int w = std::min(content.w - int(app_.u(40)), int(app_.u(420)));
+    const int pad = int(app_.u(16)), line_h = int(app_.u(19));
+    const std::vector<std::string> lines =
+        wrap(sm, "If the audio input is a microphone, it will hear the speakers as well as you. With headphones it won't. "
+                 "Press A to record anyway, or B to stop the song first.",
+             float(w - 2 * pad));
+    const int h = int(app_.u(44)) + int(lines.size()) * line_h + pad;
+    const Rect card{content.x + (content.w - w) / 2, content.y + std::max(int(app_.u(8)), (content.h - h) / 2), w, h};
+    c.fill(Rect{card.x + int(app_.u(4)), card.y + int(app_.u(4)), card.w, card.h}, th.text.with_alpha(40));
+    c.fill(card, th.panel);
+    c.stroke_rect(card, std::max(1, int(app_.u(1))), th.text);
+    c.text(tf, card.x + pad, card.y + int(app_.u(26)), "THE SONG IS PLAYING", th.text);
+    c.fill(Rect{card.x + pad, card.y + int(app_.u(34)), card.w - 2 * pad, std::max(1, int(app_.u(1)))}, th.text);
+    int y = card.y + int(app_.u(44)) + int(app_.u(kText));
+    for (const std::string& l : lines) {
+      c.text(sm, card.x + pad, y, l.c_str(), th.text);
+      y += line_h;
+    }
+  }
+}
 
 }  // namespace twill

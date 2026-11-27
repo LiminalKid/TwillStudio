@@ -16,8 +16,10 @@
 
 #include "app/ClockFollower.h"
 #include "app/InputTracker.h"
+#include "app/Pointer.h"
 #include "app/Theme.h"
 #include "app/MidiSender.h"
+#include "engine/Resampler.h"
 #include "engine/Engine.h"
 #include "engine/PlaitsVoice.h"
 #include "gfx/Canvas.h"
@@ -123,6 +125,12 @@ class App {
   // and mixer, the clip in the roll, the track in the sound view), or puts them away if open. The
   // clip's and the track's end with a row that opens the main menu.
   void toggle_screen_menu();
+  // App settings kept for other parts (the sample recorder's input, gain...): "rec.*" keys in
+  // settings.txt. Empty if never set.
+  std::string setting(const std::string& key) const;
+  void set_setting(const std::string& key, const std::string& value);
+  // A sample being recorded: REC in the top bar, as for recording from MIDI.
+  void set_sampling(bool on);
   // Arms or disarms recording from MIDI (the settings panel's "Record from MIDI").
   void toggle_recording();
   // A panel listing every button combination.
@@ -161,10 +169,26 @@ class App {
   int inspector_selection() const { return inspector_sel_; }
   const std::vector<InspectorField>& inspector_fields() const { return inspector_fields_; }
   void select_inspector_row(int row);  // scrolls it into view
+  // Where things are, as last drawn, for the pointer (and its tests): a view's tab and the
+  // transport in the top bar, a panel's row (empty when it isn't showing), the quit menu's item.
+  Rect tab_rect(View v) const { return tab_rects_[int(v)]; }
+  Rect transport_rect() const { return transport_rect_; }
+  Rect inspector_row_rect(int row) const;
+  Rect inspector_rect() const { return inspector_rect_; }
+  Rect quit_item_rect(int item) const;
+  const PointerTracker& pointer() const { return pointer_; }
+  PianoRollView& roll() { return *roll_; }
+  MixerView& mixer() { return *mixer_; }
+  InstrumentView& instrument() { return *instrument_; }
+  void play_from(Tick song_position);  // the song (or, from the roll, the clip's loop) from there
+  void start_or_stop();  // Start: the song (the clip, from the roll), or stops it
   // True on the second press of the same thing within four seconds; the first shows `prompt`.
   bool confirm_twice(const char* what, const std::string& prompt);
   void ask_quit();  // the main menu's Quit Twill: on a second press
-  void message(const std::string& text);  // shown briefly in the hint bar
+  void message(const std::string& text, int seconds = 2);  // shown briefly in the hint bar
+  const std::string& message_text() const { return message_; }  // the last, for tests
+  bool audio_ok() const { return audio_ok_; }
+  static constexpr const char* kNoSoundMessage = "No sound: the audio device didn't open (see log.txt)";
   // Adds the project file actions (save, load, new, render) to a settings panel's fields.
   // The settings menu's song, export and MIDI rows.
   void add_song_fields(std::vector<InspectorField>& fields);
@@ -257,11 +281,34 @@ class App {
   void screenshot_if_asked(const Canvas& c);
   uint64_t screenshot_checked_us_ = 0;
   void handle_inspector();
+  void step_inspector(int dir);  // to the next row that isn't a heading, wrapping round
+
+  // The pointer (a mouse, a touch screen; app/Pointer.h): the panels and the top bar are here, the
+  // views have their own. Nothing tells of it, on screen or in the help: the buttons are the way
+  // to work, and this is for a desktop or a browser where a mouse is to hand.
+  void handle_pointer();
+  void pointer_inspector(const Gesture& g);
+  void pointer_quit_menu(const Gesture& g);
+  bool pointer_top_bar(const Gesture& g);  // true if it was on the top bar
+  void pointer_view(const Gesture& g);     // the view showing
+  int inspector_row_at(int x, int y) const;  // -1: none
+  Rect quit_menu_rect() const;
+  void do_quit_item();  // the quit menu's selected item
+  PointerTracker pointer_;
+  Rect tab_rects_[4], transport_rect_;
+  Rect inspector_list_;  // where the panel's rows were drawn
+  int inspector_row_h_ = 1;
+  enum class PanelDrag { None, Adjust, Scroll, Off } panel_drag_ = PanelDrag::Off;
+  int panel_drag_row_ = -1;
+  bool tap_acted_ = false;  // the last press did a row's job: its double click's second is dropped
+  bool press_was_selected_ = false;  // the row pressed was selected already (its tap may act)
+  bool press_acted_ = false;         // the press did the row's job (its tap doesn't)
+  float panel_drag_acc_ = 0, wheel_acc_ = 0;
+
   void pump_loads();  // takes a finished preset load, and starts the next
   void apply_pick(int track, const std::string& path, const Multisample& m);
   void draw_notice(Canvas& c);
   void sync_engine();
-  void play_from(Tick song_position);
   void autosave(bool force);
   void layout(const Canvas& c);
   void draw(Canvas& c);
@@ -293,6 +340,8 @@ class App {
   void save_settings();
   // Recording from MIDI into the open clip (Select + X arms it).
   bool recording_ = false;
+  bool sampling_ = false;
+  std::map<std::string, std::string> settings_more_;  // setting(): "rec.*"
   struct HeldNote {
     uint8_t pitch;
     uint32_t note_id;
@@ -382,6 +431,8 @@ class App {
   std::vector<Rect> dirty_;
   std::string top_text_cache_, hint_cache_;
   std::string message_;
+  bool audio_ok_ = true;
+  Resampler out_rs_;  // the audio thread's: 48 kHz to a device at another rate  // the output opened: without it, the song can't play (its clock is the audio)
   uint64_t message_until_us_ = 0;
 
   // Name editing (a character at a time, with the d-pad).

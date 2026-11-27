@@ -73,8 +73,18 @@ bool App::start() {
 
 bool App::open_audio() {
   // Low asks for 256 frames, which a handheld's platform raises to its 512 minimum.
+  // Where the device runs at another rate (sndstation hands over the device's own), the engine's
+  // 48 kHz is converted on the way out, so the music keeps its pitch. The rate is looked at each
+  // block: a device can move to another (the platform pauses it for that).
   const bool ok = p_.audio_open(Engine::kSampleRate, safe_audio() ? 1024 : 256, [](void* user, float* out, int frames) {
-    static_cast<App*>(user)->engine_->render(out, frames);
+    App* app = static_cast<App*>(user);
+    const int rate = app->p_.audio_info().sample_rate;
+    if (rate <= 0 || rate == Engine::kSampleRate) {
+      app->engine_->render(out, frames);
+      return;
+    }
+    if (app->out_rs_.out_rate() != rate) app->out_rs_.reset(Engine::kSampleRate, rate);
+    app->out_rs_.process(out, frames, [](void* u, float* buf, int n) { static_cast<App*>(u)->engine_->render(buf, n); }, app);
   }, this);
   AudioInfo ai = p_.audio_info();
   if (p_.system_sets_audio_buffer())
@@ -83,8 +93,11 @@ bool App::open_audio() {
   else
     p_.log("audio %s: %d Hz, %d frames per block (%s buffer%s)", ok ? "open" : "FAILED", ai.sample_rate,
            ai.block_frames, safe_audio() ? "Safe" : "Low", audio_pref_ < 0 ? ", this system's default" : "");
-  if (ok && ai.sample_rate != Engine::kSampleRate)
-    p_.log("warning: device runs at %d Hz; pitch will be off until resampling exists", ai.sample_rate);
+  if (ok && ai.sample_rate > 0 && ai.sample_rate != Engine::kSampleRate)
+    p_.log("audio: the device runs at %d Hz; the engine's %d Hz is converted to it", ai.sample_rate, Engine::kSampleRate);
+  // Without an output nothing plays, and Start would seem broken: said on screen, not only in the log.
+  audio_ok_ = ok;
+  if (!ok) message(kNoSoundMessage, 8);
   // MIDI out leaves when the audio around it reaches the speaker: about two blocks after rendering
   // (plus the master limiter's look-ahead).
   output_latency_ = 2 * ai.block_frames + Engine::kOutputDelay;
@@ -196,6 +209,8 @@ void App::step_view(int by) {
 
 void App::show(View v) {
   if (v == view_) return;
+  if (view_ == View::PianoRoll) roll_->let_go();  // a key held down with the pointer
+  if (view_ == View::Instrument) instrument_->leave();  // the sample recorder closes
   view_ = v;
   close_inspector();
   invalidate_all();
@@ -453,9 +468,9 @@ void App::listen(int track) {
 
 void App::open_track_settings(int track) { arrangement_->open_track_settings(track); }
 
-void App::message(const std::string& text) {
+void App::message(const std::string& text, int seconds) {
   message_ = text;
-  message_until_us_ = p_.micros() + 2000000;
+  message_until_us_ = p_.micros() + uint64_t(std::max(1, seconds)) * 1000000;
   invalidate(hint_bar_);
 }
 
@@ -859,6 +874,9 @@ void App::handle_midi() {
   const Tick q = kTicksPerQuarter / 4;  // recorded notes snap to 1/16
   const Track* cur = track_ < int(project_.tracks.size()) ? &project_.tracks[size_t(track_)] : nullptr;
   const bool to_midi_out = cur && cur->instrument == InstrumentType::MidiOut;
+  // While a sample is being recorded, the keys are for the instrument being sampled (a USB synth is
+  // often its MIDI input too): not played on the track, nor recorded into its clip.
+  const bool sampling = view_ == View::Instrument && instrument_->recorder_open();
   for (MidiMessage m : in) {
     // Clock, start, continue, stop and song position: followed if the project says so.
     if (m.status >= 0xF8 || m.status == 0xF2) {
@@ -876,6 +894,7 @@ void App::handle_midi() {
       if (a.kind != ClockFollower::Action::None) invalidate(top_bar_);
       continue;
     }
+    if (m.is_note_on() && sampling) continue;
     if (m.is_note_on()) {
       if (to_midi_out) {
         // A MIDI Out track: the note goes on to its channel, but not back to the device it came
@@ -1120,6 +1139,8 @@ void App::load_settings() {
     if (line == "audio=safe") audio_pref_ = 1;
     if (line == "audio=low") audio_pref_ = 0;
     if (line.rfind("boost=", 0) == 0) boost_db_ = std::max(0, std::min(12, std::atoi(line.c_str() + 6) / 3 * 3));
+    const size_t eq = line.find('=');
+    if (line.rfind("rec.", 0) == 0 && eq != std::string::npos) settings_more_[line.substr(0, eq)] = line.substr(eq + 1);
     at = end + 1;
   }
 }
@@ -1129,7 +1150,31 @@ void App::save_settings() {
                            "names=" + (auto_names_ ? "auto" : "untitled") + "\n" +
                            (audio_pref_ < 0 ? "" : audio_pref_ ? "audio=safe\n" : "audio=low\n") +
                            (boost_db_ ? "boost=" + std::to_string(boost_db_) + "\n" : std::string());
-  p_.write_file(kSettingsName, std::vector<uint8_t>(text.begin(), text.end()));
+  std::string more;
+  for (const auto& kv : settings_more_) more += kv.first + "=" + kv.second + "\n";
+  const std::string all = text + more;
+  p_.write_file(kSettingsName, std::vector<uint8_t>(all.begin(), all.end()));
+}
+
+std::string App::setting(const std::string& key) const {
+  auto it = settings_more_.find(key);
+  return it == settings_more_.end() ? std::string() : it->second;
+}
+
+void App::set_setting(const std::string& key, const std::string& value) {
+  if (setting(key) == value) return;
+  // One line each: no line breaks in a value.
+  std::string v = value;
+  for (char& c : v)
+    if (c == '\n' || c == '\r') c = ' ';
+  settings_more_[key] = v;
+  save_settings();
+}
+
+void App::set_sampling(bool on) {
+  if (on == sampling_) return;
+  sampling_ = on;
+  invalidate(top_bar_);
 }
 
 void App::set_output_boost_db(int db) {
@@ -1246,15 +1291,8 @@ void App::handle_inspector() {
     close_inspector();
     return;
   }
-  const int n = int(inspector_fields_.size());
   const int dir = in.pressed_or_repeat(kUp) ? -1 : in.pressed_or_repeat(kDown) ? 1 : 0;
-  if (dir) {
-    // Headings are passed over (a panel of nothing but headings would stop after one lap).
-    for (int i = 0; i < n; ++i) {
-      inspector_sel_ = (inspector_sel_ + dir + n) % n;
-      if (!inspector_fields_[size_t(inspector_sel_)].heading) break;
-    }
-  }
+  if (dir) step_inspector(dir);
   InspectorField& field = inspector_fields_[size_t(inspector_sel_)];
   int step = in.pressed_or_repeat(kRight) ? 1 : in.pressed_or_repeat(kLeft) ? -1 : 0;
   if (step && field.adjust) {
@@ -1268,6 +1306,16 @@ void App::handle_inspector() {
     return;
   }
   if (in.pressed_or_repeat(kUp | kDown | kLeft | kRight)) invalidate_all();
+}
+
+void App::step_inspector(int dir) {
+  // Headings are passed over (a panel of nothing but headings would stop after one lap).
+  const int n = int(inspector_fields_.size());
+  for (int i = 0; i < n; ++i) {
+    inspector_sel_ = (inspector_sel_ + dir + n) % n;
+    if (!inspector_fields_[size_t(inspector_sel_)].heading) break;
+  }
+  invalidate_all();
 }
 
 // --- Frame ----------------------------------------------------------------------------------
@@ -1321,16 +1369,20 @@ void App::handle_global() {
     invalidate(top_bar_);
     return;
   }
-  if (in.pressed(kStart)) {
-    if (engine_->playing()) {
-      engine_->stop();
-    } else {
-      // From the arrangement: the whole song. From the roll: the clip being edited.
-      const Placement* pl = open_placement();
-      play_from(view_ == View::PianoRoll && pl ? pl->start : project_.loop_start);
-    }
-    invalidate(top_bar_);
+  if (in.pressed(kStart)) start_or_stop();
+}
+
+void App::start_or_stop() {
+  if (engine_->playing()) {
+    engine_->stop();
+  } else if (!audio_ok_) {
+    message(kNoSoundMessage, 4);
+  } else {
+    // From the arrangement: the whole song. From the roll: the clip being edited.
+    const Placement* pl = open_placement();
+    play_from(view_ == View::PianoRoll && pl ? pl->start : project_.loop_start);
   }
+  invalidate(top_bar_);
 }
 
 void App::play_from(Tick position) {
@@ -1445,6 +1497,14 @@ bool App::frame(const InputState& state, Canvas& canvas) {
     }
   }
 
+  // The pointer, where there is one: the quit menu's, or the app's (a plugin's screen takes none).
+  pointer_.update(state.pointer, now, u(4));
+  if (quit_menu_) {
+    for (const Gesture& g : pointer_.gestures()) pointer_quit_menu(g);
+  } else if (app_has_buttons) {
+    handle_pointer();
+  }
+
   if (history_.revision() != last_revision_seen_) {
     last_revision_seen_ = history_.revision();
     last_edit_us_ = now;
@@ -1547,7 +1607,10 @@ void App::handle_quit_menu() {
   if (in.pressed(kB)) return close_quit_menu();
   if (in.pressed_or_repeat(kUp)) quit_sel_ = (quit_sel_ + n - 1) % n;
   if (in.pressed_or_repeat(kDown)) quit_sel_ = (quit_sel_ + 1) % n;
-  if (!in.pressed(kA)) return;
+  if (in.pressed(kA)) do_quit_item();
+}
+
+void App::do_quit_item() {
   const QuitItem::Action what = quit_items_[size_t(quit_sel_)].action;
   close_quit_menu();
   if (what == QuitItem::Back) {
@@ -1566,6 +1629,20 @@ void App::handle_quit_menu() {
   }
 }
 
+Rect App::quit_menu_rect() const {
+  const int row_h = int(u(kPanelRowH + 4));
+  const int w = std::min(size_.w - int(u(32)), int(u(260)));
+  const int h = int(u(44)) + int(quit_items_.size()) * row_h + int(u(30));
+  return Rect{(size_.w - w) / 2, (size_.h - h) / 2, w, h};
+}
+
+Rect App::quit_item_rect(int item) const {
+  if (!quit_menu_ || item < 0 || item >= int(quit_items_.size())) return Rect{};
+  const Rect r = quit_menu_rect();
+  const int row_h = int(u(kPanelRowH + 4));
+  return Rect{r.x + int(u(8)), r.y + int(u(42)) + item * row_h, r.w - int(u(16)), row_h};
+}
+
 void App::draw_quit_menu(Canvas& c) {
   // A card in the middle of the display: the app's name, a rule, the items, the selected one an ink
   // block, and the keys.
@@ -1573,9 +1650,7 @@ void App::draw_quit_menu(Canvas& c) {
   const Font& f = Font::get(FontFace::CondensedSemiBold, u(kPanelText + 2));
   const Font& kf = Font::get(FontFace::CondensedSemiBold, u(kPanelText - 1));
   const int pad = int(u(16)), row_h = int(u(kPanelRowH + 4));
-  const int w = std::min(size_.w - int(u(32)), int(u(260)));
-  const int h = int(u(44)) + int(quit_items_.size()) * row_h + int(u(30));
-  const Rect r{(size_.w - w) / 2, (size_.h - h) / 2, w, h};
+  const Rect r = quit_menu_rect();
   c.reset_clip();
   c.fill(Rect{r.x + int(u(4)), r.y + int(u(4)), r.w, r.h}, Color::rgb(0).with_alpha(60));
   c.fill(r, theme_.panel);
@@ -1728,7 +1803,9 @@ void App::draw_top_bar(Canvas& c) {
       c.fill(Rect{ix + int(u(1)), mid - half + int(u(1)), int(icon - u(2)), int(icon - u(2))}, theme_.text_secondary);
     }
   }
-  if (recording_) {
+  // The transport, for the pointer: from the triangle (or VOICES FULL) to the tempo.
+  transport_rect_ = Rect{int(x_right - u(4)), r.y, r.right() - int(x_right - u(4)), r.h};
+  if (recording_ || sampling_) {
     x_right -= gap + fb.measure("REC");
     c.text(fb, x_right, base, "REC", theme_.cursor);
     const int d = int(u(8));
@@ -1741,6 +1818,7 @@ void App::draw_top_bar(Canvas& c) {
   for (View v : {View::Arrangement, View::PianoRoll, View::Instrument, View::Mixer}) {
     const char* name = v == View::Arrangement ? "ARRANGE" : v == View::PianoRoll ? "ROLL" : v == View::Instrument ? "SOUND" : "MIX";
     const float w = fb.measure(name) + u(14);
+    tab_rects_[int(v)] = Rect{int(x), r.y, int(w + u(2)), r.h};
     if (v == view_) {
       c.fill(Rect{int(x), r.y + int(u(5)), int(w), r.h - int(u(10))}, theme_.chip_active);
       c.text(fb, x + u(7), base, name, theme_.chip_active_text);
@@ -1911,6 +1989,8 @@ void App::draw_inspector(Canvas& c) {
   // at the bottom, which hints at more; arrows beside the title say which way there's more.
   const int n = int(inspector_fields_.size());
   const Rect list{r.x, y, r.w, r.bottom() - int(u(4)) - y};
+  inspector_list_ = list;
+  inspector_row_h_ = std::max(1, row_h);
   const int visible = std::max(1, list.h / row_h);
   // A heading just above the selection comes into view with it.
   int top = inspector_sel_;

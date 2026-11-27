@@ -1,5 +1,6 @@
 #include "platform/sdl2/Sdl2Platform.h"
 
+#include "platform/sdl2/AlsaCapture.h"
 #include "platform/sdl2/SystemMidi.h"
 
 #include <cmath>
@@ -154,6 +155,7 @@ Sdl2Platform::Sdl2Platform() {
 
 Sdl2Platform::~Sdl2Platform() {
   keep_awake(false);
+  capture_close();
   audio_close();
   if (controller_) SDL_GameControllerClose(controller_);
   else if (joystick_) SDL_JoystickClose(joystick_);
@@ -164,6 +166,14 @@ Sdl2Platform::~Sdl2Platform() {
 }
 
 bool Sdl2Platform::init() {
+#ifndef TWILL_HANDHELD
+  // Fingers come as fingers, not as a mouse as well (take_pointer).
+  SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0");
+  SDL_SetHint(SDL_HINT_MOUSE_TOUCH_EVENTS, "0");
+  // A click on the window while another app is in front acts as well as bringing Twill forward
+  // (otherwise the first click back from another app does nothing).
+  SDL_SetHint(SDL_HINT_MOUSE_FOCUS_CLICKTHROUGH, "1");
+#endif
   if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_JOYSTICK | SDL_INIT_GAMECONTROLLER) != 0) {
     log("SDL_Init failed: %s", SDL_GetError());
     return false;
@@ -173,8 +183,14 @@ bool Sdl2Platform::init() {
 #ifdef __EMSCRIPTEN__
   data_dir_ = "/twill/";
 #else
-  char* pref = handheld_ ? nullptr : SDL_GetPrefPath("Twill Studio", "Twill Studio");
-  if (pref) {
+  // TWILL_DATA_DIR: another folder (for trying things without touching the usual one).
+  const char* own = std::getenv("TWILL_DATA_DIR");
+  char* pref = handheld_ || (own && *own) ? nullptr : SDL_GetPrefPath("Twill Studio", "Twill Studio");
+  if (own && *own) {
+    data_dir_ = own;
+    if (data_dir_.back() != '/') data_dir_ += '/';
+    mkdir(data_dir_.c_str(), 0755);
+  } else if (pref) {
     data_dir_ = pref;
     SDL_free(pref);
   } else {
@@ -443,12 +459,99 @@ void Sdl2Platform::poll_input(InputState& out) {
       case SDL_WINDOWEVENT:
         if (e.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) update_size();
         break;
+      case SDL_MOUSEBUTTONDOWN:
+      case SDL_MOUSEBUTTONUP:
+      case SDL_MOUSEMOTION:
+      case SDL_MOUSEWHEEL:
+      case SDL_FINGERDOWN:
+      case SDL_FINGERUP:
+      case SDL_FINGERMOTION:
+        take_pointer(e);
+        break;
     }
   }
   follow_page_size();
   out.held = read_buttons();
   out.quit_requested = quit_;
+  out.pointer.swap(pointer_);
+  pointer_.clear();
 }
+
+void Sdl2Platform::take_pointer(const SDL_Event& e) {
+#ifdef TWILL_HANDHELD
+  // Handheld builds run on the system's own SDL, which can be older than the calls below.
+  (void)e;
+}
+#else
+  if (handheld_ || rotate_) return;  // no mouse there, and a touch panel would need turning too
+  int ww = 0, wh = 0;
+  SDL_GetWindowSize(window_, &ww, &wh);
+  if (ww <= 0 || wh <= 0) return;
+  // Window points to display pixels (2 to 1 on a Retina display).
+  const float sx = float(size_.w) / ww, sy = float(size_.h) / wh;
+  PointerEvent p;
+  p.shift = (SDL_GetModState() & KMOD_SHIFT) != 0;
+  const uint32_t now = SDL_GetTicks();
+  switch (e.type) {
+    case SDL_FINGERDOWN:
+    case SDL_FINGERUP:
+    case SDL_FINGERMOTION: {
+      // A touch screen's fingers only: a Mac's trackpad reports its fingers too, and moves the
+      // mouse as well.
+      if (SDL_GetTouchDeviceType(e.tfinger.touchId) != SDL_TOUCH_DEVICE_DIRECT) return;
+      last_touch_ms_ = now;
+      p.source = PointerEvent::Touch;
+      p.type = e.type == SDL_FINGERDOWN ? PointerEvent::Down : e.type == SDL_FINGERUP ? PointerEvent::Up : PointerEvent::Move;
+      p.id = int(e.tfinger.fingerId & 0x7fffffff) + 1;
+      p.x = int(e.tfinger.x * size_.w);
+      p.y = int(e.tfinger.y * size_.h);
+      break;
+    }
+    case SDL_MOUSEWHEEL: {
+      if (e.wheel.which == SDL_TOUCH_MOUSEID) return;
+      p.type = PointerEvent::Wheel;
+#if SDL_VERSION_ATLEAST(2, 0, 18)
+      p.wheel_x = e.wheel.preciseX;
+      p.wheel_y = e.wheel.preciseY;
+#else
+      p.wheel_x = float(e.wheel.x);
+      p.wheel_y = float(e.wheel.y);
+#endif
+      if (e.wheel.direction == SDL_MOUSEWHEEL_FLIPPED) {
+        p.wheel_x = -p.wheel_x;
+        p.wheel_y = -p.wheel_y;
+      }
+      int mx = 0, my = 0;
+      SDL_GetMouseState(&mx, &my);
+      p.x = int(mx * sx);
+      p.y = int(my * sy);
+      break;
+    }
+    default: {
+      // A mouse made up from a finger (SDL's, or the browser's own just after a tap): the finger's
+      // events have it already.
+      const uint32_t which = e.type == SDL_MOUSEMOTION ? e.motion.which : e.button.which;
+      if (which == SDL_TOUCH_MOUSEID || (last_touch_ms_ && now - last_touch_ms_ < 1000)) return;
+      if (e.type == SDL_MOUSEMOTION) {
+        p.type = PointerEvent::Move;
+        p.x = int(e.motion.x * sx);
+        p.y = int(e.motion.y * sy);
+      } else {
+        p.type = e.type == SDL_MOUSEBUTTONDOWN ? PointerEvent::Down : PointerEvent::Up;
+        p.button = e.button.button == SDL_BUTTON_RIGHT ? 2 : e.button.button == SDL_BUTTON_MIDDLE ? 3 : 1;
+        p.x = int(e.button.x * sx);
+        p.y = int(e.button.y * sy);
+      }
+      break;
+    }
+  }
+  static const bool trace = env_flag("TWILL_POINTER_LOG");
+  if (trace)
+    log("pointer: event %d source %d id %d button %d at %d,%d (window %dx%d points, display %dx%d), %u ms old",
+        int(p.type), int(p.source), p.id, p.button, p.x, p.y, ww, wh, size_.w, size_.h, now - e.common.timestamp);
+  pointer_.push_back(p);
+}
+#endif
 
 // The web build: the page lays out the canvas (web/shell.html), and the app draws at the size the
 // page gives it, in real pixels, rather than drawing at a fixed size for the browser to scale.
@@ -511,6 +614,381 @@ void Sdl2Platform::audio_close() {
   compressor_.restore();
 }
 
+// Recording. Not in the browser; on a handheld only when TWILL_CAPTURE=1 is set, by the launchers of
+// systems that can record (all of Twill's launchers set it, for USB inputs; the Brick Pro's own mic can't be opened under
+// its KNULLI beta: design §6, "Recording samples").
+bool Sdl2Platform::capture_allowed() const {
+#ifdef __EMSCRIPTEN__
+  return false;
+#else
+  if (!handheld_) return true;
+  const char* v = std::getenv("TWILL_CAPTURE");
+  return v && *v && *v != '0';
+#endif
+}
+
+bool Sdl2Platform::capture_available() { return capture_allowed() && SDL_GetNumAudioDevices(1) != 0; }  // -1: can't tell, so maybe
+
+// On a handheld SDL may list the sound cards themselves (KNULLI: ALSA's), which the sound system
+// (PipeWire) holds, so they never open and only the default (through PipeWire) does. Each is tried
+// once, and those that won't open are left out, until the list changes.
+// Under ALSA, SDL opens a listed input through the card's "default:" device, which for a USB card
+// goes through dsnoop (for sharing the input), and that overran and lost bits of the sound on the
+// Brick Pro under sndstation: short clicks in the take and in the monitoring. The card's plain
+// device with conversions (plughw) is clean, so a listed input is opened as that: SDL takes
+// AUDIODEV for its default input. Its name is "<card>, <device>", from the kernel's own list.
+// Empty if it's not an ALSA card's input (or not Linux).
+std::string Sdl2Platform::alsa_plughw_for(const std::string& listed) const {
+#ifdef __linux__
+  const char* driver = SDL_GetCurrentAudioDriver();
+  if (listed.empty() || !driver || std::strcmp(driver, "alsa") != 0) return std::string();
+  FILE* f = std::fopen("/proc/asound/cards", "r");
+  if (!f) return std::string();
+  char line[512];
+  std::string found;
+  while (found.empty() && std::fgets(line, sizeof line, f)) {
+    // " 2 [Felucca        ]: USB-Audio - Felucca"
+    int num = -1;
+    char id[64] = {0};
+    if (std::sscanf(line, " %d [%63[^] ]", &num, id) != 2) continue;
+    const char* dash = std::strstr(line, " - ");
+    if (!dash) continue;
+    std::string card_name = dash + 3;
+    while (!card_name.empty() && (card_name.back() == '\n' || card_name.back() == ' ')) card_name.pop_back();
+    for (int dev = 0; dev < 32 && found.empty(); ++dev) {
+      char path[96];
+      std::snprintf(path, sizeof path, "/proc/asound/card%d/pcm%dc/info", num, dev);
+      FILE* info = std::fopen(path, "r");
+      if (!info) continue;
+      char l2[256];
+      while (std::fgets(l2, sizeof l2, info)) {
+        if (std::strncmp(l2, "name: ", 6) != 0) continue;
+        std::string pcm = l2 + 6;
+        while (!pcm.empty() && (pcm.back() == '\n' || pcm.back() == ' ')) pcm.pop_back();
+        if (card_name + ", " + pcm == listed) found = "plughw:CARD=" + std::string(id) + ",DEV=" + std::to_string(dev);
+        break;
+      }
+      std::fclose(info);
+    }
+  }
+  std::fclose(f);
+  return found;
+#else
+  (void)listed;
+  return std::string();
+#endif
+}
+
+// Opens an input by its listed name (empty: the default), as plughw where it's an ALSA card's.
+SDL_AudioDeviceID Sdl2Platform::open_capture_device(const std::string& device, const SDL_AudioSpec& want,
+                                                    SDL_AudioSpec& have, int allow, std::string* used) const {
+  const std::string pcm = alsa_plughw_for(device);
+  if (used) *used = pcm.empty() ? (device.empty() ? std::string("default") : device) : pcm;
+  if (pcm.empty()) return SDL_OpenAudioDevice(device.empty() ? nullptr : device.c_str(), 1, &want, &have, allow);
+  const char* was = std::getenv("AUDIODEV");
+  const std::string keep = was ? was : "";
+  setenv("AUDIODEV", pcm.c_str(), 1);
+  const SDL_AudioDeviceID id = SDL_OpenAudioDevice(nullptr, 1, &want, &have, allow);
+  if (was) setenv("AUDIODEV", keep.c_str(), 1);
+  else unsetenv("AUDIODEV");
+  return id;
+}
+
+std::vector<std::string> Sdl2Platform::capture_devices() {
+  std::vector<std::string> out;
+  if (!capture_allowed()) return out;
+  const int n = SDL_GetNumAudioDevices(1);
+  for (int i = 0; i < n; ++i)
+    if (const char* name = SDL_GetAudioDeviceName(i, 1)) out.push_back(name);
+  if (!handheld_) return out;
+  if (out == capture_listed_) return capture_usable_;
+  capture_listed_ = out;
+  capture_usable_.clear();
+  for (const std::string& d : out) {
+    if (capture_live_ && d == capture_name_) {  // open now, so it opens
+      capture_usable_.push_back(d);
+      continue;
+    }
+    // A card's own input, as it would be opened (AlsaCapture); else through SDL.
+    const std::string hw = AlsaCapture::device_for(d);
+    if (!hw.empty()) {
+      AlsaCapture test;
+      std::string err;
+      if (test.open(hw, 48000, err)) {
+        test.close();
+        capture_usable_.push_back(d);
+        continue;
+      }
+    }
+    SDL_AudioSpec want{}, have{};
+    want.freq = 48000;
+    want.format = AUDIO_F32SYS;
+    want.channels = 2;
+    want.samples = 512;
+    const SDL_AudioDeviceID id = open_capture_device(d, want, have, SDL_AUDIO_ALLOW_CHANNELS_CHANGE, nullptr);
+    if (id) {
+      SDL_CloseAudioDevice(id);
+      capture_usable_.push_back(d);
+    } else {
+      log("capture: leaving out \"%s\": %s", d.c_str(), SDL_GetError());
+    }
+  }
+  return capture_usable_;
+}
+
+#ifdef __linux__
+namespace {
+bool set_real_time(bool on);
+}
+#endif
+
+void Sdl2Platform::sdl_capture_callback(void* user, Uint8* stream, int len) {
+  auto* self = static_cast<Sdl2Platform*>(user);
+  if (self->capture_s16_) {  // to float, a block at a time through the space set aside
+    const int16_t* s = reinterpret_cast<const int16_t*>(stream);
+    size_t count = size_t(len) / sizeof(int16_t);
+    while (count > 0) {
+      const size_t chunk = std::min(count, self->capture_conv_.size()) / size_t(std::max(1, self->capture_info_.channels)) *
+                           size_t(std::max(1, self->capture_info_.channels));
+      if (chunk == 0) break;
+      for (size_t i = 0; i < chunk; ++i) self->capture_conv_[i] = float(s[i]) * (1.0f / 32768.0f);
+      self->take_capture(self->capture_conv_.data(), chunk);
+      s += chunk;
+      count -= chunk;
+    }
+    return;
+  }
+  self->take_capture(reinterpret_cast<const float*>(stream), size_t(len) / sizeof(float));
+}
+
+// The input's thread: interleaved float, `n` values, into the app's ring and the monitor's.
+void Sdl2Platform::take_capture(const float* in, size_t n) {
+  Sdl2Platform* self = this;
+#ifdef __linux__
+  // Handhelds: the input's thread at real-time priority as the output's is, so it isn't held off
+  // while monitoring (a late input block is a gap in what's heard).
+  if (self->handheld_ && !self->capture_rt_tried_) {
+    self->capture_rt_tried_ = true;
+    set_real_time(true);
+  }
+#endif
+  const size_t cap = self->capture_ring_.size();
+  size_t w = self->capture_write_.load(std::memory_order_relaxed);
+  const size_t r = self->capture_read_.load(std::memory_order_acquire);
+  // Whole frames only, and only what fits.
+  const size_t ch = size_t(std::max(1, self->capture_info_.channels));
+  size_t room = cap - 1 - (w - r);
+  size_t take = std::min(n, room) / ch * ch;
+  for (size_t i = 0; i < take; ++i) self->capture_ring_[(w + i) % cap] = in[i];
+  self->capture_write_.store(w + take, std::memory_order_release);
+
+  // Monitoring: the channel chosen (or the mono mix, or the first two in stereo), with the gain,
+  // as frames of left and right.
+  if (!self->monitor_on_.load(std::memory_order_relaxed)) return;
+  const int burst = int(n / ch);
+  if (burst > self->monitor_burst_.load(std::memory_order_relaxed)) self->monitor_burst_.store(burst, std::memory_order_relaxed);
+  const size_t mcap = self->monitor_ring_.size() / 2;  // frames
+  if (mcap < 2) return;
+  const int chs = int(ch), want = self->monitor_channel_.load(std::memory_order_relaxed);
+  const bool stereo = want == -2 && chs >= 2;
+  const int use = want >= chs ? chs - 1 : want;
+  const float g = self->monitor_gain_.load(std::memory_order_relaxed);
+  size_t mw = self->monitor_write_.load(std::memory_order_relaxed);
+  const size_t mr = self->monitor_read_.load(std::memory_order_acquire);
+  const size_t frames = n / ch, fit = std::min(frames, mcap - 1 - (mw - mr));
+  for (size_t f = 0; f < fit; ++f) {
+    const float* fr = in + f * ch;
+    float lv, rv;
+    if (stereo) {
+      lv = fr[0];
+      rv = fr[1];
+    } else if (use < 0) {
+      lv = 0;
+      for (size_t c = 0; c < ch; ++c) lv += fr[c];
+      lv /= float(ch);
+      rv = lv;
+    } else {
+      lv = rv = fr[use];
+    }
+    float* to = &self->monitor_ring_[((mw + f) % mcap) * 2];
+    to[0] = lv * g;
+    to[1] = rv * g;
+  }
+  self->monitor_write_.store(mw + fit, std::memory_order_release);
+}
+
+// The input and the output run on clocks of their own, a little apart: read a touch faster when
+// the ring fills past the mark, a touch slower when it empties, so it keeps the same small delay.
+void Sdl2Platform::mix_monitor(float* out, int frames) {
+  const size_t w = monitor_write_.load(std::memory_order_acquire);
+  if (!monitor_on_.load(std::memory_order_acquire)) {  // whatever is left is old by the time it's on
+    if (monitor_primed_ || monitor_read_.load(std::memory_order_relaxed) != w) monitor_read_.store(w, std::memory_order_release);
+    monitor_primed_ = false;
+    monitor_pos_ = 0;
+    return;
+  }
+  const size_t cap = monitor_ring_.size() / 2;  // frames of two
+  if (cap < 2) return;
+  size_t r = monitor_read_.load(std::memory_order_relaxed);
+  // The input comes at 48 kHz (SDL converts it); an output at another rate (a USB device at
+  // 44.1 kHz, through sndstation's own stream) reads it that much faster or slower.
+  const int out_rate = audio_info().sample_rate;  // virtual: sndstation keeps its own
+  const double ratio = out_rate > 0 ? double(monitor_in_rate_.load(std::memory_order_relaxed)) / double(out_rate) : 1.0;
+  // What to hold in hand: enough to ride out the largest burst the input brings at once, and two
+  // output blocks, plus a little for the threads' timing (about 5 ms).
+  const int burst = std::max(256, monitor_burst_.load(std::memory_order_relaxed));
+  const double target = (double(burst) + 2.0 * frames * ratio + 256.0);
+  double fill = double(w - r) - monitor_pos_;
+  if (!monitor_primed_) {
+    if (fill < target) return;  // until there's enough in hand
+    monitor_primed_ = true;
+    monitor_fill_ = fill;
+  }
+  if (fill > target * 4) {  // far behind (the app was held up): catch up
+    monitor_skips_.fetch_add(1, std::memory_order_relaxed);
+    r = w - size_t(target);
+    monitor_pos_ = 0;
+    fill = target;
+  }
+  monitor_fill_ += 0.05 * (fill - monitor_fill_);
+  const double step = ratio * (1.0 + std::max(-0.005, std::min(0.005, 0.005 * (monitor_fill_ - target) / target)));
+  double pos = monitor_pos_;
+  for (int i = 0; i < frames; ++i) {
+    const size_t at = size_t(pos);
+    if (r + at + 1 >= w) {  // ran dry: wait to fill again
+      monitor_dry_.fetch_add(1, std::memory_order_relaxed);
+      monitor_primed_ = false;
+      break;
+    }
+    const float* a = &monitor_ring_[((r + at) % cap) * 2];
+    const float* b = &monitor_ring_[((r + at + 1) % cap) * 2];
+    const float t = float(pos - double(at));
+    out[2 * i] += a[0] + (b[0] - a[0]) * t;
+    out[2 * i + 1] += a[1] + (b[1] - a[1]) * t;
+    pos += step;
+  }
+  const size_t used = std::min(size_t(pos), w - r);
+  monitor_pos_ = pos - double(used);
+  monitor_read_.store(r + used, std::memory_order_release);
+}
+
+void Sdl2Platform::capture_monitor(bool on, int channel, float gain) {
+  on = on && capture_live_.load();
+  monitor_channel_.store(channel, std::memory_order_relaxed);
+  monitor_gain_.store(gain, std::memory_order_relaxed);
+  monitor_on_.store(on, std::memory_order_release);
+}
+
+bool Sdl2Platform::capture_open(const std::string& device, CaptureInfo& info, std::string& error) {
+  capture_close();
+  if (!capture_allowed()) {
+    error = "Recording isn't available here";
+    return false;
+  }
+  // Handhelds: an input chosen by name is read from the card itself (AlsaCapture), not through
+  // SDL, whose way in clicked on the TrimUI Brick; SDL if that won't open (a card the system's
+  // sound server holds).
+  if (handheld_ && !device.empty()) {
+    const std::string hw = AlsaCapture::device_for(device);
+    std::string err;
+    if (!hw.empty()) {
+      if (!alsa_in_) alsa_in_ = std::make_unique<AlsaCapture>();
+      if (alsa_in_->open(hw, 48000, err)) {
+        capture_begin(alsa_in_->rate(), alsa_in_->channels());
+        capture_name_ = device;
+        alsa_in_->start([](void* u, const float* d, size_t n) { static_cast<Sdl2Platform*>(u)->take_capture(d, n); }, this);
+        info = CaptureInfo{alsa_in_->rate(), alsa_in_->channels()};
+        log("capture: \"%s\" (%s, read directly), %s, %d Hz, %d channels, %d frames a period", device.c_str(), hw.c_str(),
+            alsa_in_->format(), alsa_in_->rate(), alsa_in_->channels(), alsa_in_->period());
+        return true;
+      }
+      log("capture: %s won't open directly (%s); through SDL", hw.c_str(), err.c_str());
+    }
+  }
+  SDL_AudioSpec want{}, have{};
+  want.freq = 48000;
+  // Handhelds take the input as 16-bit, as USB inputs give it, and convert it here: asked for
+  // float, ALSA's plughw converts each block itself, and on the Brick Pro under sndstation that
+  // overran and lost bits of a USB synth's sound (clicks in the take and the monitoring); arecord
+  // showed the same in float and nothing in 16-bit, whatever the buffer size.
+  capture_s16_ = handheld_;
+  want.format = capture_s16_ ? AUDIO_S16SYS : AUDIO_F32SYS;
+  want.channels = 2;
+  want.samples = 512;
+  capture_conv_.assign(size_t(want.samples) * 8 * 4, 0.0f);  // room for SDL's blocks, 8 channels
+  want.callback = sdl_capture_callback;
+  want.userdata = this;
+  // Ring first: the callback may run as soon as the device opens. Not the input's own rate: 48 kHz
+  // (SDL converts), as the output runs.
+  capture_begin(48000, 2);
+  std::string used;
+  capture_dev_ = open_capture_device(device, want, have, SDL_AUDIO_ALLOW_CHANNELS_CHANGE, &used);
+  if (!capture_dev_) {
+    capture_end();
+    error = std::string("Can't open the input: ") + SDL_GetError();
+    log("capture: %s", error.c_str());
+    return false;
+  }
+  SDL_LockAudioDevice(capture_dev_);
+  capture_info_ = CaptureInfo{have.freq, std::max(1, int(have.channels))};
+  SDL_UnlockAudioDevice(capture_dev_);
+  info = capture_info_;
+  capture_name_ = device;
+  log("capture: \"%s\" (%s), %d Hz, %d channels, %d frames a block", device.empty() ? "default" : device.c_str(),
+      used.c_str(), have.freq, int(have.channels), int(have.samples));
+  SDL_PauseAudioDevice(capture_dev_, 0);
+  return true;
+}
+
+void Sdl2Platform::capture_begin(int rate, int channels) {
+  // Eight seconds of 8 channels.
+  capture_ring_.assign(size_t(48000) * 8 * 8 + 1, 0.0f);
+  capture_write_ = 0;
+  capture_read_ = 0;
+  capture_info_ = CaptureInfo{rate, std::max(1, channels)};
+  monitor_in_rate_ = rate > 0 ? rate : 48000;
+  // A second of left and right for monitoring, made once: the output thread may be reading it (it
+  // only looks once monitoring is on, which is after this).
+  monitor_on_ = false;
+  if (monitor_ring_.empty()) monitor_ring_.assign(size_t(48000 + 1) * 2, 0.0f);
+  capture_live_ = true;
+}
+
+void Sdl2Platform::capture_end() {
+  monitor_on_ = false;
+  capture_live_ = false;
+}
+
+size_t Sdl2Platform::capture_read(std::vector<float>& out) {
+  if (!capture_live_) return 0;
+  const size_t cap = capture_ring_.size();
+  const size_t r = capture_read_.load(std::memory_order_relaxed);
+  const size_t w = capture_write_.load(std::memory_order_acquire);
+  for (size_t i = r; i != w; ++i) out.push_back(capture_ring_[i % cap]);
+  capture_read_.store(w, std::memory_order_release);
+  // Monitoring's troubles, now and then, for anyone hearing clicks.
+  const uint64_t now = micros();
+  if (now - monitor_logged_us_ > 5000000) {
+    monitor_logged_us_ = now;
+    const int got[3] = {monitor_burst_.load(), monitor_dry_.load(), monitor_skips_.load()};
+    if (got[1] != monitor_logged_[1] || got[2] != monitor_logged_[2] || got[0] != monitor_logged_[0]) {
+      log("monitor: input bursts up to %d frames; ran dry %d times, skipped ahead %d times", got[0], got[1], got[2]);
+      for (int i = 0; i < 3; ++i) monitor_logged_[i] = got[i];
+    }
+  }
+  return (w - r) / size_t(std::max(1, capture_info_.channels));
+}
+
+void Sdl2Platform::capture_close() {
+  if (alsa_in_ && alsa_in_->is_open()) {
+    if (alsa_in_->overruns() > 0) log("capture: the input overran %d times (sound lost)", alsa_in_->overruns());
+    alsa_in_->close();
+  }
+  capture_end();
+  if (capture_dev_) SDL_CloseAudioDevice(capture_dev_);
+  capture_dev_ = 0;
+}
+
 #ifdef __linux__
 namespace {
 bool set_real_time(bool on) {
@@ -535,6 +1013,7 @@ void Sdl2Platform::sdl_audio_callback(void* user, Uint8* stream, int len) {
 #endif
   int frames = len / int(2 * sizeof(float));
   self->audio_cb_(self->audio_user_, reinterpret_cast<float*>(stream), frames);
+  self->mix_monitor(reinterpret_cast<float*>(stream), frames);
 #ifdef __linux__
   // Not while it can't keep up, though: a real-time thread with more work than a core can do would
   // leave nothing for the rest of the system (a handheld down to one slow core, asleep, may not see

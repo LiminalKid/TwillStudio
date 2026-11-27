@@ -583,8 +583,98 @@ open the filter is), with how long the note lasts. Chiptune Arp shows the app's 
   second. Undo brings the name back and the sample loads again.
 - A project refers to samples by path relative to its folder. **Save as bundle** copies every used
   sample into the project's `samples/` folder, so a project moves between devices as one folder.
-- Later: sampling from the device's input (the Brick Pro has a built-in mic and supports USB audio)
-  and resampling the master output.
+- **The master output at another rate** (built 2026-11-27): the engine stays at 48 kHz, and where the
+  device runs at another rate (sndstation hands over the device's own: a USB device at 44.1 kHz) the
+  output callback converts it with `engine/Resampler`, a 32-tap Kaiser-windowed sinc whose cutoff
+  sits below the lower Nyquist, so pitch and tempo hold and nothing folds back. The rate is checked
+  each block, so a device that moves to another rate is followed. SDL's platforms never need it (SDL
+  converts). Monitoring a recording follows the same ratio.
+
+#### Recording samples (designed 2026-11-26; built for desktops the same day)
+
+Recording a one-shot from the device's microphone or a USB input, into a sampler track or a kit
+slot. Desktop and handhelds; not the browser. Waiting on the Brick Pro: under its beta KNULLI the
+mic records through raw ALSA (16-bit; one mic, on the left channel), but PipeWire's capture node
+fails to start ("invalid rate setting") and keeps the device, so nothing can record through it.
+The plan is to wait for KNULLI's official Brick Pro release, and sndstation's equivalent.
+*As built (2026-11-26):* on desktops; handhelds offer it only with `TWILL_CAPTURE=1` set, which
+every handheld launcher does (KNULLI, sndstation, TrimUI and NextUI tested; PortMaster and muOS
+on from 2026-11-27 untested): a USB input (tested: a synth with USB audio,
+on the Brick Pro and the RG28XX) records through the default (PipeWire's default source on KNULLI,
+ALSA's on sndstation, which follows a USB card), though the Brick Pro's own mic still can't; never
+in the browser. `app/Recorder` holds the recording itself (meter,
+listening with 50 ms kept from before the sound, the 30 s limit, trimming, normalizing, the WAV),
+apart from the screen, so the tests drive it directly.
+
+- **Where:** a **Record** row under **Sample** (Single and Slices modes) and under **Slot sample**
+  (Kit: "Record into slot"). A on it opens the recorder, which replaces the settings list the way
+  the browser does. The row is there only when the platform can record (from its default at least).
+- **The recorder** has three states, each with the input's meter on the left and the waveform on
+  the right:
+
+  ```
+  READY                          RECORDING  0:02.4               KEEP?  0:01.8
+  Input   Built-in mic           ●  ▁▂▅▇▅▃▂▁▁▂▆▇▅▂             [▕▁▃▇▅▃▂▁▁▏]  trimmed: 0.12 s
+  Channel Left                                                   Normalize   On
+  Gain    ████████░░  +24 dB     meter  ▮▮▮▮▮▮▯▯                 Name        Kick rec 1
+  Start   When sound starts
+  meter   ▮▮▮▯▯▯▯▯
+  A record   B back              A stop   B cancel               A keep   Y play   B again   X discard
+  ```
+
+  - **Ready:** up/down picks a setting, left/right changes it, the meter moves live. **A** starts.
+    *Start* is "On A" or "When sound starts" (the default: armed, it begins when the input passes
+    a threshold, keeping 50 ms from before it, so a hit isn't cut). **B** goes back.
+  - **Recording:** the waveform draws as it comes, with the time; "Rec" in the top bar as for MIDI
+    recording. **A** stops, **B** cancels. It stops by itself at 30 s.
+  - **Keep?:** the take, already trimmed (silence before the sound and after it falls below
+    −50 dB goes; a 10 ms fade at the end), shown with what was cut. **Y** plays it, **A** keeps
+    it, **B** records again, **X** discards and goes back. Kept, it's saved and loaded into the
+    track (or slot) as if picked in the browser, and undo brings back the sample it replaced.
+    Start and End can be adjusted afterwards with the sampler's own rows.
+- *As built:* each state's rows end with its actions as rows too (Ready: Record, Close;
+  Listening and Recording: Record now or Stop, Cancel; Keep?: Keep, Play, Record again, Discard),
+  so a mouse or a finger can do everything; the picture is one large button (record, stop; in
+  Keep?, play). A on a setting row does the state's main job. The trims: the kept part starts
+  5 ms before the first sample 30 dB under the peak, and ends 10 ms after the last one above both
+  50 dB under the peak and two and a half times the noise before the sound.
+- **Settings:** *Input* lists the system's capture devices (built-in mic, USB mics and
+  interfaces); *as built*, always shown, starting with "Default" (the system's own choice); *Channel*: Left, Right, a mono mix (an
+  interface's inputs by number) or *Stereo* (the first two channels, a stereo take; *as built*); *Gain*: the device's own input gain where the platform has one
+  (the Brick's mic preamp clips loud sounds at full gain), otherwise digital. *As built:* digital
+only, −12 to +36 dB. Input, channel and
+  gain are app settings, kept per device (a USB input is remembered by name, and the built-in mic
+  stands in when it's unplugged); *Start* and *Normalize* too. Normalize (on by default) brings the
+  peak to −1 dBFS. *Monitor* (off by default, since a mic through speakers would howl; changeable while recording) plays the input
+  through the output as it comes in, with the channel and gain chosen; not while a take is
+  reviewed. On a handheld, the inputs listed are only those that open: under KNULLI SDL lists the
+  ALSA cards, which PipeWire holds, so only "Default" (through PipeWire, whose default source is a
+  USB input when one is plugged in) is there; an input remembered that won't open falls back to it.
+- **Saved as** `samples/Recorded/<track name> rec <n>.wav`, 16-bit mono (or stereo), next to the
+  factory samples in the browser: at 48 kHz through SDL (which converts), at the card's own rate on
+  sndstation (the loader converts it, as any file).
+- **The song** keeps playing or stays stopped as it was: with headphones, a take can be recorded
+  against it. Through the speakers a mic would hear them, so the recorder says so once ("If the
+  audio input is a microphone…"; it can't always tell what the default input is).
+- **The pointer:** the picture area is one large button (press: start or stop), and the rows work
+  as in the settings list.
+- **Platform, sndstation** (2026-11-27): the SDK's own input, `InputMeter` (`audioin.h`), which opens
+  the card on alsa-lib, on `hw`, in its own format, as the launcher's input meters do; inputs are
+  the cards that record, by name, USB ones first (the default). Through SDL it clicked on the Brick
+  Pro with a USB synth: SDL opens a listed input through `default:CARD=` (dsnoop, which overran),
+  and even through `plughw` the conversion overran now and then (arecord in float: 50+ jumps in
+  20 s; in 16-bit at any buffer: none). With InputMeter: none.
+- **Platform, other Linux handhelds** (2026-11-27): an input chosen by name is read from the card
+  itself by `AlsaCapture` (alsa-lib loaded with dlopen; the card's `hw` device, its own format of
+  S16/S32/S24, 256-frame periods in a 16-period buffer, a real-time thread), as InputMeter does on
+  sndstation: through SDL a USB synth clicked on stock TrimUI firmware (36-41 jumps in 12 s).
+  SDL is the fallback when the card won't open that way (KNULLI's PipeWire may hold it), and
+  for the default input (on KNULLI, PipeWire's default source); SDL is asked for 16-bit there.
+- **Platform:** SDL's capture devices (`SDL_OpenAudioDevice` with `iscapture`), a second device
+  beside the output, read into a lock-free ring buffer the app drains each frame. Monitoring has a
+  ring of its own from the input's thread straight to the output's, kept about 1.5 blocks full by
+  reading up to 0.5% faster or slower (the two devices' clocks drift apart). On macOS the first recording may ask for microphone
+  access (for Terminal when run from it). Settings are `rec.*` lines in `settings.txt`.
 
 ## 7. Interface
 
@@ -847,6 +937,59 @@ autosave a few seconds after each change and when quitting.
   no snapshot) and counts the ticks it has played since play; each frame the app compares that, as
   heard (less the output latency), with the master's beats and nudges the tempo up to 3% to close
   the gap, so it stays in phase rather than only near the tempo. The top bar shows "Ext 123.4 BPM".
+
+### The pointer (2026-11-26)
+
+Where there is a mouse or a touch screen (the desktop and the browser), it works too, where that
+makes sense; the buttons stay the way to work, and nothing on screen or in the help mentions it. The
+platform passes on what the mouse and fingers did, in display pixels (`PointerEvent` in
+`InputState`; handheld builds pass nothing, and don't build the code that reads them, since a
+handheld's own SDL can be older). `app/Pointer` turns those into gestures: tap and double tap, drag,
+long press, wheel, and two fingers' pan and pinch. A mouse and a finger make the same gestures where
+they can, and a finger gets three times the slop. Whatever the mouse does has a touch way too, so a
+tablet or phone build could come later on the same code: a right-click or Shift-click is a shortcut,
+never the only way.
+
+A pointer moves the same cursor and selection the buttons do, so the two mix. What a drag can't
+mean anything else for happens on the press, not the release, so it answers at once (acting on the
+release felt slow: a click is down for a tenth of a second or more, and a trackpad's tap-to-click
+waits longer). A finger waits for its tap where a press might be the start of a scroll.
+
+- **Top bar:** a view's name shows it; the transport starts and stops.
+- **Panels:** a press selects a row; a press on the selected row does its job (A) from a mouse, a
+  tap from a finger; a click on a selected value row steps it (Shift: the other way). A drag across
+  a row changes its value, up and down goes through the rows, as does the wheel. A press off the
+  panel, or a right-click, puts it away (B). A double click whose first click opened another panel
+  doesn't act on the new one. The quit menu and notices take presses.
+- **Piano roll:** a press on an empty cell adds a note (a finger: its tap), and dragging on draws
+  its length; a press on a note selects it (Shift: in or out of the selection); dragging a note
+  moves it (with the selection), dragging its right end changes its length; a double click or a
+  right-click deletes. Shift or the right button dragged over empty cells selects an area (a
+  finger: a long press, then a drag; a finger's plain drag scrolls). A key sounds while it's held (as a MIDI keyboard's
+  key does, playing or not), sliding from key to key; the ruler moves the cursor (and, while playing,
+  playback), and the lane strip takes a press or a drag for velocity or a setting's
+  points (right-click: removes one). The wheel scrolls (Shift: across), as do two fingers; a pinch
+  changes the grid. A press or drag is one undo step.
+- **Arrangement:** a press on a clip selects it, on a header selects the track, on the ruler moves
+  the cursor (and, while playing, playback); a press on an empty bar makes a one-bar clip (a finger:
+  its tap), and dragging on makes it longer. Dragging a clip moves it along its track, a bar at a
+  time, as far as there's room; dragging its right end changes its length. A double click opens a
+  clip in the roll, or a header's track settings. A right-click (a finger: a long press) opens a
+  clip's menu (open, length, duplicate, copy, delete), the track's settings, or on an empty bar a
+  menu with New clip, Paste clip and the main menu: that menu is how a finger deletes. A finger's
+  drag elsewhere scrolls, as do the wheel (Shift: along the bars) and two fingers; a pinch zooms.
+  Clips don't move between tracks yet (a clip belongs to its track).
+- **Mixer:** a press on a slider sets it there and a drag goes on setting it (the level upright,
+  the rest across; a centred one catches at the middle); a double click or a right-click puts it
+  back to its default (B); a press on M or S switches it; the wheel nudges the slider under it
+  (Shift: more). The mixer doesn't scroll, so a finger acts on its press too.
+- **Sound view:** the settings work as a panel's rows do (a press selects; a press on the selected
+  row does its job, a click steps its value, a drag across changes it), and a press or drag on a
+  setting's bar sets it there; a right-click or a double click resets it (B). The wheel over a bar
+  changes it, elsewhere goes through the list. A press on the picture plays the sound (Y); on a
+  kit, it selects that pad and plays it. In the file browser (and the plugin list) a press selects
+  (an audio file is heard too) and a press on the selection opens or picks it (a finger: its tap);
+  a press on the folder's name goes up a folder; a right-click or a long press puts it away.
 
 ## 8. Project model
 

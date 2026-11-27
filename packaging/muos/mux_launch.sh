@@ -45,6 +45,9 @@ echo "Twill Studio for muOS, $(date 2>/dev/null); $(GET_VAR "device" "board/name
 # No helper watches for Select + Start here, as PortMaster's does, so Twill does.
 export TWILL_SELECT_START_QUITS=1
 
+# Recording samples from a USB input (a synth, a mic, an interface): Twill reads the card itself.
+export TWILL_CAPTURE=1
+
 # Left alone for two minutes, muOS dims the screen, mutes the sound and slows the CPU; it can also be
 # set to go to sleep. These two files, holding the process id of a running program, hold that off;
 # Twill keeps them there while a song plays. The power button still puts it to sleep, which muOS's

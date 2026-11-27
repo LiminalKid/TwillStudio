@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(TwillStudio VERSION 0.7.2 LANGUAGES CXX)
+project(TwillStudio VERSION 0.8.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -65,6 +65,7 @@ add_library(twill_core STATIC
   src/engine/Engine.cpp
   src/engine/Sample.cpp
   src/engine/PlaitsVoice.cpp
+  src/engine/Resampler.cpp
   src/engine/Snapshot.cpp
   src/model/Edit.cpp
   src/model/Project.cpp
@@ -86,6 +87,9 @@ add_library(twill_core STATIC
   src/app/MixerView.cpp
   src/app/PianoRollView.cpp
   src/app/InputTracker.cpp
+  src/app/Pointer.cpp
+  src/app/Recorder.cpp
+  src/app/AppPointer.cpp
   src/app/PianoKeys.cpp
   src/app/Paper.cpp
   src/app/Splash.cpp
@@ -147,6 +151,7 @@ endif()
 add_executable(twill
   src/platform/sdl2/main.cpp
   src/platform/sdl2/Sdl2Platform.cpp
+  src/platform/sdl2/AlsaCapture.cpp
 )
 if(EMSCRIPTEN)
   # The web build (web/): a page with the app in a canvas, its files kept in the browser's
@@ -163,6 +168,7 @@ elseif(APPLE)
   target_link_libraries(twill PRIVATE "-framework CoreMIDI" "-framework CoreFoundation")
 else()
   target_sources(twill PRIVATE src/platform/sdl2/SystemMidiLinux.cpp src/platform/sdl2/OutputCompressorLinux.cpp)
+  target_link_libraries(twill PRIVATE ${CMAKE_DL_LIBS})  # AlsaCapture loads alsa-lib when it's needed
 endif()
 target_link_libraries(twill PRIVATE twill_core ${TWILL_SDL2_TARGET})
 if(TWILL_SNDSTATION)
@@ -202,7 +208,8 @@ endif()
 
 # Headless tests (design §10). Run on the build machine with ctest, or copy to a device and run
 # there with --golden-dir pointing at a copy of tests/golden.
-add_executable(twill_tests tests/tests.cpp)
+add_executable(twill_tests tests/tests.cpp src/platform/sdl2/AlsaCapture.cpp)
+target_link_libraries(twill_tests PRIVATE ${CMAKE_DL_LIBS})
 target_link_libraries(twill_tests PRIVATE twill_core)
 target_compile_definitions(twill_tests PRIVATE TWILL_GOLDEN_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/golden")
 enable_testing()

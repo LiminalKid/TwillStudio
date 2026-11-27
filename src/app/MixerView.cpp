@@ -128,15 +128,145 @@ void MixerView::handle_input() {
     }
   }
   if (!is_master(strip_) && strip_ != app_.track() && changed) app_.set_track(strip_);
-  // The value under the cursor, in words, in the hint bar.
-  if (changed) {
-    const ParamId id = param_at(strip_, row_);
-    if (id != kParamNone) {
-      const float v = is_master(strip_) ? p.mix.get(id) : p.track_param(strip_, id);
-      app_.message(std::string(param_info(id)->name) + ": " + format_param(id, v));
-    }
-  }
+  if (changed) show_value();
   if (changed || in.pressed(~0u)) app_.invalidate(app_.content_rect());
+}
+
+void MixerView::show_value() {
+  const ParamId id = param_at(strip_, row_);
+  if (id == kParamNone) return;
+  const Project& p = app_.project();
+  const float v = is_master(strip_) ? p.mix.get(id) : p.track_param(strip_, id);
+  app_.message(std::string(param_info(id)->name) + ": " + format_param(id, v));
+}
+
+int MixerView::row_y(const Layout& l, int row) const {
+  return row == kLevel ? l.top + l.name_h : l.top + l.name_h + l.level_h + (row - 1) * l.row_h;
+}
+
+int MixerView::row_height(const Layout& l, int row) const { return row == kLevel ? l.level_h : l.row_h; }
+
+Rect MixerView::cell_rect(int strip, int row) const {
+  const Layout l = layout();
+  const Rect sr = strip_rect(l, strip);
+  return Rect{sr.x, row_y(l, row), sr.w, row_height(l, row)};
+}
+
+bool MixerView::cell_at(const Layout& l, int x, int y, int& strip, int& row) const {
+  if (x < l.x0 || l.strip_w <= 0) return false;
+  strip = (x - l.x0) / l.strip_w;
+  if (strip >= strips()) return false;
+  // The name selects the strip and keeps the row.
+  if (y < row_y(l, kLevel)) {
+    row = row_;
+    return y >= l.top;
+  }
+  for (int r = 0; r < kNumRows; ++r)
+    if (y < row_y(l, r) + row_height(l, r)) {
+      row = r;
+      return !is_master(strip) || r <= kDelay;
+    }
+  return false;
+}
+
+float MixerView::value_at(const Layout& l, int strip, int row, int x, int y) const {
+  // Where the slider is drawn (see draw): the level's bar upright, the rest across.
+  const ParamInfo* info = param_info(param_at(strip, row));
+  const Rect sr = strip_rect(l, strip);
+  float f;
+  if (row == kLevel) {
+    const int ly = row_y(l, kLevel) + int(app_.u(4)), lh = std::max(1, row_height(l, kLevel) - int(app_.u(22)));
+    f = float(ly + lh - y) / float(lh);
+  } else {
+    const int cx = sr.x + int(app_.u(2.5f)), cw = std::max(1, sr.w - int(app_.u(5)));
+    f = float(x - cx) / float(cw);
+  }
+  f = std::max(0.0f, std::min(1.0f, f));
+  float v = info->min + f * (info->max - info->min);
+  // Centred sliders catch at the middle.
+  if (info->min < 0 && std::fabs(v) < (info->max - info->min) * 0.02f) v = 0;
+  return v;
+}
+
+void MixerView::set_value(int strip, int row, float v) {
+  const ParamId id = param_at(strip, row);
+  if (id == kParamNone) return;
+  if (is_master(strip)) app_.history().set_project_param(id, v);
+  else app_.history().set_track_param(strip, id, v);
+}
+
+void MixerView::pointer(const Gesture& g) {
+  const Layout l = layout();
+  const Rect content = app_.content_rect();
+  EditHistory& h = app_.history();
+  auto end_group = [&] {
+    if (pointer_group_) h.end_group();
+    pointer_group_ = false;
+  };
+  switch (g.kind) {
+    case Gesture::Press: {
+      sliding_ = false;
+      int s, r;
+      if (!content.contains(g.x, g.y) || !cell_at(l, g.x, g.y, s, r)) return;
+      strip_ = s;
+      row_ = r;
+      if (!is_master(s) && s != app_.track()) app_.set_track(s);
+      const Project& p = app_.project();
+      if (!is_master(s) && (r == kMute || r == kSolo)) {  // M and S switch at once
+        if (g.button == 1) {
+          const Track& t = p.tracks[size_t(s)];
+          h.set_track_flags(s, r == kMute ? !t.mute : t.mute, r == kSolo ? !t.solo : t.solo, t.voices);
+        }
+      } else if (g.y >= row_y(l, kLevel) && param_at(s, r) != kParamNone) {
+        if (g.button == 2 || g.taps == 2) {
+          set_value(s, r, param_info(param_at(s, r))->default_value);
+        } else if (g.button == 1) {
+          if (!pointer_group_) h.begin_group();
+          pointer_group_ = sliding_ = true;
+          set_value(s, r, value_at(l, s, r, g.x, g.y));
+        }
+        show_value();
+      }
+      app_.invalidate(content);
+      return;
+    }
+    case Gesture::Drag:
+      if (!sliding_) return;
+      set_value(strip_, row_, value_at(l, strip_, row_, g.x, g.y));
+      show_value();
+      app_.invalidate(content);
+      return;
+    case Gesture::Tap:
+    case Gesture::DragEnd:
+    case Gesture::Cancel:
+      sliding_ = false;
+      end_group();
+      return;
+    case Gesture::Wheel: {
+      int s, r;
+      if (!content.contains(g.x, g.y) || !cell_at(l, g.x, g.y, s, r) || g.y < row_y(l, kLevel)) return;
+      const ParamId id = param_at(s, r);
+      if (id == kParamNone) return;
+      wheel_acc_ += g.wheel_y + g.wheel_x;
+      const int steps = int(wheel_acc_);
+      wheel_acc_ -= float(steps);
+      if (!steps) return;
+      strip_ = s;
+      row_ = r;
+      if (!is_master(s) && s != app_.track()) app_.set_track(s);
+      const ParamInfo* info = param_info(id);
+      const float v = is_master(s) ? app_.project().mix.get(id) : app_.project().track_param(s, id);
+      set_value(s, r, v + float(steps) * (info->max - info->min) * (g.shift ? 0.1f : 0.02f));
+      show_value();
+      app_.invalidate(content);
+      return;
+    }
+    case Gesture::LongPress:
+    case Gesture::DragStart:
+    case Gesture::Pan:
+    case Gesture::Pinch:
+      return;
+  }
 }
 
 void MixerView::tick() {
@@ -195,8 +325,8 @@ void MixerView::draw(Canvas& c) {
 
   // Row labels, on a sheet like the arrangement's track headers.
   c.fill(l.labels, th.panel);
-  auto row_y = [&](int row) { return row == kLevel ? l.top + l.name_h : l.top + l.name_h + l.level_h + (row - 1) * l.row_h; };
-  auto row_h = [&](int row) { return row == kLevel ? l.level_h : l.row_h; };
+  auto row_y = [&](int row) { return this->row_y(l, row); };
+  auto row_h = [&](int row) { return row_height(l, row); };
   for (int row = 0; row < kNumRows; ++row) {
     const int y = row_y(row);
     const std::string name = caps(kRowNames[row]);

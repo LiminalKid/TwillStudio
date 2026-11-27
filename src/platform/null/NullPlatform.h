@@ -32,17 +32,68 @@ class NullPlatform : public Platform {
   std::map<std::string, std::vector<uint8_t>> files;
 
   const char* name() const override { return "null"; }
-  bool audio_open(int, int block, AudioCallback, void*) override {
+  bool audio_open(int, int block, AudioCallback cb, void* user) override {
     opened_block = block;
+    audio_cb = cb;
+    audio_user = user;
+    return !audio_fails;
+  }
+  AudioCallback audio_cb = nullptr;  // what audio_open was given, for a test to call as a device would
+  void* audio_user = nullptr;
+  int audio_rate = 48000;  // the rate the "device" runs at
+  bool audio_fails = false;  // no output device, for tests
+  int opened_block = 0;  // the block size last asked for
+
+  // Recording, for tests: the inputs listed, and what the open one "hears" (interleaved, at
+  // capture_info's rate and channels), handed over at the next capture_read.
+  std::vector<std::string> inputs;
+  std::string refuse = "(none)";  // an input that won't open
+  CaptureInfo capture_info{48000, 1};
+  std::vector<float> capture_feed;
+  std::string capture_opened = "(closed)";  // the input open now ("" for the default), or "(closed)"
+  bool default_input = false;  // the default records even with no inputs listed
+  bool capture_available() override { return default_input || !inputs.empty(); }
+  std::vector<std::string> capture_devices() override { return inputs; }
+  bool capture_open(const std::string& device, CaptureInfo& info, std::string& error) override {
+    if ((inputs.empty() && !default_input) || device == refuse) {
+      error = "No input";
+      return false;
+    }
+    capture_opened = device;
+    info = capture_info;
+    capture_feed.clear();
     return true;
   }
-  int opened_block = 0;  // the block size last asked for
-  AudioInfo audio_info() const override { return {48000, 256}; }
+  size_t capture_read(std::vector<float>& out) override {
+    if (capture_opened == "(closed)") return 0;
+    out.insert(out.end(), capture_feed.begin(), capture_feed.end());
+    const size_t frames = capture_feed.size() / size_t(capture_info.channels);
+    capture_feed.clear();
+    return frames;
+  }
+  void capture_close() override {
+    capture_opened = "(closed)";
+    monitor_on = false;
+  }
+  bool monitor_on = false;
+  int monitor_channel = 0;
+  float monitor_gain = 0;
+  void capture_monitor(bool on, int channel, float gain) override {
+    monitor_on = on && capture_opened != "(closed)";
+    monitor_channel = channel;
+    monitor_gain = gain;
+  }
+  AudioInfo audio_info() const override { return {audio_rate, 256}; }
   void audio_close() override {}
   Size display_size() const override { return size_; }
   float ui_scale() const override { return scale_; }
   void present(const uint32_t*, int, const std::vector<Rect>&) override {}
-  void poll_input(InputState& out) override { out.held = held_; }
+  void poll_input(InputState& out) override {
+    out.held = held_;
+    out.pointer.swap(pointer);
+    pointer.clear();
+  }
+  std::vector<PointerEvent> pointer;  // handed over at the next poll
   const char* controller_name() const override { return "none"; }
   // Paths inside the data folder ("/null/...") are stored relative to it, like real ones.
   static std::string rel(const char* path) {

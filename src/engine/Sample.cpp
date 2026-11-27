@@ -233,18 +233,24 @@ std::vector<int> transient_slices(const SampleData& s, float start, float end, i
 }
 
 std::vector<uint8_t> encode_wav16(const float* stereo, int frames, int sample_rate) {
+  return encode_wav16_channels(stereo, frames, sample_rate, 2);
+}
+
+std::vector<uint8_t> encode_wav16_channels(const float* data, int frames, int sample_rate, int channels) {
   std::vector<uint8_t> out;
   auto u32 = [&](uint32_t v) { for (int i = 0; i < 4; ++i) out.push_back(uint8_t(v >> (8 * i))); };
   auto u16 = [&](uint16_t v) { out.push_back(uint8_t(v)); out.push_back(uint8_t(v >> 8)); };
-  const uint32_t bytes = uint32_t(frames) * 4;
+  const uint32_t block = uint32_t(channels) * 2, bytes = uint32_t(frames) * block;
+  out.reserve(44 + bytes);
   out.insert(out.end(), {'R', 'I', 'F', 'F'});
   u32(36 + bytes);
   out.insert(out.end(), {'W', 'A', 'V', 'E', 'f', 'm', 't', ' '});
-  u32(16); u16(1); u16(2); u32(uint32_t(sample_rate)); u32(uint32_t(sample_rate) * 4); u16(4); u16(16);
+  u32(16); u16(1); u16(uint16_t(channels)); u32(uint32_t(sample_rate)); u32(uint32_t(sample_rate) * block);
+  u16(uint16_t(block)); u16(16);
   out.insert(out.end(), {'d', 'a', 't', 'a'});
   u32(bytes);
-  for (int i = 0; i < frames * 2; ++i) {
-    float v = std::max(-1.0f, std::min(1.0f, stereo[i]));
+  for (int i = 0; i < frames * channels; ++i) {
+    float v = std::max(-1.0f, std::min(1.0f, data[i]));
     u16(uint16_t(int16_t(std::lround(v * 32767.0f))));
   }
   return out;

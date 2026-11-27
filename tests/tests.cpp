@@ -19,6 +19,13 @@
 #include "app/App.h"
 #include "app/Paper.h"
 #include "app/ArrangementView.h"
+#include "app/InstrumentView.h"
+#include "app/Recorder.h"
+#include "platform/sdl2/AlsaCapture.h"
+#include "engine/Resampler.h"
+#include "engine/Sample.h"
+#include "app/MixerView.h"
+#include "app/PianoRollView.h"
 #include "app/FactorySounds.h"
 #include "app/ClockFollower.h"
 #include "app/SongNames.h"
@@ -1793,7 +1800,8 @@ struct UiDriver {
   twill::NullPlatform platform;
   twill::App app{platform};
   twill::Canvas canvas;
-  UiDriver() {
+  explicit UiDriver(bool no_audio = false) {
+    platform.audio_fails = no_audio;
     canvas.resize(1024, 768);
     // Start on the fixed test song, as if it had been autosaved.
     platform.write_file(twill::App::kAutosaveName, twill::save_project(ui_test_song::make()));
@@ -1815,6 +1823,46 @@ struct UiDriver {
     app.frame(in, canvas);
     canvas.take_dirty();
   }
+  // The pointer: a click (or a finger's tap) at x, y; a drag from one place to another in `moves`
+  // steps; the wheel turned by `notches` (positive: away from the user).
+  void pointer(twill::PointerEvent::Type type, int x, int y, int button = 1, bool touch = false, int id = 0) {
+    twill::PointerEvent e;
+    e.type = type;
+    e.source = touch ? twill::PointerEvent::Touch : twill::PointerEvent::Mouse;
+    e.id = touch ? (id ? id : 1) : 0;
+    e.button = button;
+    e.x = x;
+    e.y = y;
+    platform.pointer.push_back(e);
+  }
+  void click(int x, int y, int button = 1) {
+    pointer(twill::PointerEvent::Down, x, y, button);
+    step(0);
+    pointer(twill::PointerEvent::Up, x, y, button);
+    step(0);
+  }
+  void click(const twill::Rect& r, int button = 1) { click(r.x + r.w / 2, r.y + r.h / 2, button); }
+  void drag(int x0, int y0, int x1, int y1, int moves = 8, bool touch = false, bool shift = false) {
+    pointer(twill::PointerEvent::Down, x0, y0, 1, touch);
+    platform.pointer.back().shift = shift;
+    step(0);
+    for (int i = 1; i <= moves; ++i) {
+      pointer(twill::PointerEvent::Move, x0 + (x1 - x0) * i / moves, y0 + (y1 - y0) * i / moves, 1, touch);
+      step(0);
+    }
+    pointer(twill::PointerEvent::Up, x1, y1, 1, touch);
+    step(0);
+  }
+  void wheel(int x, int y, float notches) {
+    twill::PointerEvent e;
+    e.type = twill::PointerEvent::Wheel;
+    e.x = x;
+    e.y = y;
+    e.wheel_y = notches;
+    platform.pointer.push_back(e);
+    step(0);
+  }
+  void pause() { platform.advance_ms(500); }  // long enough that the next click is no double click
   // Press and release `buttons` (as a chord with `hold` held throughout).
   void tap(uint32_t buttons, uint32_t hold = 0) {
     step(hold);
@@ -3234,6 +3282,1067 @@ void test_ui_track_names() {
   CHECK(twill::App::next_role_name("Drums", -1) == "FX");
 }
 
+// The pointer's gestures: a click is a tap, two quick ones a double tap; moving past the slop is a
+// drag; a finger held still is a long press, and two fingers pan.
+void test_pointer_gestures() {
+  using twill::Gesture;
+  using twill::PointerEvent;
+  twill::PointerTracker t;
+  uint64_t now = 1000000;
+  auto ev = [](PointerEvent::Type type, int x, int y, bool touch = false, int id = 0) {
+    PointerEvent e;
+    e.type = type;
+    e.source = touch ? PointerEvent::Touch : PointerEvent::Mouse;
+    e.id = id;
+    e.x = x;
+    e.y = y;
+    return e;
+  };
+  // The gestures but the presses, which go into `presses`.
+  std::vector<Gesture> presses;
+  auto run = [&](std::vector<PointerEvent> evs, uint64_t ms = 16) {
+    now += ms * 1000;
+    t.update(evs, now, 4);
+    std::vector<Gesture> rest;
+    presses.clear();
+    for (const Gesture& x : t.gestures()) (x.kind == Gesture::Press ? presses : rest).push_back(x);
+    return rest;
+  };
+  auto g = run({ev(PointerEvent::Down, 10, 10), ev(PointerEvent::Move, 12, 11), ev(PointerEvent::Up, 12, 11)});
+  CHECK(g.size() == 1 && g[0].kind == Gesture::Tap && g[0].taps == 1 && g[0].x == 10);
+  CHECK(presses.size() == 1 && presses[0].x == 10 && presses[0].taps == 1);
+  g = run({ev(PointerEvent::Down, 11, 10), ev(PointerEvent::Up, 11, 10)}, 100);
+  CHECK(g.size() == 1 && g[0].kind == Gesture::Tap && g[0].taps == 2);
+  CHECK(presses.size() == 1 && presses[0].taps == 2);  // the press knows it's a double already
+  g = run({ev(PointerEvent::Down, 11, 10), ev(PointerEvent::Up, 11, 10)}, 1000);
+  CHECK(g.size() == 1 && g[0].taps == 1);  // too late for a double
+
+  g = run({ev(PointerEvent::Down, 100, 100), ev(PointerEvent::Move, 110, 100)});
+  CHECK(g.size() == 2 && g[0].kind == Gesture::DragStart && g[0].x == 100 && g[1].kind == Gesture::Drag && g[1].dx == 10);
+  g = run({ev(PointerEvent::Move, 115, 104)});
+  CHECK(g.size() == 1 && g[0].kind == Gesture::Drag && g[0].dx == 5 && g[0].dy == 4 && g[0].start_x == 100);
+  g = run({ev(PointerEvent::Up, 115, 104)});
+  CHECK(g.size() == 1 && g[0].kind == Gesture::DragEnd);
+
+  // A finger: the same slop would be a drag for a mouse, not for a finger.
+  g = run({ev(PointerEvent::Down, 50, 50, true, 7), ev(PointerEvent::Move, 58, 50, true, 7), ev(PointerEvent::Up, 58, 50, true, 7)}, 1000);
+  CHECK(g.size() == 1 && g[0].kind == Gesture::Tap && g[0].touch());
+  // Held still: a long press, then a drag that says it began with one, and no tap at the end.
+  run({ev(PointerEvent::Down, 50, 50, true, 7)}, 1000);
+  g = run({}, 500);
+  CHECK(g.size() == 1 && g[0].kind == Gesture::LongPress);
+  g = run({ev(PointerEvent::Move, 90, 50, true, 7)});
+  CHECK(g.size() == 2 && g[1].kind == Gesture::Drag && g[1].long_press);
+  g = run({ev(PointerEvent::Up, 90, 50, true, 7)});
+  CHECK(g.size() == 1 && g[0].kind == Gesture::DragEnd);
+  // Two fingers: a pan by their middle, and no tap from the first.
+  run({ev(PointerEvent::Down, 100, 100, true, 1)});
+  g = run({ev(PointerEvent::Down, 200, 100, true, 2)});
+  CHECK(g.empty());
+  g = run({ev(PointerEvent::Move, 100, 120, true, 1), ev(PointerEvent::Move, 200, 120, true, 2)});
+  int dy = 0;
+  for (const Gesture& x : g) {
+    CHECK(x.kind == Gesture::Pan || x.kind == Gesture::Pinch);  // their spread changed a little too
+    if (x.kind == Gesture::Pan) dy += x.dy;
+  }
+  CHECK(dy == 20);
+  g = run({ev(PointerEvent::Up, 100, 120, true, 1), ev(PointerEvent::Up, 200, 120, true, 2)});
+  CHECK(g.empty());
+  // The wheel passes straight through.
+  PointerEvent w = ev(PointerEvent::Wheel, 5, 6);
+  w.wheel_y = -1.5f;
+  g = run({w});
+  CHECK(g.size() == 1 && g[0].kind == Gesture::Wheel && g[0].wheel_y == -1.5f && g[0].x == 5);
+}
+
+// The pointer in the top bar and the panels: a view's tab shows it, the transport starts and stops;
+// a panel's row is selected by a tap and does its job on the next; a sideways drag changes a value;
+// the wheel moves through the rows; a tap off the panel, or a right-click, puts it away.
+void test_ui_pointer_panels() {
+  UiDriver ui;
+  ui.audio = true;
+  ui.click(ui.app.tab_rect(twill::App::View::Mixer));
+  CHECK(ui.app.view() == twill::App::View::Mixer);
+  ui.click(ui.app.tab_rect(twill::App::View::Arrangement));
+  CHECK(ui.app.view() == twill::App::View::Arrangement);
+  ui.click(ui.app.transport_rect());
+  ui.step(0);
+  CHECK(ui.app.engine().playing());
+  ui.pause();
+  ui.click(ui.app.transport_rect());
+  ui.step(0);
+  CHECK(!ui.app.engine().playing());
+  ui.audio = false;
+
+  ui.tap(twill::kLeft);  // Kick's header
+  ui.tap(twill::kX);     // its settings
+  CHECK(ui.app.inspector_open());
+  const int first = ui.app.inspector_selection();
+  // The next row that isn't a heading and changes a value.
+  int row = -1;
+  for (int i = first + 1; i < int(ui.app.inspector_fields().size()); ++i) {
+    const auto& f = ui.app.inspector_fields()[size_t(i)];
+    if (!f.heading && f.adjust && !f.press && !ui.app.inspector_row_rect(i).empty()) {
+      row = i;
+      break;
+    }
+  }
+  CHECK(row > first);
+  if (row < 0) return;
+  ui.pause();
+  const std::string before = ui.app.inspector_fields()[size_t(row)].value();
+  ui.click(ui.app.inspector_row_rect(row));
+  CHECK(ui.app.inspector_selection() == row);
+  CHECK(ui.app.inspector_fields()[size_t(row)].value() == before);  // only selected
+  ui.pause();
+  ui.click(ui.app.inspector_row_rect(row));
+  CHECK(ui.app.inspector_fields()[size_t(row)].value() != before);  // and now stepped
+  ui.tap(twill::kLeft);
+  CHECK(ui.app.inspector_fields()[size_t(row)].value() == before);
+  // Dragged to the right across the row: stepped on, a step every few pixels.
+  const twill::Rect rr = ui.app.inspector_row_rect(row);
+  ui.pause();
+  ui.drag(rr.x + rr.w / 2, rr.y + rr.h / 2, rr.x + rr.w / 2 + 200, rr.y + rr.h / 2);
+  CHECK(ui.app.inspector_fields()[size_t(row)].value() != before);
+  ui.tap(twill::kB);
+  CHECK(!ui.app.inspector_open());
+
+  // The wheel, and putting the panel away.
+  ui.tap(twill::kX);
+  CHECK(ui.app.inspector_open());
+  const int sel = ui.app.inspector_selection();
+  const twill::Rect panel = ui.app.inspector_rect();
+  ui.wheel(panel.x + panel.w / 2, panel.y + panel.h / 2, -1);
+  CHECK(ui.app.inspector_selection() != sel);
+  ui.wheel(panel.x + panel.w / 2, panel.y + panel.h / 2, 1);
+  CHECK(ui.app.inspector_selection() == sel);
+  ui.pause();
+  ui.click(panel, 2);
+  CHECK(!ui.app.inspector_open());
+  ui.tap(twill::kX);
+  ui.pause();
+  ui.click(panel.x > 20 ? 5 : panel.right() + 5, panel.y + panel.h / 2);
+  CHECK(!ui.app.inspector_open());
+}
+
+// A row that opens another panel, double-clicked: the second click isn't for the new panel's row.
+void test_ui_pointer_double_click_opens_once() {
+  UiDriver ui;
+  ui.app.open_main_menu();
+  ui.step(0);
+  CHECK(ui.app.inspector_open());
+  int row = -1;
+  for (int i = 0; i < int(ui.app.inspector_fields().size()); ++i)
+    if (ui.app.inspector_fields()[size_t(i)].label == "Controls") row = i;
+  CHECK(row >= 0);
+  if (row < 0) return;
+  ui.app.select_inspector_row(row);
+  ui.step(0);
+  const twill::Rect r = ui.app.inspector_row_rect(row);
+  CHECK(!r.empty());
+  ui.click(r);  // the selected row: its job, the controls panel
+  const std::string title = ui.app.inspector_title();
+  CHECK(title != twill::App::kMainMenuTitle);
+  const int sel = ui.app.inspector_selection();
+  ui.click(r);  // the double click's second
+  CHECK(ui.app.inspector_open() && ui.app.inspector_title() == title && ui.app.inspector_selection() == sel);
+}
+
+// The pointer in the piano roll: a click on an empty cell adds a note at once, a drag from its end
+// changes its length, a drag of the note moves it, a double click deletes it; a click and drag on
+// empty cells draws a note's length; Shift + a drag over empty cells selects; a right-click
+// deletes; the wheel scrolls; the lane strip takes a velocity.
+void test_ui_pointer_roll() {
+  using twill::Tick;
+  UiDriver ui;
+  ui.tap(twill::kRight, twill::kSelect);  // the roll, on Kick
+  ui.step(0);                             // Select let go of: the roll scrolls to the clip's notes
+  CHECK(ui.app.view() == twill::App::View::PianoRoll);
+  twill::PianoRollView& roll = ui.app.roll();
+  const size_t before = ui.clip().notes.size();
+  const twill::Note first = ui.clip().notes.front();
+  const Tick s = roll.grid_ticks();
+  const int p = first.pitch + 1;
+  for (const twill::Note& n : ui.clip().notes) CHECK(n.pitch != p);
+  auto find = [&](Tick start, int pitch) -> const twill::Note* {
+    for (const twill::Note& n : ui.clip().notes)
+      if (n.start == start && n.pitch == pitch) return &n;
+    return nullptr;
+  };
+  auto mid = [](const twill::Rect& r, int& x, int& y) {
+    x = r.x + r.w / 2;
+    y = r.y + r.h / 2;
+  };
+
+  // A click: a note, selected.
+  ui.click(roll.cell_rect(2 * s, p));
+  CHECK(ui.clip().notes.size() == before + 1);
+  const twill::Note* n = find(2 * s, p);
+  CHECK(n && roll.selection().size() == 1 && roll.selection()[0] == n->id);
+  if (!n) return;
+  const Tick len = n->length;
+  // Its right end dragged two cells on: two steps longer.
+  ui.pause();
+  const twill::Rect end_cell = roll.cell_rect(2 * s + len, p);
+  ui.drag(end_cell.x - 1, end_cell.y + end_cell.h / 2, end_cell.x - 1 + 2 * end_cell.w, end_cell.y + end_cell.h / 2);
+  n = find(2 * s, p);
+  CHECK(n && n->length == len + 2 * s);
+  // The note dragged a cell on and a row up.
+  ui.pause();
+  int x, y;
+  mid(roll.cell_rect(2 * s, p), x, y);
+  const twill::Rect c0 = roll.cell_rect(2 * s, p);
+  ui.drag(x, y, x + c0.w, y - c0.h);
+  CHECK(!find(2 * s, p));
+  n = find(3 * s, p + 1);
+  CHECK(n != nullptr);
+  CHECK(ui.clip().notes.size() == before + 1);
+  // A double click on it: deleted.
+  ui.pause();
+  mid(roll.cell_rect(3 * s, p + 1), x, y);
+  ui.click(x, y);
+  ui.click(x, y);
+  CHECK(!find(3 * s, p + 1));
+  CHECK(ui.clip().notes.size() == before);
+
+  // Pressed on an empty cell and dragged on: a note as long as the drag.
+  ui.pause();
+  mid(roll.cell_rect(4 * s, p), x, y);
+  ui.drag(x, y, x + 3 * c0.w, y);
+  n = find(4 * s, p);
+  CHECK(n && n->length > s);
+  ui.tap(twill::kB, twill::kSelect);  // undone in one step
+  CHECK(!find(4 * s, p));
+  CHECK(ui.clip().notes.size() == before);
+
+  // Shift + a drag over empty cells, across the first note's row: it's selected, and no note added.
+  ui.pause();
+  const twill::Rect a = roll.cell_rect(first.start, first.pitch + 2);
+  const twill::Rect b = roll.cell_rect(first.start + s, first.pitch - 1);
+  CHECK(!a.empty() && !b.empty());
+  ui.drag(a.x + a.w / 2, a.y + a.h / 2, b.x + b.w / 2, b.y + b.h / 2, 8, false, true);
+  CHECK(ui.clip().notes.size() == before);
+  bool selected = false;
+  for (uint32_t id : roll.selection()) selected = selected || id == first.id;
+  CHECK(selected);
+  // A right-click on it: deleted (with whatever else the area selected).
+  ui.pause();
+  mid(roll.cell_rect(first.start, first.pitch), x, y);
+  ui.click(x, y, 2);
+  CHECK(!find(first.start, first.pitch));
+  ui.tap(twill::kB, twill::kSelect);
+  CHECK(find(first.start, first.pitch) != nullptr);
+
+  // The lane strip (velocity): pressed low under the first note, it's quieter.
+  const twill::Rect lane = roll.lane_rect();
+  CHECK(!lane.empty());
+  if (!lane.empty()) {
+    ui.pause();
+    const twill::Rect col = roll.cell_rect(first.start, first.pitch);
+    ui.click(col.x + col.w / 2, lane.bottom() - lane.h / 5);
+    const twill::Note* f = find(first.start, first.pitch);
+    CHECK_MSG(f && f->velocity < 50, "velocity %d", f ? int(f->velocity) : -1);
+  }
+
+  // A key: the cursor to its row (and its note heard). The ruler: the cursor to that step.
+  {
+    ui.pause();
+    const twill::Rect keys = roll.keys_rect();
+    const twill::Rect row = roll.cell_rect(first.start, first.pitch + 3);
+    ui.pointer(twill::PointerEvent::Down, keys.x + keys.w / 2, row.y + row.h / 2);
+    ui.step(0);
+    CHECK_MSG(roll.cursor_pitch() == first.pitch + 3, "cursor pitch %d", roll.cursor_pitch());
+    CHECK(roll.key_held() == first.pitch + 3);  // sounding while held
+    ui.pointer(twill::PointerEvent::Up, keys.x + keys.w / 2, row.y + row.h / 2);
+    ui.step(0);
+    CHECK(roll.key_held() < 0);
+    ui.pause();
+    const twill::Rect ruler = roll.ruler_rect();
+    const twill::Rect col = roll.cell_rect(5 * s, first.pitch);
+    ui.click(col.x + col.w / 2, ruler.y + ruler.h / 2);
+    CHECK_MSG(roll.cursor() == 5 * s, "cursor %d", int(roll.cursor()));
+    CHECK(!ui.app.engine().playing());  // stopped: only the cursor
+    // Playing: playback goes there too.
+    ui.audio = true;
+    ui.tap(twill::kStart);
+    ui.step(0);
+    CHECK(ui.app.engine().playing());
+    ui.pause();
+    const twill::Rect col2 = roll.cell_rect(12 * s, first.pitch);
+    ui.click(col2.x + col2.w / 2, ruler.y + ruler.h / 2);
+    ui.step(0);
+    const Tick pos = ui.app.engine().position();
+    CHECK_MSG(pos >= 12 * s && pos < 14 * s, "playing from %d", int(pos));
+    ui.tap(twill::kStart);
+    ui.audio = false;
+  }
+
+  // The wheel: rows scroll; Shift + wheel... (time) is covered by the gestures.
+  const int top = roll.top_row();
+  const twill::Rect grid_cell = roll.cell_rect(first.start, first.pitch);
+  ui.wheel(grid_cell.x, grid_cell.y, -2);
+  CHECK(roll.top_row() > top);
+  ui.wheel(grid_cell.x, grid_cell.y, 2);
+  CHECK(roll.top_row() == top);
+}
+
+// A finger in the piano roll: a tap adds a note when it's let go of; a drag over empty cells
+// scrolls and adds nothing; a long press, then a drag, selects.
+void test_ui_touch_roll() {
+  using twill::PointerEvent;
+  using twill::Tick;
+  UiDriver ui;
+  ui.tap(twill::kRight, twill::kSelect);
+  ui.step(0);
+  twill::PianoRollView& roll = ui.app.roll();
+  const size_t before = ui.clip().notes.size();
+  const twill::Note first = ui.clip().notes.front();
+  const Tick s = roll.grid_ticks();
+  const twill::Rect c = roll.cell_rect(2 * s, first.pitch + 1);
+  const int x = c.x + c.w / 2, y = c.y + c.h / 2;
+  ui.pointer(PointerEvent::Down, x, y, 1, true);
+  ui.step(0);
+  CHECK(ui.clip().notes.size() == before);  // not yet: it may be a scroll
+  ui.pointer(PointerEvent::Up, x, y, 1, true);
+  ui.step(0);
+  CHECK(ui.clip().notes.size() == before + 1);
+  ui.tap(twill::kB, twill::kSelect);
+  CHECK(ui.clip().notes.size() == before);
+
+  ui.pause();
+  const int top = roll.top_row();
+  const twill::Rect e = roll.cell_rect(6 * s, first.pitch + 3);
+  ui.drag(e.x + e.w / 2, e.y + e.h / 2, e.x + e.w / 2, e.y + e.h / 2 + 6 * e.h, 8, true);
+  CHECK(roll.top_row() < top);  // dragged down: the rows above come into view
+  CHECK(ui.clip().notes.size() == before);
+
+  // A long press on an empty cell, then a drag down over the first note: selected.
+  ui.pause();
+  const twill::Rect a = roll.cell_rect(first.start, first.pitch + 2);
+  const twill::Rect b = roll.cell_rect(first.start, first.pitch - 1);
+  CHECK(!a.empty() && !b.empty());
+  ui.pointer(PointerEvent::Down, a.x + a.w / 2, a.y + a.h / 2, 1, true);
+  ui.step(0);
+  ui.platform.advance_ms(600);
+  ui.step(0);
+  for (int i = 1; i <= 6; ++i) {
+    ui.pointer(PointerEvent::Move, a.x + a.w / 2, a.y + a.h / 2 + (b.y - a.y) * i / 6, 1, true);
+    ui.step(0);
+  }
+  ui.pointer(PointerEvent::Up, b.x + b.w / 2, b.y + b.h / 2, 1, true);
+  ui.step(0);
+  bool selected = false;
+  for (uint32_t id : roll.selection()) selected = selected || id == first.id;
+  CHECK(selected);
+  CHECK(ui.clip().notes.size() == before);
+}
+
+void test_ui_pointer_arrangement() {
+  using twill::PointerEvent;
+  using twill::Tick;
+  const Tick bar = 4 * twill::kTicksPerQuarter;
+  UiDriver ui;
+  CHECK(ui.app.view() == twill::App::View::Arrangement);
+  twill::ArrangementView& arr = ui.app.arrangement();
+  auto snare = [&]() -> const std::vector<twill::Placement>& { return ui.app.project().tracks[1].arrangement; };
+  auto find = [&](Tick start) {
+    for (const twill::Placement& pl : snare())
+      if (pl.start == start) return &pl;
+    return static_cast<const twill::Placement*>(nullptr);
+  };
+  CHECK(snare().size() == 1 && snare()[0].start == 2 * bar);
+  ui.tap(twill::kLeft, twill::kL);  // zoomed out: twelve bars in view
+  CHECK(arr.bars_per_cell() == 2);
+
+  // A click on an empty bar: a one-bar clip there, at once, on that track.
+  ui.click(arr.bar_rect(1, 0));
+  CHECK(ui.app.track() == 1);
+  CHECK(snare().size() == 2 && find(0) && find(0)->length == bar);
+
+  // A drag from an empty bar: the new clip as long as it went.
+  ui.pause();
+  const twill::Rect b9 = arr.bar_rect(1, 9), b11 = arr.bar_rect(1, 11);
+  CHECK(!b9.empty() && !b11.empty());
+  ui.drag(b9.x + b9.w / 2, b9.y + b9.h / 2, b11.x + b11.w / 2, b11.y + b11.h / 2);
+  CHECK(find(9 * bar) && find(9 * bar)->length == 3 * bar);
+  ui.app.history().undo();  // one step for the new clip and its length
+  CHECK(!find(9 * bar));
+
+  // A clip dragged a bar back, then its end a bar on.
+  ui.pause();
+  const twill::Rect b3 = arr.bar_rect(1, 3), b2 = arr.bar_rect(1, 2);
+  ui.drag(b3.x + b3.w / 2, b3.y + b3.h / 2, b2.x + b2.w / 2, b2.y + b2.h / 2);
+  CHECK(find(bar) && find(bar)->length == 6 * bar && !find(2 * bar));
+  ui.pause();
+  const twill::Rect b7 = arr.bar_rect(1, 7);
+  ui.drag(b7.x - 2, b7.y + b7.h / 2, b7.x - 2 + b7.w, b7.y + b7.h / 2);
+  CHECK(find(bar) && find(bar)->length == 7 * bar);
+  // Into the clip at bar 0: no room, so it stays.
+  ui.pause();
+  ui.drag(b3.x + b3.w / 2, b3.y + b3.h / 2, b2.x + b2.w / 2 - b2.w, b2.y + b2.h / 2);
+  CHECK(find(bar) && find(0));
+
+  // A double click on a clip: open in the roll.
+  ui.pause();
+  ui.click(b3);
+  ui.click(b3);
+  CHECK(ui.app.view() == twill::App::View::PianoRoll);
+  CHECK(ui.app.open_placement() && ui.app.open_placement()->start == bar);
+  ui.app.show(twill::App::View::Arrangement);
+  ui.step(0);
+
+  // A right-click on a clip: its menu, which deletes it.
+  ui.pause();
+  ui.click(b3, 2);
+  CHECK(ui.app.inspector_open());
+  CHECK(ui.go_to_row("Delete"));
+  ui.tap(twill::kA);
+  CHECK(!ui.app.inspector_open());
+  CHECK(!find(bar) && snare().size() == 1);
+
+  // The header: selects the track; a right-click, its settings.
+  ui.pause();
+  ui.click(arr.header_rect(3));
+  CHECK(ui.app.track() == 3 && arr.cursor_bar() == -1 && !ui.app.inspector_open());
+  ui.pause();
+  ui.click(arr.header_rect(3), 2);
+  CHECK(ui.app.inspector_open() && ui.app.inspector_title() == ui.app.project().tracks[3].name);
+  ui.click(0, ui.canvas.height() - 1);  // off the panel: put away
+  CHECK(!ui.app.inspector_open());
+
+  // The ruler: the cursor to that bar.
+  ui.pause();
+  const twill::Rect r = arr.ruler_rect(), b5 = arr.bar_rect(3, 5);
+  ui.click(b5.x + b5.w / 2, r.y + r.h / 2);
+  CHECK(arr.cursor_bar() == 5);
+
+  // Shift + wheel: along the bars.
+  twill::PointerEvent e;
+  e.type = PointerEvent::Wheel;
+  e.x = b5.x;
+  e.y = b5.y;
+  e.wheel_y = -2;
+  e.shift = true;
+  ui.platform.pointer.push_back(e);
+  ui.step(0);
+  CHECK(arr.scroll_bar() == 4);
+}
+
+void test_ui_touch_arrangement() {
+  using twill::PointerEvent;
+  using twill::Tick;
+  const Tick bar = 4 * twill::kTicksPerQuarter;
+  UiDriver ui;
+  twill::ArrangementView& arr = ui.app.arrangement();
+  auto snare = [&]() -> const std::vector<twill::Placement>& { return ui.app.project().tracks[1].arrangement; };
+  ui.tap(twill::kLeft, twill::kL);  // zoomed out: twelve bars in view
+  // A tap on an empty bar: a clip, on the tap (the press might have been a scroll).
+  const twill::Rect b0 = arr.bar_rect(1, 0);
+  ui.pointer(PointerEvent::Down, b0.x + b0.w / 2, b0.y + b0.h / 2, 1, true);
+  ui.step(0);
+  CHECK(snare().size() == 1);
+  ui.pointer(PointerEvent::Up, b0.x + b0.w / 2, b0.y + b0.h / 2, 1, true);
+  ui.step(0);
+  CHECK(snare().size() == 2 && snare()[0].start == 0);
+
+  // A drag over empty bars: a scroll, and no clip.
+  ui.pause();
+  const twill::Rect b11 = arr.bar_rect(0, 11), b8 = arr.bar_rect(0, 8);
+  CHECK(!b11.empty() && !b8.empty());
+  ui.drag(b11.x + b11.w / 2, b11.y + b11.h / 2, b8.x + b8.w / 2, b8.y + b8.h / 2, 8, true);
+  CHECK(arr.scroll_bar() == 3);
+  CHECK(ui.app.project().tracks[0].arrangement.size() == 1);
+
+  // A long press on a clip: its menu.
+  ui.pause();
+  const twill::Rect c = arr.bar_rect(1, 4);
+  CHECK(!c.empty());
+  ui.pointer(PointerEvent::Down, c.x + c.w / 2, c.y + c.h / 2, 1, true);
+  ui.step(0);
+  ui.platform.advance_ms(600);
+  ui.step(0);
+  CHECK(ui.app.inspector_open());
+  CHECK(ui.go_to_row("Delete"));
+  ui.pointer(PointerEvent::Up, c.x + c.w / 2, c.y + c.h / 2, 1, true);
+  ui.step(0);
+  CHECK(ui.app.inspector_open());  // letting go of the long press does nothing more
+  (void)bar;
+}
+
+void test_ui_pointer_mixer() {
+  UiDriver ui;
+  ui.app.show(twill::App::View::Mixer);
+  ui.step(0);
+  twill::MixerView& mx = ui.app.mixer();
+  const twill::Project& p = ui.app.project();
+  // Kick's level: a press at the foot of its bar, then a drag to the top.
+  const twill::Rect lv = mx.cell_rect(0, twill::MixerView::kLevelRow);
+  ui.click(lv.x + lv.w / 2, lv.bottom() - 1);
+  CHECK(p.tracks[0].level == 0);
+  CHECK(mx.strip() == 0 && mx.row() == twill::MixerView::kLevelRow);
+  ui.pause();
+  ui.drag(lv.x + lv.w / 2, lv.bottom() - 1, lv.x + lv.w / 2, lv.y);
+  CHECK(p.tracks[0].level > 0.99f);
+  ui.app.history().undo();  // the drag is one step
+  CHECK(p.tracks[0].level == 0);
+  // A double click: its default.
+  ui.pause();
+  ui.click(lv);
+  ui.click(lv);
+  CHECK(std::fabs(p.tracks[0].level - 0.8f) < 1e-4f);
+
+  // Snare's pan: the left end; a right-click, the middle.
+  ui.pause();
+  const twill::Rect pan = mx.cell_rect(1, twill::MixerView::kPanRow);
+  ui.click(pan.x, pan.y + pan.h / 2);
+  CHECK(p.tracks[1].pan == -1);
+  CHECK(ui.app.track() == 1);
+  ui.pause();
+  ui.click(pan, 2);
+  CHECK(p.tracks[1].pan == 0);
+  ui.wheel(pan.x + pan.w / 2, pan.y + pan.h / 2, 2);
+  CHECK(std::fabs(p.tracks[1].pan - 0.08f) < 1e-4f);
+
+  // M switches on the press.
+  ui.pause();
+  const twill::Rect m = mx.cell_rect(2, twill::MixerView::kMuteRow);
+  ui.click(m);
+  CHECK(p.tracks[2].mute);
+  ui.pause();
+  ui.click(m);
+  CHECK(!p.tracks[2].mute);
+}
+
+void test_ui_pointer_sound() {
+  UiDriver ui;
+  ui.app.show(twill::App::View::Instrument);
+  ui.step(0);
+  twill::InstrumentView& iv = ui.app.instrument();
+  const twill::Project& p = ui.app.project();
+  const int r = iv.find_row("Timbre");
+  CHECK(r > 0);
+  const twill::Rect bar = iv.value_bar_rect(r), row = iv.row_rect(r);
+  CHECK(!bar.empty());
+  // A press on its bar: selected and set there; a drag goes on setting it, as one undo step.
+  ui.click(bar.x, bar.y);
+  CHECK(iv.selection() == r);
+  CHECK(p.tracks[0].macro.timbre == 0);
+  ui.pause();
+  ui.drag(bar.x, bar.y, bar.right() + 20, bar.y);
+  CHECK(p.tracks[0].macro.timbre == 1);
+  ui.app.history().undo();
+  CHECK(p.tracks[0].macro.timbre == 0);
+  // A right-click: its default.
+  ui.pause();
+  ui.click(row, 2);
+  CHECK(p.tracks[0].macro.timbre == 0.5f);
+  // A click on the selected row, off the bar: a step.
+  ui.pause();
+  ui.click(row.x + 10, row.y + row.h / 2);
+  CHECK(p.tracks[0].macro.timbre > 0.5f);
+  // The wheel off the bars: through the list.
+  ui.wheel(row.x + 10, row.y + row.h / 2, -1);
+  CHECK(iv.selection() == r + 1);
+
+  // A drag across the engine's row: three engines on, to the sampler.
+  ui.pause();
+  const twill::Rect er = iv.row_rect(0);
+  const int step = int(ui.app.u(12));
+  ui.drag(er.x + 10, er.y + er.h / 2, er.x + 10 + 3 * step + step / 2, er.y + er.h / 2);
+  CHECK(p.tracks[0].instrument == twill::InstrumentType::Sampler);
+
+  // The sample's row: selected, then opened (the browser); in it, Factory/ opened, then the first
+  // sample picked.
+  const int sr = iv.find_row("Sample");
+  CHECK(sr > 0);
+  ui.pause();
+  ui.click(iv.row_rect(sr));
+  CHECK(iv.selection() == sr && !iv.browsing());
+  ui.pause();
+  ui.click(iv.row_rect(sr));
+  CHECK(iv.browsing());
+  CHECK(iv.browser_selection() == 1);  // Factory/
+  ui.pause();
+  ui.click(iv.entry_rect(1));
+  CHECK(iv.browsing() && iv.browser_selection() == 1);  // in Factory/: 36 Kick.wav
+  ui.pause();
+  ui.click(iv.entry_rect(1));
+  CHECK(!iv.browsing());
+  CHECK(p.tracks[0].sampler.sample == "samples/Factory/36 Kick.wav");
+  // Opened again and put away with a right-click.
+  ui.pause();
+  ui.click(iv.row_rect(sr));
+  CHECK(iv.browsing());
+  ui.pause();
+  ui.click(iv.entry_rect(1), 2);
+  CHECK(!iv.browsing());
+}
+
+// The recorder on its own: waiting for a sound keeps a moment from before it; the take is trimmed
+// to just before the sound and to where it dies away, normalized, and saved as a WAV.
+// Stereo: the first two channels kept apart, through the wait, the trim and the file.
+void test_recorder_stereo() {
+  twill::NullPlatform p;
+  p.inputs = {"USB Synth"};
+  p.capture_info = {48000, 2};
+  twill::Recorder r(p);
+  std::string err;
+  CHECK(r.open("", err));
+  r.channel = twill::Recorder::kStereo;
+  r.normalize = false;
+  for (int i = 0; i < 4800; ++i) p.capture_feed.insert(p.capture_feed.end(), {0.0f, 0.0f});
+  r.tick();
+  r.start(true);
+  CHECK(r.state() == twill::Recorder::State::Listening && r.take_channels() == 2);
+  // Left loud, right half as loud and the other way up: a decaying tone.
+  for (int i = 0; i < 24000; ++i) {
+    const float x = 0.5f * std::exp(-float(i) / 4800) * std::sin(float(i) * 0.06f);
+    p.capture_feed.insert(p.capture_feed.end(), {x, -0.5f * x});
+  }
+  for (int i = 0; i < 4800; ++i) p.capture_feed.insert(p.capture_feed.end(), {0.0f, 0.0f});
+  r.tick();
+  CHECK(r.state() == twill::Recorder::State::Recording);
+  r.stop();
+  CHECK(r.state() == twill::Recorder::State::Review);
+  CHECK(r.take().size() == r.take_frames() * 2);
+  CHECK(r.keep_end() > r.keep_start() && r.keep_end() <= r.take_frames());
+  const std::vector<float> out = r.result();
+  CHECK(out.size() == (r.keep_end() - r.keep_start()) * 2);
+  bool apart = true;
+  for (size_t i = 0; i + 1 < out.size(); i += 2) apart = apart && std::fabs(out[i + 1] + 0.5f * out[i]) < 1e-5f;
+  CHECK(apart);
+  const std::vector<uint8_t> wav = r.wav();
+  CHECK(wav.size() > 44 && wav[22] == 2);  // two channels in the header
+  // Mono from the same input: one channel.
+  r.cancel();
+  r.channel = 1;
+  r.start(false);
+  CHECK(r.take_channels() == 1);
+}
+
+// The output converted from the engine's 48 kHz to a device's 44.1 kHz: a tone keeps its pitch,
+// its level, and a tone above the new Nyquist doesn't fold back down.
+void test_resampler() {
+  struct Tone {
+    double phase = 0, hz = 1000;
+    static void pull(void* u, float* buf, int n) {
+      Tone* t = static_cast<Tone*>(u);
+      for (int i = 0; i < n; ++i) {
+        buf[2 * i] = float(0.5 * std::sin(t->phase));
+        buf[2 * i + 1] = -buf[2 * i];
+        t->phase += 2 * 3.14159265358979 * t->hz / 48000;
+      }
+    }
+  };
+  for (int rate : {44100, 32000, 96000}) {
+    twill::Resampler rs;
+    rs.reset(48000, rate);
+    Tone tone;
+    std::vector<float> out(2 * size_t(rate));  // a second, in blocks of odd sizes
+    for (size_t done = 0, k = 0; done < size_t(rate); ++k) {
+      const int n = int(std::min<size_t>(size_t(rate) - done, 37 + (k * 101) % 600));
+      rs.process(&out[2 * done], n, &Tone::pull, &tone);
+      done += size_t(n);
+    }
+    // Pitch: rising zero crossings in the last half second, past the start.
+    int rises = 0;
+    double peak = 0;
+    bool apart = true;
+    for (size_t i = size_t(rate / 2) + 1; i < size_t(rate); ++i) {
+      if (out[2 * (i - 1)] < 0 && out[2 * i] >= 0) ++rises;
+      peak = std::max(peak, double(std::fabs(out[2 * i])));
+      apart = apart && std::fabs(out[2 * i] + out[2 * i + 1]) < 1e-4f;
+    }
+    CHECK_MSG(std::abs(rises - 500) <= 1, "%d Hz: %d rises in half a second (1 kHz is 500)", rate, rises);
+    CHECK_MSG(std::fabs(peak - 0.5) < 0.01, "%d Hz: peak %.4f", rate, peak);
+    CHECK(apart);
+  }
+  // 23 kHz is above 44.1 kHz's Nyquist: filtered out, not folded down to 21.1 kHz.
+  twill::Resampler rs;
+  rs.reset(48000, 44100);
+  Tone high;
+  high.hz = 23000;
+  std::vector<float> out(2 * 44100);
+  rs.process(out.data(), 44100, &Tone::pull, &high);
+  double sum = 0;
+  for (size_t i = 22050; i < 44100; ++i) sum += double(out[2 * i]) * out[2 * i];
+  const double db = 10 * std::log10(sum / 22050 / 0.125 + 1e-20);  // against the tone's own power
+  CHECK_MSG(db < -40, "23 kHz left %.1f dB", db);
+}
+
+// A device at 44.1 kHz: Twill's own output callback, called as the device would, keeps the song at
+// its tempo (a second of the device's frames is a second of the song).
+void test_output_at_44k() {
+  UiDriver ui;
+  ui.platform.audio_rate = 44100;
+  CHECK(ui.platform.audio_cb != nullptr);
+  ui.app.start_or_stop();
+  std::vector<float> buf(2 * 441);
+  ui.platform.audio_cb(ui.platform.audio_user, buf.data(), 441);  // the engine takes the command
+  CHECK(ui.app.engine().playing());
+  const twill::Tick start = ui.app.engine().position();
+  for (int i = 0; i < 100; ++i) ui.platform.audio_cb(ui.platform.audio_user, buf.data(), 441);  // one second
+  const double beats = double(ui.app.engine().position() - start) / twill::kTicksPerQuarter;
+  const double want = ui.app.project().tempo / 60.0;
+  CHECK_MSG(std::fabs(beats - want) < 0.02, "%.3f beats in a second (want %.3f)", beats, want);
+}
+
+// A card's samples read directly (AlsaCapture, on Linux handhelds): each format to float.
+void test_alsa_formats() {
+  float f[2];
+  const uint8_t s16[] = {0x00, 0x40, 0x00, 0xC0};  // +0.5, -0.5
+  twill::AlsaCapture::to_float(s16, 2, 2, false, f);
+  CHECK(std::fabs(f[0] - 0.5f) < 1e-6f && std::fabs(f[1] + 0.5f) < 1e-6f);
+  const uint8_t s24_3[] = {0x00, 0x00, 0x40, 0xFF, 0xFF, 0xFF};  // +0.5, the smallest below 0
+  twill::AlsaCapture::to_float(s24_3, 2, 3, false, f);
+  CHECK(std::fabs(f[0] - 0.5f) < 1e-6f && f[1] < 0 && f[1] > -1e-6f);
+  const uint8_t s24[] = {0x00, 0x00, 0xC0, 0x00, 0x00, 0x00, 0x40, 0x00};  // -0.5, +0.5 (top byte unused)
+  twill::AlsaCapture::to_float(s24, 2, 4, true, f);
+  CHECK(std::fabs(f[0] + 0.5f) < 1e-6f && std::fabs(f[1] - 0.5f) < 1e-6f);
+  const uint8_t s32[] = {0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x80};  // +0.5, -1
+  twill::AlsaCapture::to_float(s32, 2, 4, false, f);
+  CHECK(std::fabs(f[0] - 0.5f) < 1e-6f && f[1] == -1.0f);
+}
+
+void test_recorder() {
+  twill::NullPlatform p;
+  p.inputs = {"Test mic"};
+  twill::Recorder r(p);
+  std::string err;
+  CHECK(r.open("", err));
+  CHECK(r.state() == twill::Recorder::State::Ready);
+  auto noise = [&](float seconds, float amp) {
+    uint32_t seed = 7;
+    for (int i = 0; i < int(seconds * 48000); ++i) {
+      seed = seed * 1664525u + 1013904223u;
+      p.capture_feed.push_back(amp * (float(seed >> 8) / float(1 << 23) - 1));
+    }
+  };
+  auto hit = [&](float seconds) {  // a decaying 440 Hz tone
+    for (int i = 0; i < int(seconds * 48000); ++i)
+      p.capture_feed.push_back(0.5f * std::exp(-float(i) / 48000 * 6) * std::sin(float(i) * 2 * 3.14159265f * 440 / 48000));
+  };
+  noise(0.2f, 0.001f);
+  r.tick();
+  CHECK(r.level_db() < -50 && r.level_db() > -70);
+  r.start(true);
+  CHECK(r.state() == twill::Recorder::State::Listening);
+  noise(0.3f, 0.001f);
+  r.tick();
+  CHECK(r.state() == twill::Recorder::State::Listening);
+  hit(1.0f);
+  noise(0.5f, 0.001f);
+  r.tick();
+  CHECK(r.state() == twill::Recorder::State::Recording);
+  // The 50 ms kept from before the sound came first (it triggers a sample or two into the tone).
+  CHECK(r.take().size() <= size_t(2400 + 48000 + 24000) && r.take().size() > size_t(2400 + 48000 + 24000 - 10));
+  r.stop();
+  CHECK(r.state() == twill::Recorder::State::Review);
+  // Trimmed to 5 ms before the tone, and after it has died down into the noise.
+  CHECK(r.keep_start() > 2400 - 240 - 30 && r.keep_start() <= 2400 - 240 + 30);
+  CHECK(r.keep_end() > 2400 + 24000 && r.keep_end() < 2400 + 48000 + 2000);
+  const std::vector<float> out = r.result();
+  float peak = 0;
+  for (float x : out) peak = std::max(peak, std::fabs(x));
+  CHECK(std::fabs(peak - std::pow(10.0f, -1.0f / 20)) < 1e-3f);
+  CHECK(std::fabs(out.back()) < 1e-6f);  // faded out
+  const std::vector<uint8_t> wav = r.wav();
+  CHECK(wav.size() == 44 + out.size() * 2 && wav[0] == 'R' && wav[22] == 1);  // mono
+  std::string e2;
+  auto decoded = twill::decode_sample(wav.data(), wav.size(), "take", e2);
+  CHECK(decoded && decoded->frames == int(out.size()));
+
+  // On A, at once; and it stops by itself at 30 s.
+  r.cancel();
+  r.start(false);
+  CHECK(r.state() == twill::Recorder::State::Recording);
+  noise(31, 0.01f);
+  r.tick();
+  CHECK(r.state() == twill::Recorder::State::Review);
+  CHECK(r.take().size() == size_t(30 * 48000));
+
+  // A stereo input: one channel, or the mix; and the gain.
+  p.capture_info = twill::Platform::CaptureInfo{44100, 2};
+  CHECK(r.open("Test mic", err));
+  CHECK(r.rate() == 44100 && r.input_channels() == 2);
+  r.channel = 1;
+  r.gain_db = 6;
+  r.start(false);
+  for (int i = 0; i < 100; ++i) p.capture_feed.insert(p.capture_feed.end(), {0.1f, 0.2f});
+  r.tick();
+  CHECK(std::fabs(r.take().back() - 0.2f * std::pow(10.0f, 6.0f / 20)) < 1e-5f);
+  r.channel = -1;
+  r.gain_db = 0;
+  p.capture_feed.insert(p.capture_feed.end(), {0.1f, 0.3f});
+  r.tick();
+  CHECK(std::fabs(r.take().back() - 0.2f) < 1e-6f);
+  r.close();
+  CHECK(p.capture_opened == "(closed)");
+}
+
+// The recorder in the sound view: Record opens it, A listens, a sound records, A stops, A keeps:
+// saved in samples/Recorded and into the track, one undo step.
+void test_ui_recorder() {
+  UiDriver ui;
+  ui.platform.inputs = {"Test mic", "USB Synth"};
+  ui.app.show(twill::App::View::Instrument);
+  ui.step(0);
+  for (int i = 0; i < 3; ++i) ui.tap(twill::kRight);  // Kick: engine -> sampler
+  CHECK(ui.app.project().tracks[0].instrument == twill::InstrumentType::Sampler);
+  twill::InstrumentView& iv = ui.app.instrument();
+  const int rec = iv.find_row("Record");
+  CHECK(rec > 0);
+  while (iv.selection() != rec) ui.tap(twill::kDown);
+  const std::string before = ui.app.project().tracks[0].sampler.sample;
+  ui.tap(twill::kA);
+  CHECK(iv.recorder_open());
+  CHECK(ui.platform.capture_opened == "");  // the default input
+  twill::Recorder& r = *iv.recorder();
+
+  // The input: the next one, remembered.
+  CHECK(iv.find_row("Input") == 0);
+  ui.tap(twill::kRight);
+  CHECK(ui.platform.capture_opened == "Test mic");
+  CHECK(ui.app.setting("rec.input") == "Test mic");
+  ui.tap(twill::kDown);  // Channel: mono, nothing to change
+  ui.tap(twill::kDown);  // Gain
+  ui.tap(twill::kRight);
+  CHECK(r.gain_db == 1 && ui.app.setting("rec.gain") == "1");
+  std::vector<uint8_t> settings;
+  CHECK(ui.platform.read_file("settings.txt", settings));
+  CHECK(std::string(settings.begin(), settings.end()).find("rec.gain=1\n") != std::string::npos);
+  ui.tap(twill::kLeft);
+  // Monitoring: off to begin with; on (at the gain) and off again, remembered.
+  ui.step(0);
+  CHECK(!ui.platform.monitor_on);
+  ui.tap(twill::kDown);  // Monitor
+  CHECK(iv.find_row("Monitor") == iv.selection());
+  ui.tap(twill::kRight);
+  ui.step(0);
+  CHECK(ui.platform.monitor_on && ui.app.setting("rec.monitor") == "on");
+  CHECK(std::fabs(ui.platform.monitor_gain - 1.0f) < 1e-4f);
+  ui.tap(twill::kRight);
+  ui.step(0);
+  CHECK(!ui.platform.monitor_on && ui.app.setting("rec.monitor") == "off");
+  ui.tap(twill::kRight);  // on, for the take
+  ui.step(0);
+  CHECK(ui.platform.monitor_on);
+  ui.tap(twill::kUp);
+
+  ui.tap(twill::kA);  // listening
+  CHECK(r.state() == twill::Recorder::State::Listening);
+  for (int i = 0; i < 4800; ++i) ui.platform.capture_feed.push_back(0.0005f);
+  ui.step(0);
+  CHECK(r.state() == twill::Recorder::State::Listening);
+  for (int i = 0; i < 24000; ++i)
+    ui.platform.capture_feed.push_back(0.6f * std::exp(-float(i) / 4800) * std::sin(float(i) * 0.06f));
+  ui.step(0);
+  CHECK(r.state() == twill::Recorder::State::Recording);
+  for (int i = 0; i < 4800; ++i) ui.platform.capture_feed.push_back(0.0005f);
+  ui.step(0);
+  ui.tap(twill::kA);  // stop
+  CHECK(r.state() == twill::Recorder::State::Review);
+  ui.step(0);
+  CHECK(!ui.platform.monitor_on);  // not over the take's playback
+  ui.tap(twill::kA);  // keep
+  CHECK(!iv.recorder_open());
+  CHECK(ui.platform.capture_opened == "(closed)");
+  const std::string path = "samples/Recorded/Kick rec 1.wav";
+  CHECK(ui.platform.files.count(path) == 1);
+  CHECK(ui.app.project().tracks[0].sampler.sample == path);
+  ui.app.history().undo();
+  CHECK(ui.app.project().tracks[0].sampler.sample == before);
+
+  // Again: the next name; leaving the view puts it away.
+  ui.tap(twill::kA);
+  CHECK(iv.recorder_open());
+  CHECK(ui.platform.capture_opened == "Test mic");  // remembered
+  ui.app.show(twill::App::View::Mixer);
+  ui.step(0);
+  CHECK(!iv.recorder_open() && ui.platform.capture_opened == "(closed)");
+}
+
+// An input that won't open (on a handheld, one the sound system holds): the recorder opens the
+// default instead and forgets it, and choosing inputs passes over it.
+void test_ui_recorder_bad_input() {
+  UiDriver ui;
+  ui.platform.inputs = {"Held codec", "USB Synth"};
+  ui.platform.refuse = "Held codec";
+  ui.app.set_setting("rec.input", "Held codec");
+  ui.app.show(twill::App::View::Instrument);
+  ui.step(0);
+  for (int i = 0; i < 3; ++i) ui.tap(twill::kRight);  // Kick: engine -> sampler
+  twill::InstrumentView& iv = ui.app.instrument();
+  const int rec = iv.find_row("Record");
+  CHECK(rec > 0);
+  while (iv.selection() != rec) ui.tap(twill::kDown);
+  ui.tap(twill::kA);
+  CHECK(iv.recorder_open());
+  CHECK(ui.platform.capture_opened == "");
+  CHECK(ui.app.setting("rec.input").empty());
+  ui.tap(twill::kRight);  // past the one that won't open
+  CHECK(iv.recorder_open());
+  CHECK(ui.platform.capture_opened == "USB Synth");
+  CHECK(ui.app.setting("rec.input") == "USB Synth");
+  ui.tap(twill::kLeft);  // back past it again, to the default
+  CHECK(ui.platform.capture_opened == "");
+  ui.tap(twill::kLeft);
+  CHECK(ui.platform.capture_opened == "USB Synth");
+}
+
+// A handheld whose own inputs are all held by its sound system lists none, and still records
+// through the default.
+void test_ui_recorder_default_only() {
+  UiDriver ui;
+  ui.platform.default_input = true;
+  ui.app.set_setting("rec.input", "Held codec");  // remembered, not listed now
+  ui.app.show(twill::App::View::Instrument);
+  ui.step(0);
+  for (int i = 0; i < 3; ++i) ui.tap(twill::kRight);  // Kick: engine -> sampler
+  twill::InstrumentView& iv = ui.app.instrument();
+  const int rec = iv.find_row("Record");
+  CHECK(rec > 0);
+  while (iv.selection() != rec) ui.tap(twill::kDown);
+  ui.tap(twill::kA);
+  CHECK(iv.recorder_open());
+  CHECK(ui.platform.capture_opened == "");
+  CHECK(iv.find_row("Input") == 0);
+  ui.tap(twill::kRight);  // nothing else to choose
+  CHECK(ui.platform.capture_opened == "");
+  CHECK(iv.recorder_open());
+}
+
+// A USB synth is often a MIDI input as well: while the recorder is open its keys don't play the
+// track (only the synth being sampled), and once it's closed they do again.
+void test_ui_recorder_midi_hushed() {
+  UiDriver ui;
+  ui.audio = true;
+  ui.platform.inputs = {"USB Synth"};
+  twill::Track t = ui.app.project().tracks[0];
+  t.instrument = twill::InstrumentType::Sampler;
+  t.sampler.sample = "samples/Factory/36 Kick.wav";
+  ui.app.history().change_track(0, t);
+  for (int i = 0; i < 5; ++i) ui.step(0);
+  ui.app.show(twill::App::View::Instrument);
+  ui.step(0);
+  twill::InstrumentView& iv = ui.app.instrument();
+  const int rec = iv.find_row("Record");
+  CHECK(rec > 0);
+  while (iv.selection() != rec) ui.tap(twill::kDown);
+  ui.tap(twill::kA);
+  CHECK(iv.recorder_open());
+  auto& midi = ui.platform.fake_midi.in;
+  midi.push_back(twill::MidiMessage{0x90, 60, 100});
+  for (int i = 0; i < 4; ++i) ui.step(16);
+  CHECK(ui.app.engine().active_voices() == 0);
+  midi.push_back(twill::MidiMessage{0x80, 60, 0});
+  ui.step(16);
+  ui.app.show(twill::App::View::Mixer);  // puts the recorder away
+  ui.step(0);
+  CHECK(!iv.recorder_open());
+  midi.push_back(twill::MidiMessage{0x90, 60, 100});
+  for (int i = 0; i < 4; ++i) ui.step(16);
+  CHECK(ui.app.engine().active_voices() > 0);
+}
+
+// No output device: the screen says so at the start, and again at Start, which then doesn't
+// "play" a song whose clock (the audio) never runs.
+void test_ui_no_sound_said() {
+  UiDriver ui(true);
+  CHECK(!ui.app.audio_ok());
+  CHECK(ui.app.message_text() == twill::App::kNoSoundMessage);
+  ui.app.message("something else");
+  ui.tap(twill::kStart);
+  CHECK(!ui.app.engine().playing());
+  CHECK(ui.app.message_text() == twill::App::kNoSoundMessage);
+  UiDriver fine;
+  CHECK(fine.app.audio_ok() && fine.app.message_text() != twill::App::kNoSoundMessage);
+}
+
+// A default with nothing to record from (sndstation on the Brick Pro: ALSA's default is the
+// built-in codec, which has no capture device): the recorder opens the first input that works.
+void test_ui_recorder_default_fails() {
+  UiDriver ui;
+  ui.platform.inputs = {"Felucca"};
+  ui.platform.refuse = "";  // the default
+  ui.app.show(twill::App::View::Instrument);
+  ui.step(0);
+  for (int i = 0; i < 3; ++i) ui.tap(twill::kRight);  // Kick: engine -> sampler
+  twill::InstrumentView& iv = ui.app.instrument();
+  const int rec = iv.find_row("Record");
+  while (iv.selection() != rec) ui.tap(twill::kDown);
+  ui.tap(twill::kA);
+  CHECK(iv.recorder_open());
+  CHECK(ui.platform.capture_opened == "Felucca");
+  CHECK(ui.app.setting("rec.input") == "Felucca");
+  ui.tap(twill::kRight);  // the default won't open: still the Felucca
+  CHECK(iv.recorder_open() && ui.platform.capture_opened == "Felucca");
+}
+
+// The recorder with the pointer: the picture is one big button (record, stop), and the rows act
+// as the settings do: Keep, pressed when selected.
+void test_ui_recorder_pointer() {
+  UiDriver ui;
+  ui.platform.inputs = {"Test mic"};
+  ui.app.set_setting("rec.start", "press");
+  ui.app.show(twill::App::View::Instrument);
+  ui.step(0);
+  for (int i = 0; i < 3; ++i) ui.tap(twill::kRight);
+  twill::InstrumentView& iv = ui.app.instrument();
+  const int rec = iv.find_row("Record");
+  ui.click(iv.row_rect(rec));
+  ui.pause();
+  ui.click(iv.row_rect(rec));
+  CHECK(iv.recorder_open());
+  ui.pause();
+  ui.click(iv.picture_rect());
+  CHECK(iv.recorder()->state() == twill::Recorder::State::Recording);
+  for (int i = 0; i < 9600; ++i) ui.platform.capture_feed.push_back(0.3f * std::sin(float(i) * 0.05f));
+  ui.step(0);
+  ui.pause();
+  ui.click(iv.picture_rect());
+  CHECK(iv.recorder()->state() == twill::Recorder::State::Review);
+  const int keep = iv.find_row("Keep");
+  CHECK(keep > 0);
+  ui.pause();
+  ui.click(iv.row_rect(keep));
+  ui.pause();
+  ui.click(iv.row_rect(keep));
+  CHECK(!iv.recorder_open());
+  CHECK(ui.app.project().tracks[0].sampler.sample == "samples/Recorded/Kick rec 1.wav");
+}
+
+// The speakers card: recording from a mic while the song plays asks once; B stops the song.
+void test_ui_recorder_speakers() {
+  UiDriver ui;
+  ui.audio = true;
+  ui.platform.inputs = {"Built-in Microphone"};
+  ui.app.show(twill::App::View::Instrument);
+  ui.step(0);
+  for (int i = 0; i < 3; ++i) ui.tap(twill::kRight);
+  twill::InstrumentView& iv = ui.app.instrument();
+  const int rec = iv.find_row("Record");
+  while (iv.selection() != rec) ui.tap(twill::kDown);
+  ui.tap(twill::kA);
+  CHECK(iv.recorder_open());
+  ui.tap(twill::kStart);
+  ui.step(0);
+  CHECK(ui.app.engine().playing());
+  while (iv.selection() != 5) ui.tap(twill::kDown);  // the Record row
+  ui.tap(twill::kA);
+  CHECK(iv.recorder_warning());
+  CHECK(iv.recorder()->state() == twill::Recorder::State::Ready);
+  ui.tap(twill::kB);
+  ui.step(0);
+  CHECK(!iv.recorder_warning() && !ui.app.engine().playing());
+  CHECK(iv.recorder()->state() == twill::Recorder::State::Listening);
+  ui.tap(twill::kB);  // cancel
+  ui.tap(twill::kStart);
+  ui.step(0);
+  ui.tap(twill::kA);  // once only: straight to listening
+  CHECK(!iv.recorder_warning() && iv.recorder()->state() == twill::Recorder::State::Listening);
+}
+
 void test_ui_inspector_scrolls() {
   UiDriver ui;
   ui.tap(twill::kLeft);  // Kick's header
@@ -3855,6 +4964,28 @@ int main(int argc, char** argv) {
       {"ui_keyboard_into_midi_out_track", test_ui_keyboard_into_midi_out_track},
       {"ui_inspector_scrolls", test_ui_inspector_scrolls},
       {"ui_mixer", test_ui_mixer},
+      {"pointer_gestures", test_pointer_gestures},
+      {"ui_pointer_panels", test_ui_pointer_panels},
+      {"ui_pointer_double_click_opens_once", test_ui_pointer_double_click_opens_once},
+      {"ui_pointer_roll", test_ui_pointer_roll},
+      {"ui_touch_roll", test_ui_touch_roll},
+      {"ui_pointer_arrangement", test_ui_pointer_arrangement},
+      {"ui_touch_arrangement", test_ui_touch_arrangement},
+      {"ui_pointer_mixer", test_ui_pointer_mixer},
+      {"ui_pointer_sound", test_ui_pointer_sound},
+      {"recorder", test_recorder},
+      {"resampler", test_resampler},
+      {"output_at_44k", test_output_at_44k},
+      {"recorder_stereo", test_recorder_stereo},
+      {"alsa_formats", test_alsa_formats},
+      {"ui_recorder", test_ui_recorder},
+      {"ui_no_sound_said", test_ui_no_sound_said},
+      {"ui_recorder_pointer", test_ui_recorder_pointer},
+      {"ui_recorder_bad_input", test_ui_recorder_bad_input},
+      {"ui_recorder_default_only", test_ui_recorder_default_only},
+      {"ui_recorder_default_fails", test_ui_recorder_default_fails},
+      {"ui_recorder_midi_hushed", test_ui_recorder_midi_hushed},
+      {"ui_recorder_speakers", test_ui_recorder_speakers},
       {"ui_project_files", test_ui_project_files},
       {"ui_midi_record_and_clock", test_ui_midi_record_and_clock},
       {"ui_follow_midi_clock", test_ui_follow_midi_clock},

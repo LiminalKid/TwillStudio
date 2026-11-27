@@ -46,7 +46,14 @@ struct Loop {
 
   // False once the app has quit.
   bool step() {
+    static const bool trace = [] {
+      const char* v = std::getenv("TWILL_POINTER_LOG");
+      return v && *v && *v != '0';
+    }();
+    const uint64_t t0 = platform.micros();
     platform.poll_input(input);
+    const bool clicked = !input.pointer.empty();
+    const uint64_t t1 = platform.micros();
     twill::Size size = platform.display_size();
     if (size.w != canvas.width() || size.h != canvas.height()) canvas.resize(size.w, size.h);
 
@@ -55,6 +62,7 @@ struct Loop {
       platform.log(write_ppm(canvas, screenshot) ? "saved %s" : "could not write %s", screenshot);
       return false;
     }
+    const uint64_t t2 = platform.micros();
     std::vector<twill::Rect> dirty = canvas.take_dirty();
     // Nothing changed: keep the last frame on screen rather than presenting it again, except that
     // it is presented every frame for the first two seconds and then once a second. Some drivers
@@ -63,6 +71,14 @@ struct Loop {
     if (!dirty.empty() || frames_shown < 120 || ++idle_frames >= 60) {
       platform.present(canvas.pixels(), canvas.stride(), dirty);
       idle_frames = 0;
+    }
+    // How long a frame with the pointer in it took: reading input, the app (drawing), presenting.
+    if (trace && (clicked || platform.micros() - t0 > 20000)) {
+      long px = 0;
+      for (const twill::Rect& r : dirty) px += long(r.w) * r.h;
+      platform.log("frame: input %.1f ms, app %.1f ms, present %.1f ms; %ld pixels redrawn%s",
+                   (t1 - t0) / 1000.0, (t2 - t1) / 1000.0, (platform.micros() - t2) / 1000.0, px,
+                   clicked ? " (pointer)" : "");
     }
     if (frames_shown < 120) ++frames_shown;
     return true;

@@ -74,6 +74,12 @@ cache, set `EM_CACHE` to a folder you own.
 - `TWILL_VIEW=roll` starts in the piano roll.
 - `TWILL_UI_SCALE=1.5` overrides the UI scale; `TWILL_FULLSCREEN=1` uses the handheld layout on desktop.
 - `SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy` runs without a display or sound device.
+- `TWILL_DATA_DIR=/some/folder` keeps songs, samples and settings there instead of the usual folder.
+- `TWILL_POINTER_LOG=1` logs each mouse or touch event, its gesture, and how long the frame took.
+- `TWILL_CAPTURE=1` lets a handheld record samples. Every handheld launcher sets it: KNULLI,
+  sndstation, TrimUI and NextUI were each tested with a USB synth; PortMaster and muOS weren't.
+- A file named `screenshot.request` in the data folder makes the app save the screen to
+  `screenshots/` and remove the file.
 
 ## Tests
 
