@@ -17,6 +17,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <chrono>
 
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
@@ -174,6 +175,7 @@ bool Sdl2Platform::init() {
   // (otherwise the first click back from another app does nothing).
   SDL_SetHint(SDL_HINT_MOUSE_FOCUS_CLICKTHROUGH, "1");
 #endif
+  log("starting SDL");
   if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_JOYSTICK | SDL_INIT_GAMECONTROLLER) != 0) {
     log("SDL_Init failed: %s", SDL_GetError());
     return false;
@@ -228,6 +230,7 @@ bool Sdl2Platform::init() {
     log("SDL_CreateWindow failed: %s", SDL_GetError());
     return false;
   }
+  log("window open; starting the renderer");
   renderer_ = SDL_CreateRenderer(window_, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
   if (!renderer_) {
     log("accelerated renderer unavailable (%s); trying software", SDL_GetError());
@@ -296,6 +299,8 @@ void Sdl2Platform::update_size() {
 }
 
 void Sdl2Platform::present(const uint32_t* pixels, int stride, const std::vector<Rect>& dirty) {
+  if (presented_ < 2) log(presented_ == 0 ? "showing the first frame" : "first frame shown");
+  ++presented_;
   for (const Rect& r : dirty) {
     SDL_Rect sr{r.x, r.y, r.w, r.h};
     SDL_UpdateTexture(texture_, &sr, pixels + size_t(r.y) * stride + r.x, stride * 4);
@@ -570,6 +575,7 @@ void Sdl2Platform::follow_page_size() {
 }
 
 bool Sdl2Platform::audio_open(int rate, int block, AudioCallback cb, void* user) {
+  log("opening the sound");
   audio_cb_ = cb;
   audio_user_ = user;
   SDL_AudioSpec want{}, have{};
@@ -1105,6 +1111,13 @@ void Sdl2Platform::log(const char* fmt, ...) {
   va_end(args);
   std::fputc('\n', stderr);
   std::fflush(stderr);
+#if defined(TWILL_HANDHELD) && defined(__linux__)
+  // For the first half minute each line goes to the card at once (where the launcher sends the log
+  // to a file): if Twill hangs at the start and the power is held down, the log still says how far
+  // it got. Otherwise the system writes it out later, and a hang loses all of it.
+  static const auto started = std::chrono::steady_clock::now();
+  if (std::chrono::steady_clock::now() - started < std::chrono::seconds(30)) fsync(fileno(stderr));
+#endif
 }
 
 // TWILL_KEEP_AWAKE, set by a handheld's launcher, names files (separated by ':') whose presence keeps

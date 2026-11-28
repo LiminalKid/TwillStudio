@@ -4,7 +4,9 @@
 # saves: the same folder and file names as PortMaster's package, so either one updates the other.
 cd "$(dirname "$0")/twill" || exit 1
 exec > log.txt 2>&1
-echo "Twill Studio for KNULLI, $(date 2>/dev/null); $(cat /usr/share/knulli/knulli.version /usr/share/batocera/batocera.version 2>/dev/null | head -n1)"
+echo "Twill Studio for KNULLI, $(date 2>/dev/null); $(cat /usr/share/knulli/knulli.version /usr/share/batocera/batocera.version 2>/dev/null | head -n1); $(cat /proc/device-tree/model 2>/dev/null | tr -d '\0')"
+# On the card now, not later: if Twill hangs and the power is held down, the log still has this.
+sync
 
 # No helper watches for Select + Start here, as PortMaster's does, so Twill does.
 export TWILL_SELECT_START_QUITS=1

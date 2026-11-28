@@ -147,6 +147,7 @@ class Sdl2Platform : public Platform {
   std::atomic<size_t> capture_write_{0}, capture_read_{0};
   std::string capture_name_;  // the input open now ("" for the default)
   std::atomic<bool> capture_live_{false};
+  int presented_ = 0;  // frames shown, for the log (the first two)
   std::unique_ptr<class AlsaCapture> alsa_in_;  // handhelds: an input read from the card itself  // an input is open (SDL's or a subclass's)
   std::atomic<int> monitor_in_rate_{48000};  // the input's rate, for monitoring at the output's
   bool capture_s16_ = false;          // the input comes as 16-bit (handhelds), converted here

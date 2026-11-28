@@ -9,8 +9,9 @@ Twill is a portable groovebox with built-in synthesizer and sample instrument su
 
 **[Play it in your browser](https://liminalkid.github.io/TwillStudio/play/)**, or see
 [the website](https://liminalkid.github.io/TwillStudio/). It's also on
-[itch.io](https://liminalkid.itch.io/twill-studio). Installing it on KNULLI takes a minute:
-[watch how](https://youtu.be/c9Al1mPP7PQ).
+[itch.io](https://liminalkid.itch.io/twill-studio). See
+[a song made in it, from an empty project](https://youtu.be/x4hyt8XKBQg) (45 seconds). Installing
+it on KNULLI takes a minute: [watch how](https://youtu.be/c9Al1mPP7PQ).
 
 The design for this synth is in the [Docs/DESIGN.md](Docs/DESIGN.md) file.
 
